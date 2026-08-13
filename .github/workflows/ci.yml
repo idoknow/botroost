@@ -23,6 +23,28 @@ jobs:
       - run: pnpm --filter @botroost/web exec playwright install --with-deps chromium
       - run: pnpm --filter @botroost/web e2e -- fixture.spec.ts
       - run: pnpm verify:packages
+  live-e2e:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: verify
+    runs-on: ubuntu-24.04
+    environment: botroost-staging
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22.22.0
+          package-manager-cache: false
+      - run: corepack enable && corepack prepare pnpm@11.17.0 --activate
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @botroost/web exec playwright install --with-deps chromium
+      - name: Run staging browser journey
+        env:
+          LIVE_E2E: '1'
+          BOTROOST_E2E_BASE_URL: ${{ vars.BOTROOST_E2E_BASE_URL }}
+          BOTROOST_E2E_EMAIL: ${{ vars.BOTROOST_E2E_EMAIL }}
+          BOTROOST_E2E_NODE_NAME: ${{ vars.BOTROOST_E2E_NODE_NAME }}
+          BOTROOST_E2E_PASSWORD: ${{ secrets.BOTROOST_E2E_PASSWORD }}
+        run: pnpm --filter @botroost/web exec playwright test e2e/live.spec.ts
       - name: Validate Compose model
         env:
           BOTROOST_PUBLIC_ORIGIN: https://console.example.test
