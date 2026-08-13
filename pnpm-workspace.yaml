@@ -1,8 +1,11 @@
 packages:
   - packages/*
+  - apps/*
 allowBuilds:
+  argon2: true
   esbuild: false
 onlyBuiltDependencies:
+  - argon2
   - esbuild
 catalog:
   zod: ^4.1.12

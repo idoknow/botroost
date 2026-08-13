@@ -6,7 +6,10 @@ export default defineConfig({
       "@botroost/contracts": resolve("packages/contracts/src/index.ts"),
       "@botroost/runtime-sdk": resolve("packages/runtime-sdk/src/index.ts"),
       "@botroost/provider-sdk": resolve("packages/provider-sdk/src/index.ts"),
+      "@botroost/database": resolve("packages/database/src/index.ts"),
+      "@botroost/auth": resolve("packages/auth/src/index.ts"),
+      "@botroost/worker": resolve("apps/worker/src/index.ts"),
     },
   },
-  test: { include: ["packages/**/*.test.ts"] },
+  test: { include: ["packages/**/*.test.ts", "apps/**/*.test.ts"] },
 });

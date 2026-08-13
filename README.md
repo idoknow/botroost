@@ -1,6 +1,6 @@
 # botroost
 
-botroost is currently a **Phase B architecture/contracts slice**, not a complete product. It establishes neutral control-plane contracts, constrained provider/runtime interfaces, deterministic reconciliation, and a durable agent journal.
+botroost is a **backend vertical slice and architecture/contracts foundation**, not a complete product. The API, authentication, worker, and durable control-plane state use real PostgreSQL. The Web console remains a separate thin client surface.
 
 ## Workspace
 
@@ -12,6 +12,10 @@ botroost is currently a **Phase B architecture/contracts slice**, not a complete
 - `packages/agent-journal`: fsync-backed JSONL receipt/effect/result replay.
 - `packages/provider-fake`: contract-test reference provider.
 - `packages/provider-napcat`: declaration/schema/redaction skeleton only.
+- `packages/database`: PostgreSQL schema, idempotent migration, tenant-scoped repositories, outbox.
+- `packages/auth`: Argon2id credentials, opaque server-side sessions, RBAC and CSRF policy.
+- `apps/api`: Fastify HTTP API and one-time owner bootstrap CLI.
+- `apps/worker`: PostgreSQL outbox polling worker; only deterministic `fake` effects execute.
 
 ## Verify
 
@@ -21,7 +25,28 @@ corepack pnpm lint
 corepack pnpm typecheck
 corepack pnpm test
 corepack pnpm build
+corepack pnpm verify:packages
 ```
+
+The integration suite starts a real `postgres:16-alpine` Docker container with a random host port and always removes it. Docker must be available; the four original PostgreSQL tests plus Web-contract regression run without skip.
+
+## Run the backend vertical slice
+
+```sh
+export DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DB
+export CREDENTIAL_MASTER_KEY="$(openssl rand -base64 32)"
+export TRUST_PROXY=false # set true only behind a trusted proxy that sets X-Forwarded-Host
+corepack pnpm --filter @botroost/database build
+corepack pnpm --filter @botroost/auth build
+corepack pnpm --filter @botroost/worker build
+corepack pnpm --filter @botroost/api build
+corepack pnpm --filter @botroost/api bootstrap -- bootstrap --email owner@example.com --password 'replace-with-12+-chars' --workspace Primary
+corepack pnpm --filter @botroost/api start
+# separate process:
+node apps/worker/dist/server.js
+```
+
+`packages/database/migrations/0001_control_plane.sql` is idempotent and enables `pgcrypto`. Cookies are `HttpOnly` (session), `Secure`, and `SameSite=Lax`; every mutation including logout requires same-origin plus the double-submit CSRF token. Node enrollment/revocation is owner/admin-only. Endpoint operation is owner/admin/operator. Viewer is read-only. Member creation deliberately rejects `owner`; ownership transfer is not implemented in this slice. Only provider `fake` is executable; NapCat is returned as unavailable/license-gated.
 
 NapCat has **not** been downloaded, copied, run, integrated, or validated. No license is selected for botroost, so this repository intentionally contains no `LICENSE` file; see `docs/license-boundary.md`.
 

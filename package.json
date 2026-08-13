@@ -10,15 +10,21 @@
     "verify:packages": "node scripts/verify-packages.mjs"
   },
   "dependencies": {
+    "@fastify/cookie": "11.0.2",
+    "argon2": "0.44.0",
+    "drizzle-orm": "0.44.7",
+    "fastify": "5.6.2",
+    "pg": "8.16.3",
     "zod": "^4.1.12"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
     "@types/node": "^22.19.3",
+    "@types/pg": "8.15.6",
     "eslint": "^9.39.1",
+    "turbo": "^2.6.1",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.46.4",
-    "turbo": "^2.6.1",
     "vitest": "^3.2.4"
   }
 }
