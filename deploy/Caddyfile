@@ -1,0 +1,5 @@
+# Copy this block into the Caddy instance attached to SHARED_NETWORK.
+console.example.com {
+  encode zstd gzip
+  reverse_proxy web:8080
+}

@@ -1,0 +1,139 @@
+name: botroost
+
+x-node-hardening: &node-hardening
+  restart: unless-stopped
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  init: true
+
+x-database-env: &database-env
+  DATABASE_HOST: postgres
+  DATABASE_PORT: "5432"
+  DATABASE_USER: botroost
+  DATABASE_NAME: botroost
+  DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: botroost
+      POSTGRES_DB: botroost
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U botroost -d botroost]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+  migrate:
+    <<: *node-hardening
+    restart: "no"
+    build: {context: .., target: migrate}
+    environment: *database-env
+    secrets: [postgres_password]
+    networks: [backend]
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  api:
+    <<: *node-hardening
+    build: {context: .., target: api}
+    environment:
+      <<: *database-env
+      CREDENTIAL_MASTER_KEY_FILE: /run/secrets/credential_master_key
+      BOTROOST_PUBLIC_ORIGIN: "${BOTROOST_PUBLIC_ORIGIN:?set BOTROOST_PUBLIC_ORIGIN}"
+      TRUST_PROXY: "true"
+      PORT: "3000"
+    secrets: [postgres_password, credential_master_key]
+    networks: [backend]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/ready').then(r=>{if(!r.ok)process.exit(1)})"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  worker:
+    <<: *node-hardening
+    build: {context: .., target: worker}
+    environment: *database-env
+    secrets: [postgres_password]
+    networks: [backend]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      api: {condition: service_healthy}
+
+  web:
+    restart: unless-stopped
+    build: {context: .., target: web}
+    read_only: true
+    tmpfs: [/tmp, /var/cache/nginx, /var/run]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [backend, shared-network]
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: [CMD-SHELL, wget -qO- http://127.0.0.1:8080/health >/dev/null]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  bootstrap:
+    <<: *node-hardening
+    profiles: [bootstrap]
+    restart: "no"
+    build: {context: .., target: bootstrap}
+    environment:
+      <<: *database-env
+      BOOTSTRAP_EMAIL: "${BOOTSTRAP_EMAIL:?set BOOTSTRAP_EMAIL}"
+      BOOTSTRAP_WORKSPACE: "${BOOTSTRAP_WORKSPACE:-Primary}"
+      BOOTSTRAP_PASSWORD_FILE: /run/secrets/bootstrap_password
+    secrets: [postgres_password, bootstrap_password]
+    networks: [backend]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  agent:
+    <<: *node-hardening
+    profiles: [bootstrap-agent]
+    build: {context: .., target: agent}
+    environment:
+      CONTROL_PLANE_URL: http://api:3000
+      NODE_STATE_DIR: /var/lib/botroost-agent
+      ENROLLMENT_TOKEN_FILE: /run/secrets/enrollment_token
+    secrets: [enrollment_token]
+    volumes: [agent-state:/var/lib/botroost-agent]
+    networks: [backend]
+    depends_on:
+      api: {condition: service_healthy}
+
+secrets:
+  postgres_password:
+    file: "${POSTGRES_PASSWORD_FILE:-./secrets/postgres_password}"
+  credential_master_key:
+    file: "${CREDENTIAL_MASTER_KEY_FILE:-./secrets/credential_master_key}"
+  bootstrap_password:
+    file: "${BOOTSTRAP_PASSWORD_FILE:-./secrets/bootstrap_password}"
+  enrollment_token:
+    file: "${ENROLLMENT_TOKEN_FILE:-./secrets/enrollment_token}"
+
+volumes:
+  postgres-data:
+  agent-state:
+
+networks:
+  backend: {internal: true}
+  shared-network:
+    external: true
+    name: "${SHARED_NETWORK:-botroost-shared}"

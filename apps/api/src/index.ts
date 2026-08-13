@@ -13,14 +13,17 @@ const nodeInput = z.object({ name: z.string().min(1).max(120), provider: z.strin
 const enrollmentInput = z.object({ name: z.string().min(1).max(120).default("agent"), ttlSeconds: z.number().int().min(60).max(86_400).default(900), labels: z.record(z.string(), z.string()).default({}) });
 const operationInput = z.object({ action: z.enum(["start", "stop", "restart"]), expectedGeneration: z.number().int().nonnegative() });
 const memberInput = z.object({ email: z.string().email(), password: z.string().min(12), role: z.enum(["admin", "operator", "viewer"]) });
+const credentialInput = z.object({ name: z.string().min(1).max(120), value: z.string().min(1).max(16_384) });
 const idParams = z.object({ id: z.string().uuid() });
 const providers = [
-  { id: "fake", capabilities: ["setup", "configure", "observe"], configSchema: { type: "object", additionalProperties: false, properties: {} }, availability: { enabled: true } },
-  { id: "napcat", capabilities: ["configure", "observe"], configSchema: { type: "object", additionalProperties: false, properties: {} }, availability: { enabled: false, reason: "license-gated" } },
+  { id: "fake", capabilities: ["setup", "configure", "observe"], configSchema: [], availability: { enabled: true } },
+  { id: "napcat", capabilities: ["configure", "observe"], configSchema: [], availability: { enabled: false, reason: "license-gated" } },
 ] as const;
 
 type Permission = "read" | "operate" | "manage-members" | "manage-nodes";
-export interface ApiOptions { database?: PostgresDatabase; databaseUrl?: string; credentialKey?: Buffer; trustProxy?: boolean }
+export interface ApiOptions { database?: PostgresDatabase; databaseUrl?: string; credentialKey?: Buffer; trustProxy?: boolean; publicOrigin?: string }
+const page=<T>(items:T[])=>({items,page:1,pageSize:25,total:items.length});
+const rolePermissions:Record<string,string[]>={viewer:["endpoint:read","node:read","provider:read","operation:read","audit:read","workspace:read"],operator:["endpoint:read","endpoint:create","endpoint:update","endpoint:delete","endpoint:start","endpoint:stop","endpoint:restart","node:read","provider:read","operation:read","audit:read","workspace:read"],admin:["endpoint:read","endpoint:create","endpoint:update","endpoint:delete","endpoint:start","endpoint:stop","endpoint:restart","node:read","node:create","node:delete","provider:read","operation:read","audit:read","workspace:read","member:manage","credential:manage"],owner:["endpoint:read","endpoint:create","endpoint:update","endpoint:delete","endpoint:start","endpoint:stop","endpoint:restart","node:read","node:create","node:delete","provider:read","operation:read","audit:read","workspace:read","member:manage","credential:manage"]};
 function token(request: FastifyRequest) { return request.cookies.botroost_session }
 function statusCode(error: unknown): number | undefined { return typeof error === "object" && error !== null && "statusCode" in error && typeof error.statusCode === "number" ? error.statusCode : undefined }
 function fail(message: string, code: number): Error { return Object.assign(new Error(message), { statusCode: code }) }
@@ -32,7 +35,12 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
   if (key.length !== 32) throw new Error("CREDENTIAL_MASTER_KEY must be 32 bytes base64");
   const auth = new AuthService(db);
   const api = Fastify({ trustProxy: options.trustProxy ?? false });
+  const publicOrigin=options.publicOrigin??process.env.BOTROOST_PUBLIC_ORIGIN;
+  if(!publicOrigin)throw new Error("BOTROOST_PUBLIC_ORIGIN is required");
+  const loginAttempts=new Map<string,{count:number;reset:number}>();
+  const origin=new URL(publicOrigin);
   void api.register(cookie);
+  api.addHook("onSend",async(_request,reply,payload)=>{reply.header("x-content-type-options","nosniff").header("x-frame-options","DENY").header("referrer-policy","no-referrer").header("permissions-policy","camera=(), microphone=(), geolocation=()").header("content-security-policy","default-src 'none'; frame-ancestors 'none'");return payload});
   api.setErrorHandler((error, _request, reply) => {
     if (error instanceof ZodError) return reply.code(400).send({ error: { code: "validation_error", message: "invalid request", details: error.issues } });
     if (error instanceof DatabaseError) return reply.code(error.code === "not_found" ? 404 : error.code === "unauthorized" ? 401 : 409).send({ error: { code: error.code, message: error.message } });
@@ -62,25 +70,28 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
   api.addHook("preHandler", async request => {
     if (["GET", "HEAD", "OPTIONS"].includes(request.method) || request.url === "/api/v1/auth/login" || request.url.startsWith("/api/v1/agent/")) return;
     const current = await principal(request);
-    const forwardedHost = options.trustProxy ? request.headers["x-forwarded-host"] : undefined;
-    const host = (Array.isArray(forwardedHost) ? forwardedHost[0] : forwardedHost) ?? request.headers.host ?? "";
     try {
-      requireSameOriginAndCsrf({ method: request.method, host, ...(request.headers.origin ? { origin: request.headers.origin } : {}), ...(request.cookies.botroost_csrf ? { csrfCookie: request.cookies.botroost_csrf } : {}), ...(request.headers["x-csrf-token"] ? { csrfHeader: String(request.headers["x-csrf-token"]) } : {}), expectedCsrfHash: current.csrfHash });
+      requireSameOriginAndCsrf({ method: request.method, host:origin.host, ...(request.headers.origin ? { origin: request.headers.origin } : {}), ...(request.cookies.botroost_csrf ? { csrfCookie: request.cookies.botroost_csrf } : {}), ...(request.headers["x-csrf-token"] ? { csrfHeader: String(request.headers["x-csrf-token"]) } : {}), expectedCsrfHash: current.csrfHash });
     } catch { throw fail("csrf rejected", 403); }
   });
 
   api.get("/health", async () => ({ status: "ok" }));
-  api.get("/ready", async (_request, reply) => { try { await db.ping(); return { status: "ready" }; } catch { return reply.code(503).send({ error: { code: "not_ready", message: "database unavailable" } }); } });
-  api.post("/api/v1/auth/login", async (request, reply) => { const body = credentials.parse(request.body); try { const session = await auth.login(body.email, body.password); reply.header("set-cookie", [session.cookie, `botroost_csrf=${session.csrf}; Path=/; Secure; SameSite=Lax; Max-Age=86400`]); return { expiresAt: session.expiresAt.toISOString() }; } catch { throw fail("invalid credentials", 401); } });
+  api.get("/ready", async (_request, reply) => { try { await db.ping();if(!await db.migrationsReady())throw new Error("schema ledger unavailable"); return { status: "ready" }; } catch { return reply.code(503).send({ error: { code: "not_ready", message: "database or schema unavailable" } }); } });
+  api.post("/api/v1/auth/login", async (request, reply) => {const address=request.ip,now=Date.now(),attempt=loginAttempts.get(address);if(attempt&&attempt.reset>now&&attempt.count>=10)throw fail("too many login attempts",429);if(!attempt||attempt.reset<=now)loginAttempts.set(address,{count:0,reset:now+60_000}); const body = credentials.parse(request.body); try { const session = await auth.login(body.email, body.password);loginAttempts.delete(address); reply.header("set-cookie", [session.cookie, `botroost_csrf=${session.csrf}; Path=/; Secure; SameSite=Lax; Max-Age=86400`]); return { expiresAt: session.expiresAt.toISOString() }; } catch {const current=loginAttempts.get(address)!;current.count++; throw fail("invalid credentials", 401); } });
   api.post("/api/v1/auth/logout", async (request, reply) => { const sessionToken = token(request); if (sessionToken) await auth.logout(sessionToken); reply.header("set-cookie", ["botroost_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0", "botroost_csrf=; Path=/; Secure; SameSite=Lax; Max-Age=0"]); return reply.code(204).send(); });
   api.get("/api/v1/auth/me", async request => { const current = await principal(request); return { user: { id: current.userId, email: current.email }, workspaceId: current.workspaceId, role: current.role }; });
+  api.get("/api/v1/auth/session", async request => {const current=await principal(request),workspace=await db.workspace(current.workspaceId);return{user:{id:current.userId,email:current.email,name:current.email},workspace:{id:current.workspaceId,name:workspace.name},role:current.role,permissions:rolePermissions[current.role],capabilities:{operations:["create","start","stop","restart"],providers:Object.fromEntries(providers.map(provider=>[provider.id,provider.availability])),configurationSchemas:Object.fromEntries(providers.map(provider=>[provider.id,provider.configSchema]))}}});
   api.get("/api/v1/auth/csrf", async request => { await principal(request); return { csrfToken: request.cookies.botroost_csrf }; });
   api.get("/api/v1/workspaces/current", async request => db.workspace((await principal(request)).workspaceId));
   api.get("/api/v1/workspaces/current/summary", async request => db.summary((await principal(request)).workspaceId));
-  api.get("/api/v1/workspaces/current/members", async request => db.members((await principal(request)).workspaceId));
+  api.get("/api/v1/overview", async request => db.summary((await principal(request)).workspaceId));
+  api.get("/api/v1/workspaces/current/members", async request => page(await db.members((await principal(request)).workspaceId)));
+  api.get("/api/v1/workspaces/current/settings", async request => db.workspaceSettings((await principal(request)).workspaceId));
+  api.get("/api/v1/workspaces/current/credentials", async request => page(await db.credentials((await principal(request)).workspaceId)));
+  api.post("/api/v1/workspaces/current/credentials",async(request,reply)=>{const current=await principal(request);if(!["owner","admin"].includes(current.role))throw fail("forbidden",403);const body=credentialInput.parse(request.body);return reply.code(201).send(await db.createCredential(current.workspaceId,body.name,body.value,key))});
   api.post("/api/v1/workspaces/current/members", async (request, reply) => { const current = await authorize(request, "manage-members"); const body = memberInput.parse(request.body); return reply.code(201).send(await auth.addMember(current.workspaceId, body.email, body.password, body.role)); });
-  api.get("/api/v1/providers", async request => { await principal(request); return providers; });
-  api.get("/api/v1/nodes", async request => db.nodes((await principal(request)).workspaceId));
+  api.get("/api/v1/providers", async request => { await principal(request); return page([...providers]); });
+  api.get("/api/v1/nodes", async request => page(await db.nodes((await principal(request)).workspaceId)));
   api.post("/api/v1/nodes", async (request, reply) => { const current = await authorize(request, "manage-nodes"); const body = nodeInput.parse(request.body); return reply.code(201).send(await db.createNode(current.workspaceId, body, key)); });
   api.get("/api/v1/nodes/:id", async (request, reply) => { const current = await principal(request); const result = await db.node(current.workspaceId, idParams.parse(request.params).id); return result ?? reply.code(404).send({ error: { code: "not_found", message: "not found" } }); });
   api.post("/api/v1/nodes/enrollment-tokens", async (request, reply) => { const current = await authorize(request, "manage-nodes"); const body = enrollmentInput.parse(request.body ?? {}); const raw = randomBytes(32).toString("base64url"); const expiresAt = new Date(Date.now() + body.ttlSeconds * 1000); return reply.code(201).send({ ...(await db.createEnrollment(current.workspaceId, digest(raw), expiresAt, { name: body.name, labels: body.labels })), token: raw }); });
@@ -90,16 +101,18 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
   api.post("/api/v1/agent/commands/claim", async request => { const node = await agentNode(request); ClaimCommandRequestSchema.parse(request.body ?? { limit: 1 }); return { command: await db.claimAgentCommand(node.id) }; });
   api.post("/api/v1/agent/commands/:id/receipt", async (request, reply) => { const node = await agentNode(request); await db.recordAgentReceipt(node.id, idParams.parse(request.params).id, CommandReceiptRequestSchema.parse(request.body)); return reply.code(202).send({ accepted: true }); });
   api.post("/api/v1/agent/commands/:id/result", async (request, reply) => { const node = await agentNode(request); await db.recordAgentResult(node.id, idParams.parse(request.params).id, CommandResultRequestSchema.parse(request.body)); return reply.code(202).send({ accepted: true }); });
-  api.get("/api/v1/endpoints", async request => db.endpoints((await principal(request)).workspaceId));
+  api.get("/api/v1/endpoints", async request => page(await db.endpoints((await principal(request)).workspaceId)));
   api.post("/api/v1/endpoints", async (request, reply) => { const current = await authorize(request, "operate"); const body = endpointInput.parse(request.body); if (body.providerId !== "fake") throw fail("provider unavailable", 409); return reply.code(201).send(await db.createEndpoint(current.workspaceId, body.name, body.providerId, body.nodeId)); });
   api.get("/api/v1/endpoints/:id", async (request, reply) => { const current = await principal(request); const result = await db.endpoint(current.workspaceId, idParams.parse(request.params).id); return result ?? reply.code(404).send({ error: { code: "not_found", message: "not found" } }); });
   api.patch("/api/v1/endpoints/:id", async request => { const current = await authorize(request, "operate"); return db.updateEndpoint(current.workspaceId, idParams.parse(request.params).id, endpointName.parse(request.body).name); });
   api.delete("/api/v1/endpoints/:id", async (request, reply) => { const current = await authorize(request, "operate"); await db.deleteEndpoint(current.workspaceId, idParams.parse(request.params).id); return reply.code(204).send(); });
   api.post("/api/v1/endpoints/:id/operations", async (request, reply) => { const current = await authorize(request, "operate"); const body = operationInput.parse(request.body); const idempotencyKey = z.string().min(1).max(200).parse(request.headers["idempotency-key"]); const result = await db.mutateEndpoint({ workspaceId: current.workspaceId, endpointId: idParams.parse(request.params).id, actorUserId: current.userId, ...body, idempotencyKey }); return reply.code(202).send(result.operation); });
-  api.get("/api/v1/operations", async request => db.operations((await principal(request)).workspaceId));
+  api.get("/api/v1/operations", async request => page(await db.operations((await principal(request)).workspaceId)));
   api.get("/api/v1/operations/:id", async (request, reply) => { const current = await principal(request); const result = await db.operation(current.workspaceId, idParams.parse(request.params).id); return result ?? reply.code(404).send({ error: { code: "not_found", message: "not found" } }); });
-  api.get("/api/v1/audit", async request => db.audit((await principal(request)).workspaceId));
+  api.get("/api/v1/audit", async request => page(await db.audit((await principal(request)).workspaceId)));
+  if(!options.database)api.addHook("onClose",async()=>db.close());
   return api;
 }
 
-export async function bootstrapCli(args = process.argv.slice(2)) { if (args[0] !== "bootstrap") throw new Error("usage: api bootstrap --email ... --password ... --workspace ..."); const value = (name: string) => { const index = args.indexOf(name); if (index < 0 || !args[index + 1]) throw new Error(`missing ${name}`); return args[index + 1]!; }; const db = new PostgresDatabase(process.env.DATABASE_URL!); try { await new AuthService(db).bootstrapOwner(value("--email"), value("--password"), value("--workspace")); } finally { await db.close(); } }
+async function stdin(){const chunks:Buffer[]=[];for await(const chunk of process.stdin)chunks.push(Buffer.from(chunk));return Buffer.concat(chunks).toString("utf8").trimEnd()}
+export async function bootstrapCli(args = process.argv.slice(2)) { if (args[0] !== "bootstrap") throw new Error("usage: api bootstrap --email ... --workspace ... (password from BOOTSTRAP_PASSWORD_FILE or stdin)"); const value = (name: string) => { const index = args.indexOf(name); if (index < 0 || !args[index + 1]) throw new Error(`missing ${name}`); return args[index + 1]!; };if(args.includes("--password"))throw new Error("--password is forbidden; use BOOTSTRAP_PASSWORD_FILE or stdin");const {readFile}=await import("node:fs/promises");const password=process.env.BOOTSTRAP_PASSWORD_FILE?(await readFile(process.env.BOOTSTRAP_PASSWORD_FILE,"utf8")).trimEnd():await stdin();if(!password)throw new Error("bootstrap password is required"); const db = new PostgresDatabase(process.env.DATABASE_URL!); try { await new AuthService(db).bootstrapOwner(value("--email"), password, value("--workspace")); } finally { await db.close(); } }

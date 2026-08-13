@@ -17,5 +17,16 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
+      - run: pnpm --filter @botroost/web test
       - run: pnpm build
+      - run: pnpm --filter @botroost/web build
       - run: pnpm verify:packages
+      - name: Validate Compose model
+        env:
+          BOTROOST_PUBLIC_ORIGIN: https://console.example.test
+          BOOTSTRAP_EMAIL: owner@example.test
+        run: |
+          mkdir -p deploy/secrets
+          touch deploy/secrets/postgres_password deploy/secrets/credential_master_key deploy/secrets/bootstrap_password deploy/secrets/enrollment_token
+          docker network create botroost-shared
+          docker compose -f deploy/compose.yml --profile bootstrap --profile bootstrap-agent config --quiet
