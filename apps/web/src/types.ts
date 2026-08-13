@@ -1,0 +1,10 @@
+export type Page<T>={items:T[];page:number;pageSize:number;total:number};
+export type Status={node:string;runtime:string;provider:string;protocol:string;convergence:string};
+export type Capabilities={operations:string[];providers?:Record<string,{enabled:boolean;reason?:string}>;configurationSchema?:SchemaField[];tabs?:string[]};
+export type Session={user:{id:string;email:string;name:string};workspace:{id:string;name:string};permissions:string[];capabilities:Capabilities};
+export type Endpoint={id:string;name:string;providerId:string;nodeId:string;status:Status;activeOperationId:string|null;configuration?:Record<string,unknown>};
+export type Node={id:string;name:string;state:string;lastSeenAt?:string};
+export type Provider={id:string;name:string;enabled:boolean;reason?:string};
+export type Operation={id:string;endpointId:string;kind:string;state:string;createdAt?:string;error?:string};
+export type AuditEvent={id:string;action:string;actor:string;createdAt:string;target?:string};
+export type SchemaField={key:string;label?:string;type:'string'|'number'|'boolean'|'enum'|'secretRef'|string;required?:boolean;options?:string[];value?:unknown};

@@ -1,0 +1,1 @@
+{"extends":"../../tsconfig.base.json","compilerOptions":{"module":"ESNext","moduleResolution":"Bundler","jsx":"react-jsx","types":["vitest/globals","@testing-library/jest-dom","node"],"declaration":false,"outDir":"dist"},"include":["src","tests","vite.config.ts","playwright.config.ts"]}

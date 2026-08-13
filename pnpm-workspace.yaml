@@ -4,6 +4,9 @@ packages:
 allowBuilds:
   argon2: true
   esbuild: false
+  # Transitive optional Vitest peer; the web app does not import MSW.
+  msw: false
+
 onlyBuiltDependencies:
   - argon2
   - esbuild

@@ -1,0 +1,12 @@
+const ROOT='/api/v1';
+export class ApiError extends Error{constructor(public status:number,message:string){super(message);this.name='ApiError'}}
+export class ApiClient{
+ private csrf?:string;
+ constructor(private fetcher?:typeof fetch){}
+ async raw(path:string,init:RequestInit={}){const response=await (this.fetcher??globalThis.fetch)(`${ROOT}${path}`,{...init,credentials:'include',headers:{Accept:'application/json',...init.headers}});if(response.status===401){const returnTo=location.pathname+location.search;if(!location.pathname.startsWith('/login'))history.replaceState({},'',`/login?returnTo=${encodeURIComponent(returnTo)}`);throw new ApiError(401,'Authentication required')}if(!response.ok)throw new ApiError(response.status,response.status===404?'Unavailable':`Request failed (${response.status})`);return response}
+ async get<T>(path:string):Promise<T>{return (await this.raw(path)).json() as Promise<T>}
+ private async csrfToken(){if(!this.csrf)this.csrf=(await this.get<{token:string}>('/auth/csrf')).token;return this.csrf}
+ async mutate<T>(path:string,body?:unknown,method='POST'):Promise<T>{const token=await this.csrfToken();const init:RequestInit={method,headers:{'Content-Type':'application/json','X-CSRF-Token':token,'Idempotency-Key':crypto.randomUUID()}};if(body!==undefined)init.body=JSON.stringify(body);const response=await this.raw(path,init);return response.status===204?undefined as T:response.json() as Promise<T>}
+ async requestSecret<T>(path:string,body?:unknown):Promise<T>{const value=await this.mutate<T>(path,body);return value}
+}
+export const api=new ApiClient();
