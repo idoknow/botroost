@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { chmod, mkdir, open, rename, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { FileAgentJournal } from "@botroost/agent-journal";
 import {
@@ -33,15 +33,30 @@ export class NodeCredentialStore {
   }
   async write(credential: NodeCredential): Promise<void> {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
-    const temporary = `${this.path}.${process.pid}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(credential)}\n`, {
-      encoding: "utf8",
-      mode: 0o600,
-      flag: "wx",
-    });
-    await chmod(temporary, 0o600);
-    await rename(temporary, this.path);
-    await chmod(this.path, 0o600);
+    try {
+      const existing = await lstat(this.path);
+      if (!existing.isFile() || existing.isSymbolicLink())
+        throw new Error("credential path must be a regular file");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const temporary = `${this.path}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      const file = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+      try {
+        await file.writeFile(`${JSON.stringify(credential)}\n`, "utf8");
+        await file.sync();
+      } finally {
+        await file.close();
+      }
+      await chmod(temporary, 0o600);
+      await rename(temporary, this.path);
+      const directory = await open(this.directory, constants.O_RDONLY | constants.O_DIRECTORY);
+      try { await directory.sync(); } finally { await directory.close(); }
+    } catch (error) {
+      await unlink(temporary).catch(() => undefined);
+      throw error;
+    }
   }
 }
 
@@ -159,10 +174,8 @@ export class DurableFakeAgent {
       connectionEpoch: command.connectionEpoch,
     };
     const existing = this.journal.get(command.commandId);
-    if (!existing?.receipt) {
-      await this.journal.recordReceipt(command.commandId, receipt);
-      await this.transport.receipt(command.commandId, receipt);
-    }
+    if (!existing?.receipt) await this.journal.recordReceipt(command.commandId, receipt);
+    await this.transport.receipt(command.commandId, receipt);
     let result = this.journal.get(command.commandId)?.result;
     if (!result) {
       if (!this.journal.get(command.commandId)?.effects.runtime)

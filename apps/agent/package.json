@@ -12,6 +12,7 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src test",
+    "test": "vitest run test/agent.test.ts",
     "start": "node dist/cli.js"
   },
   "dependencies": {

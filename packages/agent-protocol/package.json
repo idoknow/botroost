@@ -11,7 +11,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "eslint src test"
+    "lint": "eslint src test",
+    "test": "vitest run test/agent-protocol.test.ts"
   },
   "dependencies": {
     "@botroost/runtime-sdk": "workspace:*",

@@ -29,16 +29,11 @@ describe("agent protocol", () => {
       AgentHeartbeatRequestSchema.parse({
         status: "online",
         observedAt: "2026-08-13T00:00:00.000Z",
-        runtimes: [
-          {
-            endpointId: "ep-1",
-            generation: 1,
-            runtime: "ready",
-            provider: "available",
-            protocol: "connected",
-            convergence: "reconciling",
-          },
-        ],
+        agentVersion: "1.2.3",
+        os: "linux",
+        arch: "x64",
+        capacity: { cpuMillis: 2000, memoryMiB: 4096 },
+        runtimes: [],
       }),
     ).toMatchObject({ status: "online" });
 
@@ -48,6 +43,22 @@ describe("agent protocol", () => {
         observedAt: "2026-08-13T00:00:00.000Z",
         runtimes: [],
         token: "must-not-be-accepted",
+      }),
+    ).toThrow();
+
+    expect(() =>
+      AgentHeartbeatRequestSchema.parse({
+        status: "online",
+        observedAt: "2026-08-13T00:00:00.000Z",
+        runtimes: [{
+          endpointId: "ep-1",
+          generation: 1,
+          runtime: "ready",
+          provider: "available",
+          protocol: "connected",
+          convergence: "converged",
+          metadata: { secret: "must-not-be-accepted" },
+        }],
       }),
     ).toThrow();
   });

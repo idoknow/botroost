@@ -30,6 +30,13 @@ export const AgentEnrollmentRequestSchema = z.strictObject({
 export const AgentHeartbeatRequestSchema = z.strictObject({
   status: z.enum(["online", "draining"]),
   observedAt: isoDate,
+  agentVersion: z.string().min(1).max(120).optional(),
+  os: z.string().min(1).max(80).optional(),
+  arch: z.string().min(1).max(80).optional(),
+  capacity: z.strictObject({
+    cpuMillis: z.number().int().nonnegative(),
+    memoryMiB: z.number().int().nonnegative(),
+  }).optional(),
   runtimes: z.array(
     z.strictObject({
       endpointId: id,
@@ -38,7 +45,6 @@ export const AgentHeartbeatRequestSchema = z.strictObject({
       provider: layered.shape.provider,
       protocol: layered.shape.protocol,
       convergence: layered.shape.convergence,
-      metadata: jsonObject.optional(),
     }),
   ).max(200),
 });
