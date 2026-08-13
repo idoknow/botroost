@@ -8,7 +8,7 @@ const caddy = readFileSync(resolve(root, "deploy/Caddyfile"), "utf8");
 
 describe("deployment release configuration", () => {
   it("keeps proxy trust explicit and exposes the production Caddy host on the shared network", () => {
-    expect(compose).toContain('TRUST_PROXY: "false"');
+    expect(compose).toContain('TRUST_PROXY: "1"');
     expect(compose).not.toContain('TRUST_PROXY: "true"');
     expect(compose).toContain("shared-network:");
     expect(caddy).toContain("botroost.facrd.xyz");
