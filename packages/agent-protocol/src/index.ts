@@ -29,6 +29,7 @@ export const AgentEnrollmentRequestSchema = z.strictObject({
 });
 export const AgentHeartbeatRequestSchema = z.strictObject({
   status: z.enum(["online", "draining"]),
+  sessionId: id.default("legacy-session"),
   observedAt: isoDate,
   agentVersion: z.string().min(1).max(120).optional(),
   os: z.string().min(1).max(80).optional(),

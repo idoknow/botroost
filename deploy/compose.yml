@@ -51,7 +51,7 @@ services:
       <<: *database-env
       CREDENTIAL_MASTER_KEY_FILE: /run/secrets/credential_master_key
       BOTROOST_PUBLIC_ORIGIN: "${BOTROOST_PUBLIC_ORIGIN:?set BOTROOST_PUBLIC_ORIGIN}"
-      TRUST_PROXY: "true"
+      TRUST_PROXY: "1"
       PORT: "3000"
     secrets: [postgres_password, credential_master_key]
     networks: [backend]

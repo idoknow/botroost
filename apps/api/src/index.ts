@@ -1,10 +1,11 @@
-import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyRequest, type FastifyServerOptions } from "fastify";
 import cookie from "@fastify/cookie";
 import { randomBytes } from "node:crypto";
 import { z, ZodError } from "zod";
 import { AuthService, can, requireSameOriginAndCsrf } from "@botroost/auth";
 import { DatabaseError, digest, PostgresDatabase } from "@botroost/database";
 import { AgentEnrollmentRequestSchema, AgentHeartbeatRequestSchema, ClaimCommandRequestSchema, CommandReceiptRequestSchema, CommandResultRequestSchema } from "@botroost/agent-protocol";
+import { LoginAttemptLimiter } from "./security-policy.js";
 
 const credentials = z.object({ email: z.string().email(), password: z.string().min(12) });
 const endpointInput = z.object({ name: z.string().min(1).max(120), providerId: z.string().min(1), nodeId: z.string().uuid().optional() });
@@ -21,7 +22,7 @@ const providers = [
 ] as const;
 
 type Permission = "read" | "operate" | "manage-members" | "manage-nodes";
-export interface ApiOptions { database?: PostgresDatabase; databaseUrl?: string; credentialKey?: Buffer; trustProxy?: boolean; publicOrigin?: string }
+export interface ApiOptions { database?: PostgresDatabase; databaseUrl?: string; credentialKey?: Buffer; trustProxy?: FastifyServerOptions["trustProxy"]; publicOrigin?: string }
 const page=<T>(items:T[])=>({items,page:1,pageSize:25,total:items.length});
 const rolePermissions:Record<string,string[]>={viewer:["endpoint:read","node:read","provider:read","operation:read","audit:read","workspace:read"],operator:["endpoint:read","endpoint:create","endpoint:update","endpoint:delete","endpoint:start","endpoint:stop","endpoint:restart","node:read","provider:read","operation:read","audit:read","workspace:read"],admin:["endpoint:read","endpoint:create","endpoint:update","endpoint:delete","endpoint:start","endpoint:stop","endpoint:restart","node:read","node:create","node:delete","provider:read","operation:read","audit:read","workspace:read","member:manage","credential:manage"],owner:["endpoint:read","endpoint:create","endpoint:update","endpoint:delete","endpoint:start","endpoint:stop","endpoint:restart","node:read","node:create","node:delete","provider:read","operation:read","audit:read","workspace:read","member:manage","credential:manage"]};
 function token(request: FastifyRequest) { return request.cookies.botroost_session }
@@ -37,7 +38,7 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
   const api = Fastify({ trustProxy: options.trustProxy ?? false });
   const publicOrigin=options.publicOrigin??process.env.BOTROOST_PUBLIC_ORIGIN;
   if(!publicOrigin)throw new Error("BOTROOST_PUBLIC_ORIGIN is required");
-  const loginAttempts=new Map<string,{count:number;reset:number}>();
+  const loginAttempts=new LoginAttemptLimiter();
   const origin=new URL(publicOrigin);
   void api.register(cookie);
   api.addHook("onSend",async(_request,reply,payload)=>{reply.header("x-content-type-options","nosniff").header("x-frame-options","DENY").header("referrer-policy","no-referrer").header("permissions-policy","camera=(), microphone=(), geolocation=()").header("content-security-policy","default-src 'none'; frame-ancestors 'none'");return payload});
@@ -77,7 +78,7 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
 
   api.get("/health", async () => ({ status: "ok" }));
   api.get("/ready", async (_request, reply) => { try { await db.ping();if(!await db.migrationsReady())throw new Error("schema ledger unavailable"); return { status: "ready" }; } catch { return reply.code(503).send({ error: { code: "not_ready", message: "database or schema unavailable" } }); } });
-  api.post("/api/v1/auth/login", async (request, reply) => {const address=request.ip,now=Date.now(),attempt=loginAttempts.get(address);if(attempt&&attempt.reset>now&&attempt.count>=10)throw fail("too many login attempts",429);if(!attempt||attempt.reset<=now)loginAttempts.set(address,{count:0,reset:now+60_000}); const body = credentials.parse(request.body); try { const session = await auth.login(body.email, body.password);loginAttempts.delete(address); reply.header("set-cookie", [session.cookie, `botroost_csrf=${session.csrf}; Path=/; Secure; SameSite=Lax; Max-Age=86400`]); return { expiresAt: session.expiresAt.toISOString() }; } catch {const current=loginAttempts.get(address)!;current.count++; throw fail("invalid credentials", 401); } });
+  api.post("/api/v1/auth/login", async (request, reply) => {const body = credentials.parse(request.body),address=request.ip;if(loginAttempts.isBlocked(body.email,address))throw fail("too many login attempts",429); try { const session = await auth.login(body.email, body.password);loginAttempts.recordSuccess(); reply.header("set-cookie", [session.cookie, `botroost_csrf=${session.csrf}; Path=/; Secure; SameSite=Lax; Max-Age=86400`]); return { expiresAt: session.expiresAt.toISOString() }; } catch {loginAttempts.recordFailure(body.email,address); throw fail("invalid credentials", 401); } });
   api.post("/api/v1/auth/logout", async (request, reply) => { const sessionToken = token(request); if (sessionToken) await auth.logout(sessionToken); reply.header("set-cookie", ["botroost_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0", "botroost_csrf=; Path=/; Secure; SameSite=Lax; Max-Age=0"]); return reply.code(204).send(); });
   api.get("/api/v1/auth/me", async request => { const current = await principal(request); return { user: { id: current.userId, email: current.email }, workspaceId: current.workspaceId, role: current.role }; });
   api.get("/api/v1/auth/session", async request => {const current=await principal(request),workspace=await db.workspace(current.workspaceId);return{user:{id:current.userId,email:current.email,name:current.email},workspace:{id:current.workspaceId,name:workspace.name},role:current.role,permissions:rolePermissions[current.role],capabilities:{operations:["create","start","stop","restart"],providers:Object.fromEntries(providers.map(provider=>[provider.id,provider.availability])),configurationSchemas:Object.fromEntries(providers.map(provider=>[provider.id,provider.configSchema]))}}});

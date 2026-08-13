@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   DurableFakeAgent,
   FakeRuntime,
+  HttpAgentTransport,
   NodeCredentialStore,
   type AgentCommandTransport,
 } from "../src/index.js";
@@ -48,6 +49,32 @@ const command = {
 };
 
 describe("durable fake agent", () => {
+  it("passes abort signals to every HTTP request and enforces a timeout", async () => {
+    const originalFetch = globalThis.fetch;
+    const signals: AbortSignal[] = [];
+    globalThis.fetch = ((_url: URL | RequestInfo, init?: RequestInit) => {
+      signals.push(init?.signal as AbortSignal);
+      return Promise.resolve(new Response(JSON.stringify({ connectionEpoch: 1 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }));
+    }) as typeof fetch;
+    try {
+      const controller = new AbortController();
+      const transport = new HttpAgentTransport("https://control.test", "secret", {
+        signal: controller.signal,
+        timeoutMs: 50,
+      });
+      await transport.heartbeat();
+      expect(signals).toHaveLength(1);
+      expect(signals[0]).toBeInstanceOf(AbortSignal);
+      controller.abort();
+      expect(signals[0]!.aborted).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("writes node credentials 0600 and enrolls only on first start", async () => {
     const dir = await mkdtemp(join(tmpdir(), "botroost-agent-"));
     const store = new NodeCredentialStore(dir);
@@ -109,6 +136,24 @@ describe("durable fake agent", () => {
     expect(runtime.effectsFor("endpoint-1")).toEqual(["start"]);
     expect(secondTransport.receipts).toEqual(["cmd-1"]);
     expect(secondTransport.results).toHaveLength(1);
+  });
+
+  it("deduplicates a stable runtime effect after apply succeeds before the agent journal records it", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "botroost-agent-"));
+    const runtimeState = join(dir, "runtime-effects.json");
+    const runtime = await FakeRuntime.open(runtimeState);
+    const effectId = `runtime:${command.commandId}`;
+    await runtime.apply(effectId, command);
+
+    const replay = new MemoryTransport(command);
+    const agent = await DurableFakeAgent.open({ journalPath: join(dir, "journal"), runtime, transport: replay });
+    await agent.pollOnce();
+    await agent.close();
+
+    expect(runtime.effectsFor("endpoint-1")).toEqual(["start"]);
+    expect(JSON.parse(await readFile(runtimeState, "utf8"))).toMatchObject({
+      effects: { [effectId]: { status: "applied", endpointId: "endpoint-1" } },
+    });
   });
 
   it("replays a durable receipt after disconnect without repeating the effect", async () => {

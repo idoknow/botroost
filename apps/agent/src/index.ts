@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, rename, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { FileAgentJournal } from "@botroost/agent-journal";
 import {
@@ -83,11 +83,15 @@ export interface AgentCommandTransport {
 }
 
 export class HttpAgentTransport implements AgentCommandTransport {
+  private readonly sessionId=crypto.randomUUID();
   constructor(
     private readonly controlPlaneUrl: string,
     private readonly nodeSecret: string,
+    private readonly options: { signal?: AbortSignal; timeoutMs?: number } = {},
   ) {}
   private async request<T>(path: string, payload: unknown): Promise<T> {
+    const timeout = AbortSignal.timeout(this.options.timeoutMs ?? 15_000);
+    const signal = this.options.signal ? AbortSignal.any([this.options.signal, timeout]) : timeout;
     const response = await fetch(new URL(path, this.controlPlaneUrl), {
       method: "POST",
       headers: {
@@ -95,6 +99,7 @@ export class HttpAgentTransport implements AgentCommandTransport {
         "content-type": "application/json",
       },
       body: JSON.stringify(payload),
+      signal,
     });
     if (!response.ok) throw new Error(`control plane request failed: ${response.status}`);
     return response.status === 204 ? (undefined as T) : ((await response.json()) as T);
@@ -102,6 +107,7 @@ export class HttpAgentTransport implements AgentCommandTransport {
   heartbeat() {
     return this.request<{ connectionEpoch: number }>("/api/v1/agent/heartbeat", {
       status: "online",
+      sessionId:this.sessionId,
       observedAt: new Date().toISOString(),
       runtimes: [],
     });
@@ -123,7 +129,31 @@ export class FakeRuntime {
   private readonly endpointQueues = new Map<string, Promise<void>>();
   private readonly effects = new Map<string, string[]>();
   private readonly states = new Map<string, "running" | "stopped">();
-  async apply(command: RuntimeCommand): Promise<{ state: "running" | "stopped" }> {
+  private readonly effectRecords = new Map<string,{status:"applied";endpointId:string;action:string;state:"running"|"stopped"}>();
+  constructor(private readonly statePath?: string) {}
+  static async open(statePath: string) {
+    const runtime = new FakeRuntime(statePath);
+    try {
+      const state = JSON.parse(await readFile(statePath, "utf8")) as {effects:Record<string,{status:"applied";endpointId:string;action:string;state:"running"|"stopped"}>};
+      for (const [effectId, effect] of Object.entries(state.effects ?? {})) {
+        runtime.effectRecords.set(effectId, effect);
+        runtime.effects.set(effect.endpointId, [...(runtime.effects.get(effect.endpointId) ?? []), effect.action]);
+        runtime.states.set(effect.endpointId, effect.state);
+      }
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    return runtime;
+  }
+  private async persist() {
+    if (!this.statePath) return;
+    const temporary = `${this.statePath}.${process.pid}.tmp`;
+    await writeFile(temporary, `${JSON.stringify({effects:Object.fromEntries(this.effectRecords)})}\n`, {mode:0o600});
+    await rename(temporary, this.statePath);
+  }
+  async apply(effectOrCommand: string | RuntimeCommand, maybeCommand?: RuntimeCommand): Promise<{ state: "running" | "stopped" }> {
+    const command = typeof effectOrCommand === "string" ? maybeCommand! : effectOrCommand;
+    const effectId = typeof effectOrCommand === "string" ? effectOrCommand : `runtime:${command.commandId}`;
+    const existing = this.effectRecords.get(effectId);
+    if (existing) return { state: existing.state };
     let release!: () => void;
     const previous = this.endpointQueues.get(command.endpointId) ?? Promise.resolve();
     const current = new Promise<void>((resolve) => {
@@ -132,11 +162,15 @@ export class FakeRuntime {
     this.endpointQueues.set(command.endpointId, previous.then(() => current));
     await previous;
     try {
+      const replay = this.effectRecords.get(effectId);
+      if (replay) return { state: replay.state };
       const list = this.effects.get(command.endpointId) ?? [];
       list.push(command.action);
       this.effects.set(command.endpointId, list);
       const state = command.action === "stop" ? "stopped" : "running";
       this.states.set(command.endpointId, state);
+      this.effectRecords.set(effectId,{status:"applied",endpointId:command.endpointId,action:command.action,state});
+      await this.persist();
       return { state };
     } finally {
       release();
@@ -178,8 +212,9 @@ export class DurableFakeAgent {
     await this.transport.receipt(command.commandId, receipt);
     let result = this.journal.get(command.commandId)?.result;
     if (!result) {
-      if (!this.journal.get(command.commandId)?.effects.runtime)
-        await this.journal.recordEffect(command.commandId, "runtime", await this.runtime.apply(command));
+      const effectId=`runtime:${command.commandId}`;
+      if (!this.journal.get(command.commandId)?.effects[effectId])
+        await this.journal.recordEffect(command.commandId, effectId, await this.runtime.apply(effectId,command));
       result = {
         operationId: command.operationId,
         endpointId: command.endpointId,
@@ -211,17 +246,19 @@ export class DurableFakeAgent {
   }
 }
 
-export async function enroll(controlPlaneUrl: string, token: string, provider = "fake"): Promise<NodeCredential> {
+export async function enroll(controlPlaneUrl: string, token: string, provider = "fake", signal?:AbortSignal): Promise<NodeCredential> {
+  const timeout=AbortSignal.timeout(15_000);
   const response = await fetch(new URL("/api/v1/agent/enroll", controlPlaneUrl), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ token, provider, version: "botroost-agent" }),
+    signal:signal?AbortSignal.any([signal,timeout]):timeout,
   });
   if (!response.ok) throw new Error(`enrollment failed: ${response.status}`);
   return (await response.json()) as NodeCredential;
 }
 
-export async function startAgentFromEnv(): Promise<DurableFakeAgent> {
+export async function startAgentFromEnv(signal?:AbortSignal): Promise<DurableFakeAgent> {
   const controlPlaneUrl = process.env.CONTROL_PLANE_URL;
   const nodeStateDir = process.env.NODE_STATE_DIR;
   if (!controlPlaneUrl || !nodeStateDir)
@@ -231,17 +268,19 @@ export async function startAgentFromEnv(): Promise<DurableFakeAgent> {
   if (!credential) {
     const token = process.env.ENROLLMENT_TOKEN;
     if (!token) throw new Error("ENROLLMENT_TOKEN is required for first start");
-    credential = await enroll(controlPlaneUrl, token);
+    credential = await enroll(controlPlaneUrl, token,"fake",signal);
     await store.write(credential);
   }
   return DurableFakeAgent.open({
     journalPath: join(nodeStateDir, "agent-journal.jsonl"),
-    transport: new HttpAgentTransport(controlPlaneUrl, credential.nodeSecret),
+    runtime: await FakeRuntime.open(join(nodeStateDir,"runtime-effects.json")),
+    transport: new HttpAgentTransport(controlPlaneUrl, credential.nodeSecret,signal?{signal}:{}),
   });
 }
 
 AgentHeartbeatRequestSchema.parse({
   status: "online",
+  sessionId:"schema-check",
   observedAt: new Date().toISOString(),
   runtimes: [],
 });
