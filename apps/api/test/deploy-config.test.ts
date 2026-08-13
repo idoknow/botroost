@@ -37,5 +37,7 @@ describe("deployment release configuration", () => {
     const postgresService = compose.match(/ {2}postgres:[\s\S]*?(?=\n {2}migrate:)/)?.[0] ?? "";
     expect(postgresService).not.toContain("cap_drop: [ALL]");
     expect(postgresService).not.toContain("<<: *node-hardening");
+    const nodeHardening = compose.match(/x-node-hardening:[\s\S]*?(?=\nx-database-env:)/)?.[0] ?? "";
+    expect(nodeHardening).not.toContain("cap_drop: [ALL]");
   });
 });
