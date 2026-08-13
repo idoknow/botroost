@@ -20,6 +20,8 @@ jobs:
       - run: pnpm --filter @botroost/web test
       - run: pnpm build
       - run: pnpm --filter @botroost/web build
+      - run: pnpm --filter @botroost/web exec playwright install --with-deps chromium
+      - run: pnpm --filter @botroost/web e2e -- fixture.spec.ts
       - run: pnpm verify:packages
       - name: Validate Compose model
         env:

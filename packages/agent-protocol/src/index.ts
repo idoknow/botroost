@@ -66,6 +66,7 @@ export const RuntimeCommandSchema = z.strictObject({
   metadata: jsonObject,
 });
 export const CommandReceiptRequestSchema = z.strictObject({
+  sessionId: id,
   operationId: id,
   generation: z.number().int().nonnegative(),
   connectionEpoch: z.number().int().nonnegative(),

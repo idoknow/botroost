@@ -1,3 +1,4 @@
+BEGIN;
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE TABLE IF NOT EXISTS users (id uuid PRIMARY KEY, email text NOT NULL UNIQUE, password_hash text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS workspaces (id uuid PRIMARY KEY, name text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
@@ -12,3 +13,4 @@ CREATE UNIQUE INDEX IF NOT EXISTS operations_one_active ON operations(endpoint_i
 CREATE TABLE IF NOT EXISTS observations (id uuid PRIMARY KEY, workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, endpoint_id uuid NOT NULL, operation_id uuid REFERENCES operations(id), generation bigint NOT NULL, state jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), FOREIGN KEY(workspace_id,endpoint_id) REFERENCES endpoints(workspace_id,id));
 CREATE TABLE IF NOT EXISTS audit_events (id uuid PRIMARY KEY, workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, actor_user_id uuid REFERENCES users(id), action text NOT NULL, resource_type text NOT NULL, resource_id uuid, metadata jsonb NOT NULL DEFAULT '{}', created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS outbox_events (id uuid PRIMARY KEY, workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, operation_id uuid NOT NULL UNIQUE REFERENCES operations(id), event_type text NOT NULL, payload jsonb NOT NULL, available_at timestamptz NOT NULL DEFAULT now(), processed_at timestamptz, attempts integer NOT NULL DEFAULT 0, claimed_at timestamptz, created_at timestamptz NOT NULL DEFAULT now());
+COMMIT;

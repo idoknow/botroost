@@ -2,7 +2,7 @@ import {describe,expect,it} from 'vitest';
 import {actionAvailability,nodeConnectionStatus,statusLayers} from '../src/policy';
 
 describe('console policies',()=>{
- it('preserves all five independent status layers',()=>expect(statusLayers({node:'online',runtime:'ready',provider:'degraded',protocol:'disconnected',convergence:'conflicted'}).map(x=>x.label)).toEqual(['Node','Runtime','Provider','Protocol','Convergence']));
+ it('gives the assigned node and its connection status distinct column labels',()=>expect(statusLayers({node:'online',runtime:'ready',provider:'degraded',protocol:'disconnected',convergence:'conflicted'}).map(x=>x.label)).toEqual(['Node status','Runtime','Provider','Protocol','Convergence']));
  it('requires permission, capability, and no active conflict',()=>{
   expect(actionAvailability('start',{permissions:['endpoint:start'],capabilities:{operations:['start']},activeOperationId:null})).toEqual({visible:true,disabled:false});
   expect(actionAvailability('start',{permissions:[],capabilities:{operations:['start']},activeOperationId:null}).visible).toBe(false);

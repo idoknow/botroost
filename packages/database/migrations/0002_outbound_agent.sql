@@ -1,9 +1,9 @@
+BEGIN;
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS credential_hash text UNIQUE;
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS enrollment_token_id uuid REFERENCES enrollment_tokens(id);
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS labels jsonb NOT NULL DEFAULT '{}';
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS agent_version text;
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS connection_epoch bigint NOT NULL DEFAULT 0;
-ALTER TABLE nodes ADD COLUMN IF NOT EXISTS connection_session_id text;
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS last_heartbeat_at timestamptz;
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS heartbeat_metadata jsonb NOT NULL DEFAULT '{}';
 ALTER TABLE enrollment_tokens ADD COLUMN IF NOT EXISTS name text NOT NULL DEFAULT 'agent';
@@ -37,3 +37,4 @@ CREATE TABLE IF NOT EXISTS agent_commands (
   FOREIGN KEY(workspace_id,endpoint_id) REFERENCES endpoints(workspace_id,id)
 );
 CREATE INDEX IF NOT EXISTS agent_commands_claim ON agent_commands(node_id,status,lease_deadline,created_at);
+COMMIT;

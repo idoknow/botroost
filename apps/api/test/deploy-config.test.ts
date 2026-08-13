@@ -13,7 +13,7 @@ describe("deployment release configuration", () => {
     expect(compose).toContain('TRUST_PROXY: "1"');
     expect(compose).not.toContain('TRUST_PROXY: "true"');
     expect(compose).toContain("shared-network:");
-    expect(caddy).toContain("botroost.facrd.xyz");
+    expect(caddy).toContain("botroost.rcpd.cc");
     expect(caddy).toContain("reverse_proxy web:8080");
   });
 

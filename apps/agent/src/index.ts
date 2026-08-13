@@ -97,6 +97,7 @@ export class HttpAgentTransport implements AgentCommandTransport {
       headers: {
         authorization: `Bearer ${this.nodeSecret}`,
         "content-type": "application/json",
+        "x-agent-session-id": this.sessionId,
       },
       body: JSON.stringify(payload),
       signal,
@@ -117,10 +118,11 @@ export class HttpAgentTransport implements AgentCommandTransport {
     return response.command ? RuntimeCommandSchema.parse(response.command) : null;
   }
   async receipt(commandId: string, receipt: { operationId: string; generation: number; connectionEpoch: number }) {
-    await this.request(`/api/v1/agent/commands/${encodeURIComponent(commandId)}/receipt`, receipt);
+    await this.request(`/api/v1/agent/commands/${encodeURIComponent(commandId)}/receipt`, { ...receipt, sessionId: this.sessionId });
   }
   async result(result: Parameters<AgentCommandTransport["result"]>[0]) {
-    const { commandId, ...payload } = result;
+    const { commandId, ...body } = result;
+    const payload = { ...body, sessionId: this.sessionId };
     await this.request(`/api/v1/agent/commands/${encodeURIComponent(commandId)}/result`, payload);
   }
 }
