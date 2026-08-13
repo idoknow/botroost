@@ -32,6 +32,12 @@ describe('ApiClient',()=>{
   const api=new ApiClient(vi.fn().mockResolvedValue(new Response('',{status:404})));
   await expect(api.get('/missing')).rejects.toEqual(expect.objectContaining({name:'ApiError',status:404,message:'Unavailable'}));
  });
+ it('does not send a JSON content type for bodyless mutations',async()=>{
+  const fetcher=vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({csrfToken:'csrf'}))).mockResolvedValueOnce(new Response(null,{status:204}));
+  await new ApiClient(fetcher).mutate('/auth/logout');
+  const init=fetcher.mock.calls[1]?.[1] as RequestInit;
+  expect(new Headers(init.headers).get('Content-Type')).toBeNull(); expect(init.body).toBeUndefined();
+ });
  it('accepts successful mutations without a response body',async()=>{
   const fetcher=vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({csrfToken:'csrf'}))).mockResolvedValueOnce(new Response(null,{status:204}));
   await expect(new ApiClient(fetcher).mutate('/auth/logout')).resolves.toBeUndefined();

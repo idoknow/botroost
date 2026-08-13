@@ -7,7 +7,7 @@ export class ApiClient{
  async get<T>(path:string):Promise<T>{return (await this.raw(path)).json() as Promise<T>}
  private async csrfToken(){if(!this.csrf)this.csrf=(await this.get<{csrfToken:string}>('/auth/csrf')).csrfToken;return this.csrf}
  async login(body:{email:string;password:string}){delete this.csrf;const response=await this.raw('/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return response.json()}
- async mutate<T>(path:string,body?:unknown,method='POST'):Promise<T>{const token=await this.csrfToken();const init:RequestInit={method,headers:{'Content-Type':'application/json','X-CSRF-Token':token,'Idempotency-Key':crypto.randomUUID()}};if(body!==undefined)init.body=JSON.stringify(body);const response=await this.raw(path,init);return response.status===204?undefined as T:response.json() as Promise<T>}
+ async mutate<T>(path:string,body?:unknown,method='POST'):Promise<T>{const token=await this.csrfToken();const headers:Record<string,string>={'X-CSRF-Token':token,'Idempotency-Key':crypto.randomUUID()};const init:RequestInit={method,headers};if(body!==undefined){headers['Content-Type']='application/json';init.body=JSON.stringify(body)}const response=await this.raw(path,init);return response.status===204?undefined as T:response.json() as Promise<T>}
  async requestSecret<T>(path:string,body?:unknown):Promise<T>{const value=await this.mutate<T>(path,body);return value}
 }
 export const api=new ApiClient();
