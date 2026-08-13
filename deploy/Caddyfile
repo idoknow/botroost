@@ -1,5 +1,5 @@
 # Copy this block into the Caddy instance attached to SHARED_NETWORK.
-console.example.com {
+botroost.facrd.xyz {
   encode zstd gzip
   reverse_proxy web:8080
 }

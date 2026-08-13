@@ -23,7 +23,9 @@ services:
       POSTGRES_USER: botroost
       POSTGRES_DB: botroost
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
-    secrets: [postgres_password]
+    secrets:
+      - source: postgres_password
+        mode: 0400
     volumes: [postgres-data:/var/lib/postgresql/data]
     networks: [backend]
     healthcheck:
@@ -39,7 +41,9 @@ services:
     restart: "no"
     build: {context: .., target: migrate}
     environment: *database-env
-    secrets: [postgres_password]
+    secrets:
+      - source: postgres_password
+        mode: 0400
     networks: [backend]
     depends_on:
       postgres: {condition: service_healthy}
@@ -53,7 +57,11 @@ services:
       BOTROOST_PUBLIC_ORIGIN: "${BOTROOST_PUBLIC_ORIGIN:?set BOTROOST_PUBLIC_ORIGIN}"
       TRUST_PROXY: "1"
       PORT: "3000"
-    secrets: [postgres_password, credential_master_key]
+    secrets:
+      - source: postgres_password
+        mode: 0400
+      - source: credential_master_key
+        mode: 0400
     networks: [backend]
     depends_on:
       migrate: {condition: service_completed_successfully}
@@ -67,7 +75,9 @@ services:
     <<: *node-hardening
     build: {context: .., target: worker}
     environment: *database-env
-    secrets: [postgres_password]
+    secrets:
+      - source: postgres_password
+        mode: 0400
     networks: [backend]
     depends_on:
       migrate: {condition: service_completed_successfully}
@@ -99,10 +109,22 @@ services:
       BOOTSTRAP_EMAIL: "${BOOTSTRAP_EMAIL:?set BOOTSTRAP_EMAIL}"
       BOOTSTRAP_WORKSPACE: "${BOOTSTRAP_WORKSPACE:-Primary}"
       BOOTSTRAP_PASSWORD_FILE: /run/secrets/bootstrap_password
-    secrets: [postgres_password, bootstrap_password]
+    secrets:
+      - source: postgres_password
+        mode: 0400
+      - source: bootstrap_password
+        mode: 0400
     networks: [backend]
     depends_on:
       migrate: {condition: service_completed_successfully}
+
+  agent-state-init:
+    image: busybox:1.36
+    profiles: [bootstrap-agent]
+    restart: "no"
+    command: ["sh", "-c", "chown -R 1000:1000 /var/lib/botroost-agent"]
+    volumes: [agent-state:/var/lib/botroost-agent]
+    security_opt: [no-new-privileges:true]
 
   agent:
     <<: *node-hardening
@@ -117,6 +139,7 @@ services:
     networks: [backend]
     depends_on:
       api: {condition: service_healthy}
+      agent-state-init: {condition: service_completed_successfully}
 
 secrets:
   postgres_password:

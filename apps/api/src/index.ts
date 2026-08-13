@@ -15,6 +15,7 @@ const enrollmentInput = z.object({ name: z.string().min(1).max(120).default("age
 const operationInput = z.object({ action: z.enum(["start", "stop", "restart"]), expectedGeneration: z.number().int().nonnegative() });
 const memberInput = z.object({ email: z.string().email(), password: z.string().min(12), role: z.enum(["admin", "operator", "viewer"]) });
 const credentialInput = z.object({ name: z.string().min(1).max(120), value: z.string().min(1).max(16_384) });
+const settingsInput = z.record(z.string(), z.unknown());
 const idParams = z.object({ id: z.string().uuid() });
 const providers = [
   { id: "fake", capabilities: ["setup", "configure", "observe"], configSchema: [], availability: { enabled: true } },
@@ -24,7 +25,7 @@ const providers = [
 type Permission = "read" | "operate" | "manage-members" | "manage-nodes";
 export interface ApiOptions { database?: PostgresDatabase; databaseUrl?: string; credentialKey?: Buffer; trustProxy?: FastifyServerOptions["trustProxy"]; publicOrigin?: string }
 const page=<T>(items:T[])=>({items,page:1,pageSize:25,total:items.length});
-const rolePermissions:Record<string,string[]>={viewer:["endpoint:read","node:read","provider:read","operation:read","audit:read","workspace:read"],operator:["endpoint:read","endpoint:create","endpoint:update","endpoint:delete","endpoint:start","endpoint:stop","endpoint:restart","node:read","provider:read","operation:read","audit:read","workspace:read"],admin:["endpoint:read","endpoint:create","endpoint:update","endpoint:delete","endpoint:start","endpoint:stop","endpoint:restart","node:read","node:create","node:delete","provider:read","operation:read","audit:read","workspace:read","member:manage","credential:manage"],owner:["endpoint:read","endpoint:create","endpoint:update","endpoint:delete","endpoint:start","endpoint:stop","endpoint:restart","node:read","node:create","node:delete","provider:read","operation:read","audit:read","workspace:read","member:manage","credential:manage"]};
+const rolePermissions:Record<string,string[]>={viewer:["endpoint:read","node:read","provider:read","operation:read","audit:read","workspace:read"],operator:["endpoint:read","endpoint:create","endpoint:update","endpoint:delete","endpoint:start","endpoint:stop","endpoint:restart","node:read","provider:read","operation:read","audit:read","workspace:read"],admin:["endpoint:read","endpoint:create","endpoint:update","endpoint:delete","endpoint:start","endpoint:stop","endpoint:restart","node:read","node:create","node:delete","provider:read","operation:read","audit:read","workspace:read","member:read","member:manage","credential:read","credential:manage","settings:read","settings:manage"],owner:["endpoint:read","endpoint:create","endpoint:update","endpoint:delete","endpoint:start","endpoint:stop","endpoint:restart","node:read","node:create","node:delete","provider:read","operation:read","audit:read","workspace:read","member:read","member:manage","credential:read","credential:manage","settings:read","settings:manage"]};
 function token(request: FastifyRequest) { return request.cookies.botroost_session }
 function statusCode(error: unknown): number | undefined { return typeof error === "object" && error !== null && "statusCode" in error && typeof error.statusCode === "number" ? error.statusCode : undefined }
 function fail(message: string, code: number): Error { return Object.assign(new Error(message), { statusCode: code }) }
@@ -60,6 +61,11 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
     if (!can(result.role, permission)) throw fail("forbidden", 403);
     return result;
   }
+  async function authorizeContract(request: FastifyRequest, permission: string) {
+    const result = await principal(request);
+    if (!rolePermissions[result.role]?.includes(permission)) throw fail("forbidden", 403);
+    return result;
+  }
   async function agentNode(request: FastifyRequest) {
     const header = request.headers.authorization;
     const match = typeof header === "string" ? /^Bearer (.+)$/.exec(header) : null;
@@ -86,10 +92,11 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
   api.get("/api/v1/workspaces/current", async request => db.workspace((await principal(request)).workspaceId));
   api.get("/api/v1/workspaces/current/summary", async request => db.summary((await principal(request)).workspaceId));
   api.get("/api/v1/overview", async request => db.summary((await principal(request)).workspaceId));
-  api.get("/api/v1/workspaces/current/members", async request => page(await db.members((await principal(request)).workspaceId)));
-  api.get("/api/v1/workspaces/current/settings", async request => db.workspaceSettings((await principal(request)).workspaceId));
-  api.get("/api/v1/workspaces/current/credentials", async request => page(await db.credentials((await principal(request)).workspaceId)));
-  api.post("/api/v1/workspaces/current/credentials",async(request,reply)=>{const current=await principal(request);if(!["owner","admin"].includes(current.role))throw fail("forbidden",403);const body=credentialInput.parse(request.body);return reply.code(201).send(await db.createCredential(current.workspaceId,body.name,body.value,key))});
+  api.get("/api/v1/workspaces/current/members", async request => page(await db.members((await authorizeContract(request,"member:read")).workspaceId)));
+  api.get("/api/v1/workspaces/current/settings", async request => db.workspaceSettings((await authorizeContract(request,"settings:read")).workspaceId));
+  api.post("/api/v1/workspaces/current/settings", async request => db.updateWorkspaceSettings((await authorizeContract(request,"settings:manage")).workspaceId,settingsInput.parse(request.body)));
+  api.get("/api/v1/workspaces/current/credentials", async request => page(await db.credentials((await authorizeContract(request,"credential:read")).workspaceId)));
+  api.post("/api/v1/workspaces/current/credentials",async(request,reply)=>{const current=await authorizeContract(request,"credential:manage");const body=credentialInput.parse(request.body);return reply.code(201).send(await db.createCredential(current.workspaceId,body.name,body.value,key))});
   api.post("/api/v1/workspaces/current/members", async (request, reply) => { const current = await authorize(request, "manage-members"); const body = memberInput.parse(request.body); return reply.code(201).send(await auth.addMember(current.workspaceId, body.email, body.password, body.role)); });
   api.get("/api/v1/providers", async request => { await principal(request); return page([...providers]); });
   api.get("/api/v1/nodes", async request => page(await db.nodes((await principal(request)).workspaceId)));
