@@ -58,8 +58,24 @@ importers:
         specifier: ^3.2.4
         version: 3.2.7(@types/node@22.20.1)(supports-color@7.2.0)
 
+  apps/agent:
+    dependencies:
+      '@botroost/agent-journal':
+        specifier: workspace:*
+        version: link:../../packages/agent-journal
+      '@botroost/agent-protocol':
+        specifier: workspace:*
+        version: link:../../packages/agent-protocol
+    devDependencies:
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@22.20.1)(supports-color@7.2.0)
+
   apps/api:
     dependencies:
+      '@botroost/agent-protocol':
+        specifier: workspace:*
+        version: link:../../packages/agent-protocol
       '@botroost/auth':
         specifier: workspace:*
         version: link:../../packages/auth
@@ -98,6 +114,19 @@ importers:
       '@botroost/contracts':
         specifier: workspace:*
         version: link:../contracts
+      zod:
+        specifier: 'catalog:'
+        version: 4.4.3
+    devDependencies:
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@22.20.1)(supports-color@7.2.0)
+
+  packages/agent-protocol:
+    dependencies:
+      '@botroost/runtime-sdk':
+        specifier: workspace:*
+        version: link:../runtime-sdk
       zod:
         specifier: 'catalog:'
         version: 4.4.3
