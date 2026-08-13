@@ -25,5 +25,8 @@ describe("deployment release configuration", () => {
     expect(compose).toContain("read_only: true");
     expect(compose).toContain("tmpfs: [/tmp, /var/cache/nginx, /var/run]");
     expect(compose).toMatch(/source: postgres_password[\s\S]*mode: 0400/);
+    const postgresService = compose.match(/ {2}postgres:[\s\S]*?(?=\n {2}migrate:)/)?.[0] ?? "";
+    expect(postgresService).not.toContain("cap_drop: [ALL]");
+    expect(postgresService).not.toContain("<<: *node-hardening");
   });
 });
