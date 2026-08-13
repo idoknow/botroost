@@ -19,7 +19,6 @@ COPY --from=build --chown=node:node /app/apps ./apps
 COPY --from=build --chown=node:node /app/packages ./packages
 COPY --chown=node:node deploy/node-entrypoint.sh /usr/local/bin/botroost-entrypoint
 RUN chmod 0555 /usr/local/bin/botroost-entrypoint
-USER node
 ENTRYPOINT ["botroost-entrypoint"]
 
 FROM runtime AS api
