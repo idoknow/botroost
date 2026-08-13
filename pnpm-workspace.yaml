@@ -1,0 +1,8 @@
+packages:
+  - packages/*
+allowBuilds:
+  esbuild: false
+onlyBuiltDependencies:
+  - esbuild
+catalog:
+  zod: ^4.1.12
