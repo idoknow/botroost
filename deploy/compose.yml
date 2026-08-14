@@ -140,8 +140,12 @@ services:
       NAPCAT_TOKEN_FILE: /run/secrets/napcat_token
       NAPCAT_DOCKER_NETWORK: botroost_backend
       AGENT_PROVIDER: napcat
-    secrets: [enrollment_token, napcat_token]
-    group_add: ["${DOCKER_GID:-999}"]
+    secrets:
+      - source: enrollment_token
+        mode: 0400
+      - source: napcat_token
+        mode: 0400
+    group_add: ["${DOCKER_GID:?set DOCKER_GID to the host docker group gid}"]
     volumes:
       - "${AGENT_STATE_DIR:-/opt/botroost/agent-state}:/var/lib/botroost-agent"
       - /var/run/docker.sock:/var/run/docker.sock
@@ -166,7 +170,7 @@ volumes:
   postgres-data:
 
 networks:
-  backend: {internal: true}
+  backend: {name: botroost_backend, internal: true}
   egress: {}
   shared-network:
     external: true

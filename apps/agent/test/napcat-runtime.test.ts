@@ -60,7 +60,7 @@ describe("NapCat runtime", () => {
   it("creates the pinned container with labels, persistent per-endpoint storage, and no host ports", async () => {
     const docker = new RecordingDocker();
     const root = await mkdtemp(join(tmpdir(), "botroost-napcat-"));
-    const runtime = new NapCatRuntime({ docker, stateDirectory: root });
+    const runtime = new NapCatRuntime({ docker, stateDirectory: root, napcatToken: "operator-token" });
 
     await runtime.apply("runtime:cmd-1", baseCommand);
 
@@ -89,7 +89,7 @@ describe("NapCat runtime", () => {
   it("uses daemon-visible host paths for child-container persistence", async () => {
     const docker = new RecordingDocker();
     const local = await mkdtemp(join(tmpdir(), "botroost-napcat-visible-"));
-    const runtime = new NapCatRuntime({ docker, stateDirectory: local, hostStateDirectory: "/opt/botroost/agent-state/napcat" });
+    const runtime = new NapCatRuntime({ docker, stateDirectory: local, hostStateDirectory: "/opt/botroost/agent-state/napcat", napcatToken: "operator-token" });
     await runtime.apply("runtime:cmd-host-path", baseCommand);
     expect(docker.created[0]!.mounts.map(mount => mount.source)).toEqual([
       `/opt/botroost/agent-state/napcat/${baseCommand.endpointId}/qq`,
@@ -101,6 +101,7 @@ describe("NapCat runtime", () => {
     const runtime = new NapCatRuntime({
       docker: new RecordingDocker(),
       stateDirectory: await mkdtemp(join(tmpdir(), "botroost-napcat-")),
+      napcatToken: "operator-token",
     });
     await expect(runtime.apply("runtime:bad-image", { ...baseCommand, metadata: { image: "mlikiowa/napcat-docker:latest" } })).rejects.toThrow(/image/);
     await expect(runtime.apply("runtime:bad-id", { ...baseCommand, endpointId: "../escape" })).rejects.toThrow(/endpoint/);
@@ -169,5 +170,20 @@ describe("NapCat runtime", () => {
     const observations = await runtime.observations();
     expect(observations).toHaveLength(1);
     expect(observations[0]).toMatchObject({ endpointId: baseCommand.endpointId, protocol: "connected" });
+  });
+
+  it("restores managed endpoints after an agent restart", async () => {
+    const docker = new RecordingDocker();
+    docker.inspect = async () => ({ id: "container-id", name: "botroost-napcat-33333333-3333-4333-8333-333333333333", state: "running" as const, ipAddress: "172.18.0.10", labels: {} });
+    const stateDirectory = await mkdtemp(join(tmpdir(), "botroost-napcat-restart-"));
+    const fetcher = async (url: RequestInfo | URL) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/api/auth/login") return new Response(JSON.stringify({ code: 0, data: { Credential: "credential" } }));
+      if (path === "/api/Debug/create") return new Response(JSON.stringify({ code: 0, data: { adapterName: "debug-session" } }));
+      return new Response(JSON.stringify({ code: 0, data: { online: true } }));
+    };
+    await new NapCatRuntime({ docker, stateDirectory, napcatToken: "operator-token", fetcher }).apply("runtime:first", baseCommand);
+    const restarted = new NapCatRuntime({ docker, stateDirectory, napcatToken: "operator-token", fetcher });
+    await expect(restarted.observations()).resolves.toMatchObject([{ endpointId: baseCommand.endpointId, protocol: "connected" }]);
   });
 });

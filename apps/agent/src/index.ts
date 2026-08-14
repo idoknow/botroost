@@ -56,7 +56,8 @@ export class DockerCliClient implements DockerClient {
   async inspect(name: string): Promise<DockerInspectResult | null> {
     try {
       const { stdout } = await this.docker(["inspect", name]);
-      const item = (JSON.parse(stdout) as Record<string, unknown>[])[0]!;
+      const item = (JSON.parse(stdout) as Record<string, unknown>[])[0];
+      if (!item) return null;
       const state = item.State as Record<string, unknown> | undefined;
       const settings = item.NetworkSettings as Record<string, unknown> | undefined;
       const networks = settings?.Networks as Record<string, { IPAddress?: string }> | undefined;
@@ -268,6 +269,7 @@ export class NapCatRuntime {
   private readonly containerPrefix: string;
   private readonly fetcher: typeof fetch;
   private readonly commands = new Map<string, RuntimeCommand>();
+  private commandsLoaded = false;
   constructor(private readonly options: {
     docker?: DockerClient;
     stateDirectory: string;
@@ -279,10 +281,27 @@ export class NapCatRuntime {
   }) {
     this.networkMode = options.networkMode ?? process.env.NAPCAT_DOCKER_NETWORK ?? "bridge";
     this.containerPrefix = options.containerPrefix ?? "botroost-napcat";
+    if (!/^[a-z0-9][a-z0-9_.-]{0,63}$/i.test(this.networkMode) || this.networkMode === "host" || this.networkMode.startsWith("container:")) throw new Error("NapCat docker network is invalid");
     if (!containerPrefixPattern.test(this.containerPrefix)) throw new Error("container prefix is invalid");
+    if (!(options.napcatToken ?? process.env.NAPCAT_TOKEN)) throw new Error("NapCat token is required");
     this.fetcher = options.fetcher ?? globalThis.fetch;
   }
   private docker() { return this.options.docker ?? new DockerCliClient(); }
+  private commandStatePath() { return join(this.options.stateDirectory, "runtime-commands.json"); }
+  private async loadCommands() {
+    if (this.commandsLoaded) return;
+    this.commandsLoaded = true;
+    try {
+      const stored = JSON.parse(await readFile(this.commandStatePath(), "utf8")) as unknown[];
+      for (const value of stored) { const command = RuntimeCommandSchema.parse(value); this.commands.set(command.endpointId, command); }
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  }
+  private async persistCommands() {
+    await mkdir(this.options.stateDirectory, { recursive: true, mode: 0o700 });
+    const temporary = `${this.commandStatePath()}.${process.pid}.tmp`;
+    await writeFile(temporary, `${JSON.stringify([...this.commands.values()])}\n`, { mode: 0o600 });
+    await rename(temporary, this.commandStatePath());
+  }
   private endpointDirectory(endpointId: string, child: "qq" | "config") {
     if (!endpointIdPattern.test(endpointId)) throw new Error("endpoint identifier is invalid");
     const root = resolve(this.options.stateDirectory);
@@ -308,7 +327,9 @@ export class NapCatRuntime {
   }
   async apply(_effectId: string, command: RuntimeCommand): Promise<{ state: "running" | "stopped"; observations?: Parameters<AgentCommandTransport["result"]>[0]["observations"]; metadata?: JsonObject }> {
     this.assertAllowed(command);
+    await this.loadCommands();
     this.commands.set(command.endpointId, command);
+    await this.persistCommands();
     const name = this.containerName(command.endpointId);
     const docker = this.docker();
     const existing = await docker.inspect(name);
@@ -337,26 +358,27 @@ export class NapCatRuntime {
         resources: command.runtimeRequest.resources,
       });
     }
-    if (command.action === "stop") await docker.stop(name);
+    if (command.action === "stop" && existing) await docker.stop(name);
     else if (command.action === "restart") await docker.restart(name);
     else await docker.start(name);
-    const snapshot = await this.snapshot(command).catch(() => null);
+    const snapshot = await this.snapshot(command).catch(error => ({ endpointId:command.endpointId,generation:command.generation,runtime:"unknown" as const,provider:"degraded" as const,protocol:"disconnected" as const,convergence:"reconciling" as const,metadata:{error:error instanceof Error?error.message:String(error)} }));
     const running = command.action !== "stop";
     return {
       state: running ? "running" : "stopped",
-      ...(snapshot ? { observations: {
+      observations: {
         node: "online",
         runtime: snapshot.runtime,
         provider: snapshot.provider,
         protocol: snapshot.protocol,
         convergence: snapshot.convergence,
-      }, metadata: snapshot.metadata } : {}),
+      }, metadata: snapshot.metadata,
     };
   }
   private async napcatRequest(base: URL, path: string, webToken: string, body?: unknown) {
     const response = await this.fetcher(new URL(path, base), {
       method: body === undefined ? "GET" : "POST",
       headers: { authorization: `Bearer ${webToken}`, "content-type": "application/json" },
+      signal: AbortSignal.timeout(10_000),
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     if (!response.ok) throw new Error(`NapCat request failed: ${response.status}`);
@@ -385,6 +407,7 @@ export class NapCatRuntime {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ hash: hashed }),
+      signal: AbortSignal.timeout(10_000),
     });
     if (!auth.ok) throw new Error(`NapCat auth failed: ${auth.status}`);
     const authBody = await auth.json() as JsonObject;
@@ -423,6 +446,7 @@ export class NapCatRuntime {
     };
   }
   async observations(): Promise<NonNullable<Parameters<AgentCommandTransport["heartbeat"]>[0]>> {
+    await this.loadCommands();
     return Promise.all([...this.commands.values()].map(async command => {
       try {
         const snapshot = await this.snapshot(command);
@@ -466,8 +490,8 @@ export class DurableFakeAgent {
     let result = this.journal.get(command.commandId)?.result;
     if (!result) {
       const effectId=`runtime:${command.commandId}`;
-      let applied: Awaited<ReturnType<NapCatRuntime["apply"]>> | undefined;
-      if (!this.journal.get(command.commandId)?.effects[effectId])
+      let applied = this.journal.get(command.commandId)?.effects[effectId] as Awaited<ReturnType<NapCatRuntime["apply"]>> | undefined;
+      if (!applied)
         applied = await this.runtime.apply(effectId,command);
       if (applied) await this.journal.recordEffect(command.commandId, effectId, applied);
       result = {
