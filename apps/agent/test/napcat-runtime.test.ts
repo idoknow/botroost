@@ -86,6 +86,17 @@ describe("NapCat runtime", () => {
     expect(docker.started).toEqual(["botroost-napcat-33333333-3333-4333-8333-333333333333"]);
   });
 
+  it("uses daemon-visible host paths for child-container persistence", async () => {
+    const docker = new RecordingDocker();
+    const local = await mkdtemp(join(tmpdir(), "botroost-napcat-visible-"));
+    const runtime = new NapCatRuntime({ docker, stateDirectory: local, hostStateDirectory: "/opt/botroost/agent-state/napcat" });
+    await runtime.apply("runtime:cmd-host-path", baseCommand);
+    expect(docker.created[0]!.mounts.map(mount => mount.source)).toEqual([
+      `/opt/botroost/agent-state/napcat/${baseCommand.endpointId}/qq`,
+      `/opt/botroost/agent-state/napcat/${baseCommand.endpointId}/config`,
+    ]);
+  });
+
   it("rejects unpinned images, wrong digests, and unsafe endpoint identifiers", async () => {
     const runtime = new NapCatRuntime({
       docker: new RecordingDocker(),
@@ -111,9 +122,9 @@ describe("NapCat runtime", () => {
       napcatToken: "operator-token",
       fetcher: async (url, init) => {
         calls.push({ url: String(url), ...(init === undefined ? {} : { init }) });
-        if (String(url).endsWith("/api/auth/login")) return new Response(JSON.stringify({ token: "web-token" }), { status: 200 });
+        if (String(url).endsWith("/api/auth/login")) return new Response(JSON.stringify({ code: 0, data: { Credential: "web-token" } }), { status: 200 });
         if (String(url).endsWith("/api/QQLogin/GetQQLoginQrcode")) return new Response(JSON.stringify({ data: { qrcode: "otpauth://qq-login" } }), { status: 200 });
-        if (String(url).endsWith("/api/CheckLoginStatus/GetQQLoginInfo")) return new Response(JSON.stringify({ data: { uin: "12345", nickname: "Operator QQ" } }), { status: 200 });
+        if (String(url).endsWith("/api/QQLogin/GetQQLoginInfo")) return new Response(JSON.stringify({ code: 0, data: { uin: "12345", nickname: "Operator QQ" } }), { status: 200 });
         if (String(url).endsWith("/api/Debug/create")) return new Response(JSON.stringify({ data: { adapterName: "debug-session" } }), { status: 200 });
         return new Response(JSON.stringify({ status: "ok", retcode: 0, data: { online: true } }), { status: 200 });
       },
@@ -124,13 +135,13 @@ describe("NapCat runtime", () => {
     expect(calls.map(call => new URL(call.url).pathname)).toEqual([
       "/api/auth/login",
       "/api/QQLogin/GetQQLoginQrcode",
-      "/api/CheckLoginStatus/GetQQLoginInfo",
+      "/api/QQLogin/GetQQLoginInfo",
       "/api/Debug/create",
       "/api/Debug/call/debug-session",
       "/api/Debug/call/debug-session",
     ]);
     expect(JSON.parse(String(calls[0]!.init!.body))).toEqual({
-      token: "43b5038ddfcd49202012115189e327dc42f5dd49740202201cfbe0db05fc5037",
+      hash: "43b5038ddfcd49202012115189e327dc42f5dd49740202201cfbe0db05fc5037",
     });
     expect(calls.slice(1).every(call => (call.init?.headers as Record<string, string>).authorization === "Bearer web-token")).toBe(true);
     expect(snapshot.metadata).toMatchObject({
@@ -138,5 +149,25 @@ describe("NapCat runtime", () => {
       login: { qrcode: "otpauth://qq-login" },
       onebot: { status: { online: true } },
     });
+  });
+
+  it("reports ongoing NapCat observations on later heartbeats", async () => {
+    const docker = new RecordingDocker();
+    docker.inspect = async () => ({ id: "container-id", name: "botroost-napcat-33333333-3333-4333-8333-333333333333", state: "running" as const, ipAddress: "172.18.0.10", labels: {} });
+    const runtime = new NapCatRuntime({
+      docker,
+      stateDirectory: await mkdtemp(join(tmpdir(), "botroost-napcat-heartbeat-")),
+      napcatToken: "operator-token",
+      fetcher: async url => {
+        const path = new URL(String(url)).pathname;
+        if (path === "/api/auth/login") return new Response(JSON.stringify({ code: 0, data: { Credential: "credential" } }));
+        if (path === "/api/Debug/create") return new Response(JSON.stringify({ code: 0, data: { adapterName: "debug-session" } }));
+        return new Response(JSON.stringify({ code: 0, data: { online: true } }));
+      },
+    });
+    await runtime.apply("runtime:heartbeat", baseCommand);
+    const observations = await runtime.observations();
+    expect(observations).toHaveLength(1);
+    expect(observations[0]).toMatchObject({ endpointId: baseCommand.endpointId, protocol: "connected" });
   });
 });

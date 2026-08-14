@@ -80,7 +80,7 @@ services:
         mode: 0400
       - source: credential_master_key
         mode: 0400
-    networks: [backend]
+    networks: [backend, egress]
     depends_on:
       migrate: {condition: service_completed_successfully}
       api: {condition: service_healthy}
@@ -135,6 +135,7 @@ services:
     environment:
       CONTROL_PLANE_URL: http://api:3000
       NODE_STATE_DIR: /var/lib/botroost-agent
+      NAPCAT_HOST_STATE_DIR: "${AGENT_STATE_DIR:-/opt/botroost/agent-state}"
       ENROLLMENT_TOKEN_FILE: /run/secrets/enrollment_token
       NAPCAT_TOKEN_FILE: /run/secrets/napcat_token
       NAPCAT_DOCKER_NETWORK: botroost_backend
@@ -166,6 +167,7 @@ volumes:
 
 networks:
   backend: {internal: true}
+  egress: {}
   shared-network:
     external: true
     name: "${SHARED_NETWORK:-botroost-shared}"

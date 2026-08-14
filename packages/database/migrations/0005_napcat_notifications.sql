@@ -1,6 +1,6 @@
 BEGIN;
 CREATE TABLE IF NOT EXISTS napcat_notification_state (
-  node_id uuid PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+  endpoint_id uuid PRIMARY KEY REFERENCES endpoints(id) ON DELETE CASCADE,
   workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   state text NOT NULL CHECK(state IN ('unknown','online','offline')) DEFAULT 'unknown',
   incident_open boolean NOT NULL DEFAULT false,
@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS napcat_notification_state (
 CREATE TABLE IF NOT EXISTS notification_outbox (
   id uuid PRIMARY KEY,
   workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  node_id uuid REFERENCES nodes(id) ON DELETE CASCADE,
+  endpoint_id uuid REFERENCES endpoints(id) ON DELETE CASCADE,
   event_type text NOT NULL CHECK(event_type IN ('napcat.offline','napcat.recovery','resend.test')),
   recipient text NOT NULL,
   sender text NOT NULL,

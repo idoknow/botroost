@@ -267,9 +267,11 @@ export class NapCatRuntime {
   private readonly networkMode: string;
   private readonly containerPrefix: string;
   private readonly fetcher: typeof fetch;
+  private readonly commands = new Map<string, RuntimeCommand>();
   constructor(private readonly options: {
     docker?: DockerClient;
     stateDirectory: string;
+    hostStateDirectory?: string;
     containerPrefix?: string;
     networkMode?: string;
     napcatToken?: string;
@@ -288,6 +290,13 @@ export class NapCatRuntime {
     if (!path.startsWith(`${root}${sep}`)) throw new Error("endpoint storage path is invalid");
     return path;
   }
+  private hostEndpointDirectory(endpointId: string, child: "qq" | "config") {
+    if (!endpointIdPattern.test(endpointId)) throw new Error("endpoint identifier is invalid");
+    const root = resolve(this.options.hostStateDirectory ?? this.options.stateDirectory);
+    const path = resolve(root, endpointId, child);
+    if (!path.startsWith(`${root}${sep}`)) throw new Error("endpoint storage path is invalid");
+    return path;
+  }
   private containerName(endpointId: string) {
     if (!endpointIdPattern.test(endpointId)) throw new Error("endpoint identifier is invalid");
     return `${this.containerPrefix}-${endpointId}`;
@@ -299,12 +308,15 @@ export class NapCatRuntime {
   }
   async apply(_effectId: string, command: RuntimeCommand): Promise<{ state: "running" | "stopped"; observations?: Parameters<AgentCommandTransport["result"]>[0]["observations"]; metadata?: JsonObject }> {
     this.assertAllowed(command);
+    this.commands.set(command.endpointId, command);
     const name = this.containerName(command.endpointId);
     const docker = this.docker();
     const existing = await docker.inspect(name);
     if (command.action !== "stop" && !existing) {
       const qq = this.endpointDirectory(command.endpointId, "qq");
       const config = this.endpointDirectory(command.endpointId, "config");
+      const hostQq = this.hostEndpointDirectory(command.endpointId, "qq");
+      const hostConfig = this.hostEndpointDirectory(command.endpointId, "config");
       await mkdir(qq, { recursive: true, mode: 0o700 });
       await mkdir(config, { recursive: true, mode: 0o700 });
       await docker.create({
@@ -318,8 +330,8 @@ export class NapCatRuntime {
         },
         environment: { NAPCAT_WEBUI_SECRET_KEY: this.options.napcatToken ?? process.env.NAPCAT_TOKEN ?? "" },
         mounts: [
-          { type: "bind", source: qq, target: "/app/.config/QQ" },
-          { type: "bind", source: config, target: "/app/napcat/config" },
+          { type: "bind", source: hostQq, target: "/app/.config/QQ" },
+          { type: "bind", source: hostConfig, target: "/app/napcat/config" },
         ],
         hostConfig: { networkMode: this.networkMode, portBindings: {} },
         resources: command.runtimeRequest.resources,
@@ -348,7 +360,9 @@ export class NapCatRuntime {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     if (!response.ok) throw new Error(`NapCat request failed: ${response.status}`);
-    return await response.json() as JsonObject;
+    const payload = await response.json() as JsonObject;
+    if (typeof payload.code === "number" && payload.code !== 0) throw new Error(`NapCat request rejected: ${String(payload.message ?? payload.code)}`);
+    return payload;
   }
   async snapshot(command: RuntimeCommand): Promise<{
     endpointId: string;
@@ -370,19 +384,17 @@ export class NapCatRuntime {
     const auth = await this.fetcher(new URL("/api/auth/login", base), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token: hashed }),
+      body: JSON.stringify({ hash: hashed }),
     });
     if (!auth.ok) throw new Error(`NapCat auth failed: ${auth.status}`);
     const authBody = await auth.json() as JsonObject;
+    if (typeof authBody.code === "number" && authBody.code !== 0) throw new Error(`NapCat auth rejected: ${String(authBody.message ?? authBody.code)}`);
     const authData = authBody.data;
-    const webToken = String(authBody.token ?? (
-      authData !== null && typeof authData === "object" && !Array.isArray(authData)
-        ? authData.token
-        : undefined
-    ) ?? "");
+    const credential = authData !== null && typeof authData === "object" && !Array.isArray(authData) ? authData.Credential : undefined;
+    const webToken = typeof credential === "string" ? credential : "";
     if (!webToken) throw new Error("NapCat auth token missing");
     const qrcode = await this.napcatRequest(base, "/api/QQLogin/GetQQLoginQrcode", webToken, {});
-    const loginInfo = await this.napcatRequest(base, "/api/CheckLoginStatus/GetQQLoginInfo", webToken, {});
+    const loginInfo = await this.napcatRequest(base, "/api/QQLogin/GetQQLoginInfo", webToken, {});
     const debugSession = await this.napcatRequest(base, "/api/Debug/create", webToken, {});
     const adapterName = (debugSession.data as Record<string, unknown> | undefined)?.adapterName;
     if (typeof adapterName !== "string" || !adapterName) throw new Error("NapCat debug adapter missing");
@@ -410,6 +422,16 @@ export class NapCatRuntime {
       },
     };
   }
+  async observations(): Promise<NonNullable<Parameters<AgentCommandTransport["heartbeat"]>[0]>> {
+    return Promise.all([...this.commands.values()].map(async command => {
+      try {
+        const snapshot = await this.snapshot(command);
+        return { endpointId:snapshot.endpointId,generation:snapshot.generation,runtime:snapshot.runtime,provider:snapshot.provider,protocol:snapshot.protocol,convergence:snapshot.convergence,metadata:snapshot.metadata };
+      } catch (error) {
+        return { endpointId:command.endpointId,generation:command.generation,runtime:"failed" as const,provider:"degraded" as const,protocol:"disconnected" as const,convergence:"failed" as const,metadata:{error:error instanceof Error?error.message:String(error)} };
+      }
+    }));
+  }
 }
 
 export class DurableFakeAgent {
@@ -430,7 +452,7 @@ export class DurableFakeAgent {
     );
   }
   async pollOnce(): Promise<boolean> {
-    await this.transport.heartbeat();
+    await this.transport.heartbeat(this.runtime instanceof NapCatRuntime ? await this.runtime.observations() : []);
     const command = await this.transport.claim();
     if (!command) return false;
     const receipt = {
@@ -512,6 +534,7 @@ export async function startAgentFromEnv(signal?:AbortSignal): Promise<DurableFak
     runtime: provider === "napcat"
       ? new NapCatRuntime({
           stateDirectory: join(nodeStateDir, "napcat"),
+          hostStateDirectory: join(process.env.NAPCAT_HOST_STATE_DIR ?? nodeStateDir, "napcat"),
           ...(process.env.NAPCAT_TOKEN === undefined ? {} : { napcatToken: process.env.NAPCAT_TOKEN }),
         })
       : await FakeRuntime.open(join(nodeStateDir,"runtime-effects.json")),

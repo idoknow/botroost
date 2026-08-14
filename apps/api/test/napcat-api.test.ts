@@ -52,6 +52,14 @@ afterAll(async () => {
 }, 30_000);
 
 describe("NapCat API vertical slice", () => {
+  it("rejects NapCat endpoints assigned to a non-NapCat node", async () => {
+    const login = await api.inject({ method: "POST", url: "/api/v1/auth/login", payload: { email: "owner@example.com", password: "correct horse battery staple" } });
+    const cookie = cookies(login.headers["set-cookie"]);
+    const node = (await api.inject({ method: "POST", url: "/api/v1/nodes", headers: mutation(cookie), payload: { name: `fake-node-${Date.now()}`, provider: "fake" } })).json();
+    const response = await api.inject({ method: "POST", url: "/api/v1/endpoints", headers: mutation(cookie), payload: { name: "bad-binding", providerId: "napcat", nodeId: node.id } });
+    expect(response.statusCode).toBe(409);
+  });
+
   it("enables NapCat endpoints on an outbound node and dispatches pinned runtime requests", async () => {
     const login = await api.inject({ method: "POST", url: "/api/v1/auth/login", payload: { email: "owner@example.com", password: "correct horse battery staple" } });
     const cookie = cookies(login.headers["set-cookie"]);
