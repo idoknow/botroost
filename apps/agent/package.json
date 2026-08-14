@@ -12,7 +12,7 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src test",
-    "test": "vitest run test/agent.test.ts",
+    "test": "vitest run apps/agent/test/agent.test.ts apps/agent/test/napcat-runtime.test.ts",
     "start": "node dist/cli.js"
   },
   "dependencies": {

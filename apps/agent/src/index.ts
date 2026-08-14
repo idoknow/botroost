@@ -1,12 +1,100 @@
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
+import { promisify } from "node:util";
 import { FileAgentJournal } from "@botroost/agent-journal";
 import {
   AgentHeartbeatRequestSchema,
   RuntimeCommandSchema,
+  type CommandResultRequest,
   type RuntimeCommand,
 } from "@botroost/agent-protocol";
+
+type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
+type JsonObject = { [key: string]: JsonValue };
+
+const execFileAsync = promisify(execFile);
+export const NAPCAT_IMAGE =
+  "mlikiowa/napcat-docker@sha256:9254ec12af101576c5eeb4910847abd1d219297bc6d9a35c52511e12500f0f45";
+export const NAPCAT_ARTIFACT =
+  "artifact:napcat:mlikiowa.napcat-docker.sha256.9254ec12af101576c5eeb4910847abd1d219297bc6d9a35c52511e12500f0f45";
+const endpointIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const containerPrefixPattern = /^[a-z0-9][a-z0-9_.-]{0,63}$/i;
+
+export interface DockerCreateInput {
+  name: string;
+  image: string;
+  labels: Record<string, string>;
+  environment?: Record<string, string>;
+  mounts: { type: "bind"; source: string; target: string }[];
+  hostConfig: { networkMode: string; portBindings: Record<string, never> };
+  resources: { cpuMillis: number; memoryMiB: number };
+}
+export interface DockerInspectResult {
+  id: string;
+  name: string;
+  state: "created" | "running" | "exited" | "unknown";
+  ipAddress: string | null;
+  labels: Record<string, string>;
+}
+export interface DockerClient {
+  inspect(name: string): Promise<DockerInspectResult | null>;
+  create(input: DockerCreateInput): Promise<{ id: string }>;
+  start(name: string): Promise<void>;
+  stop(name: string): Promise<void>;
+  restart(name: string): Promise<void>;
+  exec(container: string, args: string[]): Promise<{ stdout: string; stderr: string }>;
+}
+
+export class DockerCliClient implements DockerClient {
+  private async docker(args: string[]) {
+    const { stdout, stderr } = await execFileAsync("docker", args, { timeout: 30_000, maxBuffer: 1024 * 1024 });
+    return { stdout: String(stdout), stderr: String(stderr) };
+  }
+  async inspect(name: string): Promise<DockerInspectResult | null> {
+    try {
+      const { stdout } = await this.docker(["inspect", name]);
+      const item = (JSON.parse(stdout) as Record<string, unknown>[])[0];
+      if (!item) return null;
+      const state = item.State as Record<string, unknown> | undefined;
+      const settings = item.NetworkSettings as Record<string, unknown> | undefined;
+      const networks = settings?.Networks as Record<string, { IPAddress?: string }> | undefined;
+      const ipAddress = Object.values(networks ?? {})[0]?.IPAddress ?? null;
+      return {
+        id: String(item.Id),
+        name: String(item.Name).replace(/^\//, ""),
+        state: state?.Running ? "running" : "exited",
+        ipAddress,
+        labels: ((item.Config as Record<string, unknown> | undefined)?.Labels as Record<string, string> | undefined) ?? {},
+      };
+    } catch (error) {
+      const stderr = (error as { stderr?: string }).stderr ?? "";
+      if (String(stderr).includes("No such object")) return null;
+      throw error;
+    }
+  }
+  async create(input: DockerCreateInput) {
+    const args = [
+      "create",
+      "--name", input.name,
+      "--network", input.hostConfig.networkMode,
+      "--memory", `${input.resources.memoryMiB}m`,
+      "--cpu-quota", String(input.resources.cpuMillis * 100),
+    ];
+    for (const [key, value] of Object.entries(input.labels)) args.push("--label", `${key}=${value}`);
+    for (const [key, value] of Object.entries(input.environment ?? {})) args.push("--env", `${key}=${value}`);
+    for (const mount of input.mounts) args.push("--mount", `type=bind,src=${mount.source},dst=${mount.target}`);
+    args.push(input.image);
+    const { stdout } = await this.docker(args);
+    return { id: stdout.trim() };
+  }
+  async start(name: string) { await this.docker(["start", name]); }
+  async stop(name: string) { await this.docker(["stop", "--time", "20", name]); }
+  async restart(name: string) { await this.docker(["restart", "--time", "20", name]); }
+  async exec(container: string, args: string[]) { return this.docker(["exec", container, ...args]); }
+}
 
 export interface NodeCredential {
   nodeId: string;
@@ -61,25 +149,18 @@ export class NodeCredentialStore {
 }
 
 export interface AgentCommandTransport {
-  heartbeat(): Promise<{ connectionEpoch: number }>;
-  claim(): Promise<RuntimeCommand | null>;
-  receipt(commandId: string, receipt: { operationId: string; generation: number; connectionEpoch: number }): Promise<void>;
-  result(result: {
-    commandId: string;
-    operationId: string;
+  heartbeat(runtimes?: {
     endpointId: string;
     generation: number;
-    connectionEpoch: number;
-    outcome: "succeeded" | "failed" | "unknown";
-    observations: {
-      node: "online";
-      runtime: "ready" | "stopped" | "failed" | "unknown";
-      provider: "available" | "unavailable" | "unknown" | "degraded";
-      protocol: "connected";
-      convergence: "converged" | "failed" | "reconciling" | "unknown" | "conflicted";
-    };
-    error?: string;
-  }): Promise<void>;
+    runtime: "ready" | "stopped" | "failed" | "unknown";
+    provider: "available" | "unavailable" | "unknown" | "degraded";
+    protocol: "connected" | "disconnected" | "connecting" | "unknown";
+    convergence: "converged" | "failed" | "reconciling" | "unknown" | "conflicted";
+    metadata?: JsonObject;
+  }[]): Promise<{ connectionEpoch: number }>;
+  claim(): Promise<RuntimeCommand | null>;
+  receipt(commandId: string, receipt: { operationId: string; generation: number; connectionEpoch: number }): Promise<void>;
+  result(result: Omit<CommandResultRequest, "sessionId"> & { commandId: string }): Promise<void>;
 }
 
 export class HttpAgentTransport implements AgentCommandTransport {
@@ -105,12 +186,12 @@ export class HttpAgentTransport implements AgentCommandTransport {
     if (!response.ok) throw new Error(`control plane request failed: ${response.status}`);
     return response.status === 204 ? (undefined as T) : ((await response.json()) as T);
   }
-  heartbeat() {
+  heartbeat(runtimes: Parameters<AgentCommandTransport["heartbeat"]>[0] = []) {
     return this.request<{ connectionEpoch: number }>("/api/v1/agent/heartbeat", {
       status: "online",
       sessionId:this.sessionId,
       observedAt: new Date().toISOString(),
-      runtimes: [],
+      runtimes,
     });
   }
   async claim() {
@@ -183,15 +264,209 @@ export class FakeRuntime {
   }
 }
 
+export class NapCatRuntime {
+  private readonly networkMode: string;
+  private readonly containerPrefix: string;
+  private readonly fetcher: typeof fetch;
+  private readonly commands = new Map<string, RuntimeCommand>();
+  private commandsLoaded = false;
+  constructor(private readonly options: {
+    docker?: DockerClient;
+    stateDirectory: string;
+    hostStateDirectory?: string;
+    containerPrefix?: string;
+    networkMode?: string;
+    napcatToken?: string;
+    fetcher?: typeof fetch;
+  }) {
+    this.networkMode = options.networkMode ?? process.env.NAPCAT_DOCKER_NETWORK ?? "bridge";
+    this.containerPrefix = options.containerPrefix ?? "botroost-napcat";
+    if (!/^[a-z0-9][a-z0-9_.-]{0,63}$/i.test(this.networkMode) || this.networkMode === "host" || this.networkMode.startsWith("container:")) throw new Error("NapCat docker network is invalid");
+    if (!containerPrefixPattern.test(this.containerPrefix)) throw new Error("container prefix is invalid");
+    if (!(options.napcatToken ?? process.env.NAPCAT_TOKEN)) throw new Error("NapCat token is required");
+    this.fetcher = options.fetcher ?? globalThis.fetch;
+  }
+  private docker() { return this.options.docker ?? new DockerCliClient(); }
+  private commandStatePath() { return join(this.options.stateDirectory, "runtime-commands.json"); }
+  private async loadCommands() {
+    if (this.commandsLoaded) return;
+    this.commandsLoaded = true;
+    try {
+      const stored = JSON.parse(await readFile(this.commandStatePath(), "utf8")) as unknown[];
+      for (const value of stored) { const command = RuntimeCommandSchema.parse(value); this.commands.set(command.endpointId, command); }
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  }
+  private async persistCommands() {
+    await mkdir(this.options.stateDirectory, { recursive: true, mode: 0o700 });
+    const temporary = `${this.commandStatePath()}.${process.pid}.tmp`;
+    await writeFile(temporary, `${JSON.stringify([...this.commands.values()])}\n`, { mode: 0o600 });
+    await rename(temporary, this.commandStatePath());
+  }
+  private endpointDirectory(endpointId: string, child: "qq" | "config") {
+    if (!endpointIdPattern.test(endpointId)) throw new Error("endpoint identifier is invalid");
+    const root = resolve(this.options.stateDirectory);
+    const path = resolve(root, endpointId, child);
+    if (!path.startsWith(`${root}${sep}`)) throw new Error("endpoint storage path is invalid");
+    return path;
+  }
+  private hostEndpointDirectory(endpointId: string, child: "qq" | "config") {
+    if (!endpointIdPattern.test(endpointId)) throw new Error("endpoint identifier is invalid");
+    const root = resolve(this.options.hostStateDirectory ?? this.options.stateDirectory);
+    const path = resolve(root, endpointId, child);
+    if (!path.startsWith(`${root}${sep}`)) throw new Error("endpoint storage path is invalid");
+    return path;
+  }
+  private containerName(endpointId: string) {
+    if (!endpointIdPattern.test(endpointId)) throw new Error("endpoint identifier is invalid");
+    return `${this.containerPrefix}-${endpointId}`;
+  }
+  private assertAllowed(command: RuntimeCommand) {
+    const image = typeof command.metadata.image === "string" ? command.metadata.image : NAPCAT_IMAGE;
+    if (image !== NAPCAT_IMAGE || command.runtimeRequest.approvedArtifactId !== NAPCAT_ARTIFACT)
+      throw new Error("NapCat image is not allowlisted");
+  }
+  async apply(_effectId: string, command: RuntimeCommand): Promise<{ state: "running" | "stopped"; observations?: Parameters<AgentCommandTransport["result"]>[0]["observations"]; metadata?: JsonObject }> {
+    this.assertAllowed(command);
+    await this.loadCommands();
+    this.commands.set(command.endpointId, command);
+    await this.persistCommands();
+    const name = this.containerName(command.endpointId);
+    const docker = this.docker();
+    const existing = await docker.inspect(name);
+    if (command.action !== "stop" && !existing) {
+      const qq = this.endpointDirectory(command.endpointId, "qq");
+      const config = this.endpointDirectory(command.endpointId, "config");
+      const hostQq = this.hostEndpointDirectory(command.endpointId, "qq");
+      const hostConfig = this.hostEndpointDirectory(command.endpointId, "config");
+      await mkdir(qq, { recursive: true, mode: 0o700 });
+      await mkdir(config, { recursive: true, mode: 0o700 });
+      await docker.create({
+        name,
+        image: NAPCAT_IMAGE,
+        labels: {
+          "botroost.provider": "napcat",
+          "botroost.workspace_id": command.workspaceId,
+          "botroost.endpoint_id": command.endpointId,
+          "botroost.generation": String(command.generation),
+        },
+        environment: { NAPCAT_WEBUI_SECRET_KEY: this.options.napcatToken ?? process.env.NAPCAT_TOKEN ?? "" },
+        mounts: [
+          { type: "bind", source: hostQq, target: "/app/.config/QQ" },
+          { type: "bind", source: hostConfig, target: "/app/napcat/config" },
+        ],
+        hostConfig: { networkMode: this.networkMode, portBindings: {} },
+        resources: command.runtimeRequest.resources,
+      });
+    }
+    if (command.action === "stop" && existing) await docker.stop(name);
+    else if (command.action === "restart") await docker.restart(name);
+    else await docker.start(name);
+    const snapshot = await this.snapshot(command).catch(error => ({ endpointId:command.endpointId,generation:command.generation,runtime:"unknown" as const,provider:"degraded" as const,protocol:"disconnected" as const,convergence:"reconciling" as const,metadata:{error:error instanceof Error?error.message:String(error)} }));
+    const running = command.action !== "stop";
+    return {
+      state: running ? "running" : "stopped",
+      observations: {
+        node: "online",
+        runtime: snapshot.runtime,
+        provider: snapshot.provider,
+        protocol: snapshot.protocol,
+        convergence: snapshot.convergence,
+      }, metadata: snapshot.metadata,
+    };
+  }
+  private async napcatRequest(base: URL, path: string, webToken: string, body?: unknown) {
+    const response = await this.fetcher(new URL(path, base), {
+      method: body === undefined ? "GET" : "POST",
+      headers: { authorization: `Bearer ${webToken}`, "content-type": "application/json" },
+      signal: AbortSignal.timeout(10_000),
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    if (!response.ok) throw new Error(`NapCat request failed: ${response.status}`);
+    const payload = await response.json() as JsonObject;
+    if (typeof payload.code === "number" && payload.code !== 0) throw new Error(`NapCat request rejected: ${String(payload.message ?? payload.code)}`);
+    return payload;
+  }
+  async snapshot(command: RuntimeCommand): Promise<{
+    endpointId: string;
+    generation: number;
+    runtime: "ready" | "stopped" | "failed" | "unknown";
+    provider: "available" | "unavailable" | "unknown" | "degraded";
+    protocol: "connected" | "disconnected" | "connecting" | "unknown";
+    convergence: "converged" | "failed" | "reconciling" | "unknown" | "conflicted";
+    metadata: JsonObject;
+  }> {
+    this.assertAllowed(command);
+    const inspected = await this.docker().inspect(this.containerName(command.endpointId));
+    if (!inspected || inspected.state !== "running" || !inspected.ipAddress) {
+      return { endpointId: command.endpointId, generation: command.generation, runtime: "stopped", provider: "unknown", protocol: "disconnected", convergence: "reconciling", metadata: {} };
+    }
+    const base = new URL(`http://${inspected.ipAddress}:6099`);
+    const loginToken = this.options.napcatToken ?? process.env.NAPCAT_TOKEN ?? "";
+    const hashed = createHash("sha256").update(`${loginToken}.napcat`).digest("hex");
+    const auth = await this.fetcher(new URL("/api/auth/login", base), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ hash: hashed }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!auth.ok) throw new Error(`NapCat auth failed: ${auth.status}`);
+    const authBody = await auth.json() as JsonObject;
+    if (typeof authBody.code === "number" && authBody.code !== 0) throw new Error(`NapCat auth rejected: ${String(authBody.message ?? authBody.code)}`);
+    const authData = authBody.data;
+    const credential = authData !== null && typeof authData === "object" && !Array.isArray(authData) ? authData.Credential : undefined;
+    const webToken = typeof credential === "string" ? credential : "";
+    if (!webToken) throw new Error("NapCat auth token missing");
+    const qrcode = await this.napcatRequest(base, "/api/QQLogin/GetQQLoginQrcode", webToken, {});
+    const loginInfo = await this.napcatRequest(base, "/api/QQLogin/GetQQLoginInfo", webToken, {});
+    const debugSession = await this.napcatRequest(base, "/api/Debug/create", webToken, {});
+    const adapterName = (debugSession.data as Record<string, unknown> | undefined)?.adapterName;
+    if (typeof adapterName !== "string" || !adapterName) throw new Error("NapCat debug adapter missing");
+    const callOneBot = (action: "get_status" | "get_login_info") => this.napcatRequest(base, `/api/Debug/call/${encodeURIComponent(adapterName)}`, webToken, { action, params: {} });
+    const status = await callOneBot("get_status");
+    const onebotLogin = await callOneBot("get_login_info");
+    const objectData = (value: JsonObject): JsonObject => {
+      const data = value.data;
+      return data !== null && typeof data === "object" && !Array.isArray(data) ? data : value;
+    };
+    return {
+      endpointId: command.endpointId,
+      generation: command.generation,
+      runtime: "ready",
+      provider: "available",
+      protocol: "connected",
+      convergence: "converged",
+      metadata: {
+        qq: objectData(loginInfo),
+        login: objectData(qrcode),
+        onebot: {
+          status: objectData(status),
+          loginInfo: objectData(onebotLogin),
+        },
+      },
+    };
+  }
+  async observations(): Promise<NonNullable<Parameters<AgentCommandTransport["heartbeat"]>[0]>> {
+    await this.loadCommands();
+    return Promise.all([...this.commands.values()].map(async command => {
+      try {
+        const snapshot = await this.snapshot(command);
+        return { endpointId:snapshot.endpointId,generation:snapshot.generation,runtime:snapshot.runtime,provider:snapshot.provider,protocol:snapshot.protocol,convergence:snapshot.convergence,metadata:snapshot.metadata };
+      } catch (error) {
+        return { endpointId:command.endpointId,generation:command.generation,runtime:"failed" as const,provider:"degraded" as const,protocol:"disconnected" as const,convergence:"failed" as const,metadata:{error:error instanceof Error?error.message:String(error)} };
+      }
+    }));
+  }
+}
+
 export class DurableFakeAgent {
   private constructor(
     private readonly journal: FileAgentJournal,
-    private readonly runtime: FakeRuntime,
+    private readonly runtime: FakeRuntime | NapCatRuntime,
     private readonly transport: AgentCommandTransport,
   ) {}
   static async open(options: {
     journalPath: string;
-    runtime?: FakeRuntime;
+    runtime?: FakeRuntime | NapCatRuntime;
     transport: AgentCommandTransport;
   }) {
     return new DurableFakeAgent(
@@ -201,7 +476,7 @@ export class DurableFakeAgent {
     );
   }
   async pollOnce(): Promise<boolean> {
-    await this.transport.heartbeat();
+    await this.transport.heartbeat(this.runtime instanceof NapCatRuntime ? await this.runtime.observations() : []);
     const command = await this.transport.claim();
     if (!command) return false;
     const receipt = {
@@ -215,21 +490,24 @@ export class DurableFakeAgent {
     let result = this.journal.get(command.commandId)?.result;
     if (!result) {
       const effectId=`runtime:${command.commandId}`;
-      if (!this.journal.get(command.commandId)?.effects[effectId])
-        await this.journal.recordEffect(command.commandId, effectId, await this.runtime.apply(effectId,command));
+      let applied = this.journal.get(command.commandId)?.effects[effectId] as Awaited<ReturnType<NapCatRuntime["apply"]>> | undefined;
+      if (!applied)
+        applied = await this.runtime.apply(effectId,command);
+      if (applied) await this.journal.recordEffect(command.commandId, effectId, applied);
       result = {
         operationId: command.operationId,
         endpointId: command.endpointId,
         generation: command.generation,
         connectionEpoch: command.connectionEpoch,
         outcome: "succeeded",
-        observations: {
+        observations: applied?.observations ?? {
           node: "online",
           runtime: command.action === "stop" ? "stopped" : "ready",
           provider: "available",
           protocol: "connected",
           convergence: "converged",
         },
+        ...(applied?.metadata ? { metadata: applied.metadata } : {}),
       };
       await this.journal.recordResult(command.commandId, result);
     }
@@ -265,17 +543,25 @@ export async function startAgentFromEnv(signal?:AbortSignal): Promise<DurableFak
   const nodeStateDir = process.env.NODE_STATE_DIR;
   if (!controlPlaneUrl || !nodeStateDir)
     throw new Error("CONTROL_PLANE_URL and NODE_STATE_DIR are required");
+  const provider = process.env.AGENT_PROVIDER ?? "fake";
+  if (!["fake", "napcat"].includes(provider)) throw new Error("AGENT_PROVIDER must be fake or napcat");
   const store = new NodeCredentialStore(nodeStateDir);
   let credential = await store.read();
   if (!credential) {
     const token = process.env.ENROLLMENT_TOKEN;
     if (!token) throw new Error("ENROLLMENT_TOKEN is required for first start");
-    credential = await enroll(controlPlaneUrl, token,"fake",signal);
+    credential = await enroll(controlPlaneUrl, token,provider,signal);
     await store.write(credential);
   }
   return DurableFakeAgent.open({
     journalPath: join(nodeStateDir, "agent-journal.jsonl"),
-    runtime: await FakeRuntime.open(join(nodeStateDir,"runtime-effects.json")),
+    runtime: provider === "napcat"
+      ? new NapCatRuntime({
+          stateDirectory: join(nodeStateDir, "napcat"),
+          hostStateDirectory: join(process.env.NAPCAT_HOST_STATE_DIR ?? nodeStateDir, "napcat"),
+          ...(process.env.NAPCAT_TOKEN === undefined ? {} : { napcatToken: process.env.NAPCAT_TOKEN }),
+        })
+      : await FakeRuntime.open(join(nodeStateDir,"runtime-effects.json")),
     transport: new HttpAgentTransport(controlPlaneUrl, credential.nodeSecret,signal?{signal}:{}),
   });
 }

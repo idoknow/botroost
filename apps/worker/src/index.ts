@@ -1,4 +1,16 @@
 import { PostgresDatabase } from "@botroost/database";
-export class DurableWorker{constructor(private db:PostgresDatabase){}async reconcileMissingOutbox(){return this.db.repairMissingOutbox()}async runOnce(){await this.reconcileMissingOutbox();return this.db.processOne()}}
-const delay=(ms:number,signal:AbortSignal)=>new Promise<void>((resolve,reject)=>{const timer=setTimeout(resolve,ms),abort=()=>{clearTimeout(timer);reject(signal.reason)};signal.addEventListener("abort",abort,{once:true})});
-export async function runWorker(signal:AbortSignal=new AbortController().signal){const db=new PostgresDatabase(process.env.DATABASE_URL!);const worker=new DurableWorker(db);let failures=0;try{while(!signal.aborted){try{const worked=await worker.runOnce();failures=0;if(!worked)await delay(400+Math.random()*200,signal)}catch(error){if(signal.aborted)break;failures++;console.error("worker iteration failed",error);await delay(Math.min(30_000,500*2**Math.min(failures,6))*(0.75+Math.random()*0.5),signal)}}}finally{await db.close()}}
+import {ResendClient} from "./notifications.js";
+export class DurableWorker{
+  constructor(private db:PostgresDatabase,private credentialKey?:Buffer,private resend=new ResendClient()){}
+  async reconcileMissingOutbox(){return this.db.repairMissingOutbox()}
+  async runOnce(){
+    await this.reconcileMissingOutbox();
+    await this.db.reconcileNapcatNotifications();
+    const operationWorked=await this.db.processOne();
+    const notificationWorked=this.credentialKey?await this.db.processNotification(this.credentialKey,this.resend):false;
+    return operationWorked||notificationWorked;
+  }
+}
+const delay=(ms:number,signal:AbortSignal)=>new Promise<void>((resolve,reject)=>{const abort=()=>{clearTimeout(timer);reject(signal.reason)};const timer=setTimeout(()=>{signal.removeEventListener("abort",abort);resolve()},ms);signal.addEventListener("abort",abort,{once:true})});
+export async function runWorker(signal:AbortSignal=new AbortController().signal){const db=new PostgresDatabase(process.env.DATABASE_URL!);const key=Buffer.from(process.env.CREDENTIAL_MASTER_KEY??"","base64");if(key.length!==32)throw new Error("CREDENTIAL_MASTER_KEY must be 32 bytes base64");const worker=new DurableWorker(db,key);let failures=0;try{while(!signal.aborted){try{const worked=await worker.runOnce();failures=0;if(!worked)await delay(400+Math.random()*200,signal)}catch(error){if(signal.aborted)break;failures++;console.error("worker iteration failed",error);await delay(Math.min(30_000,500*2**Math.min(failures,6))*(0.75+Math.random()*0.5),signal)}}}finally{await db.close()}}
+export {ResendClient,evaluateNapcatAlertTransition} from "./notifications.js";

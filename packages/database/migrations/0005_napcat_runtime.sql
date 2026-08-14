@@ -1,0 +1,3 @@
+BEGIN;
+ALTER TABLE endpoints ADD COLUMN IF NOT EXISTS configuration jsonb NOT NULL DEFAULT '{}';
+COMMIT;
