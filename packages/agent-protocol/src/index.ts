@@ -46,6 +46,7 @@ export const AgentHeartbeatRequestSchema = z.strictObject({
       provider: layered.shape.provider,
       protocol: layered.shape.protocol,
       convergence: layered.shape.convergence,
+      metadata: jsonObject.optional(),
     }),
   ).max(200),
 });

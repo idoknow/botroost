@@ -12,7 +12,7 @@ read_secret() {
   fi
 }
 
-for variable in CREDENTIAL_MASTER_KEY BOOTSTRAP_PASSWORD ENROLLMENT_TOKEN DATABASE_PASSWORD; do
+for variable in CREDENTIAL_MASTER_KEY BOOTSTRAP_PASSWORD ENROLLMENT_TOKEN NAPCAT_TOKEN DATABASE_PASSWORD; do
   read_secret "$variable"
 done
 
@@ -25,7 +25,7 @@ if [ "$#" -gt 0 ]; then exec setpriv --reuid=node --regid=node --init-groups "$@
 case "${BOTROOST_PROCESS:-}" in
   api) exec setpriv --reuid=node --regid=node --init-groups node apps/api/dist/server.js ;;
   worker) exec setpriv --reuid=node --regid=node --init-groups node apps/worker/dist/cli.js ;;
-  agent) exec setpriv --reuid=node --regid=node --init-groups node apps/agent/dist/cli.js ;;
+  agent) exec setpriv --reuid=node --regid=node --keep-groups node apps/agent/dist/cli.js ;;
   migrate) exec setpriv --reuid=node --regid=node --init-groups node apps/api/dist/migrate.js ;;
   bootstrap)
     [ -n "${BOOTSTRAP_EMAIL:-}" ] && [ -n "${BOOTSTRAP_WORKSPACE:-}" ] || { echo "BOOTSTRAP_EMAIL and BOOTSTRAP_WORKSPACE are required" >&2; exit 1; }

@@ -10,3 +10,4 @@ export type Operation={id:string;endpointId:string;action:string;status:string;g
 export type AuditEvent={id:string;action:string;resource_type?:string;resource_id?:string;created_at?:string;metadata?:unknown};
 export type Member={id:string;email:string;role:string;created_at?:string};
 export type Credential={id:string;name:string;configured:boolean;createdAt?:string};
+export type ResendSettings={enabled:boolean;recipient:string;from:string;graceSeconds:number;apiKeyConfigured:boolean};

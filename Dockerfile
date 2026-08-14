@@ -28,6 +28,10 @@ ENV BOTROOST_PROCESS=migrate
 FROM runtime AS worker
 ENV BOTROOST_PROCESS=worker
 FROM runtime AS agent
+USER root
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends docker.io \
+ && rm -rf /var/lib/apt/lists/*
 ENV BOTROOST_PROCESS=agent
 FROM runtime AS bootstrap
 ENV BOTROOST_PROCESS=bootstrap

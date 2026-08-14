@@ -57,7 +57,8 @@ describe("agent protocol", () => {
           provider: "available",
           protocol: "connected",
           convergence: "converged",
-          metadata: { secret: "must-not-be-accepted" },
+          metadata: { login: { qrcode: "safe-observation" } },
+          secret: "must-not-be-accepted",
         }],
       }),
     ).toThrow();

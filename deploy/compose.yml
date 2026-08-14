@@ -72,9 +72,13 @@ services:
   worker:
     <<: *node-hardening
     build: {context: .., target: worker}
-    environment: *database-env
+    environment:
+      <<: *database-env
+      CREDENTIAL_MASTER_KEY_FILE: /run/secrets/credential_master_key
     secrets:
       - source: postgres_password
+        mode: 0400
+      - source: credential_master_key
         mode: 0400
     networks: [backend]
     depends_on:
@@ -121,7 +125,7 @@ services:
     profiles: [bootstrap-agent]
     restart: "no"
     command: ["sh", "-c", "chown -R 1000:1000 /var/lib/botroost-agent"]
-    volumes: [agent-state:/var/lib/botroost-agent]
+    volumes: ["${AGENT_STATE_DIR:-/opt/botroost/agent-state}:/var/lib/botroost-agent"]
     security_opt: [no-new-privileges:true]
 
   agent:
@@ -132,8 +136,14 @@ services:
       CONTROL_PLANE_URL: http://api:3000
       NODE_STATE_DIR: /var/lib/botroost-agent
       ENROLLMENT_TOKEN_FILE: /run/secrets/enrollment_token
-    secrets: [enrollment_token]
-    volumes: [agent-state:/var/lib/botroost-agent]
+      NAPCAT_TOKEN_FILE: /run/secrets/napcat_token
+      NAPCAT_DOCKER_NETWORK: botroost_backend
+      AGENT_PROVIDER: napcat
+    secrets: [enrollment_token, napcat_token]
+    group_add: ["${DOCKER_GID:-999}"]
+    volumes:
+      - "${AGENT_STATE_DIR:-/opt/botroost/agent-state}:/var/lib/botroost-agent"
+      - /var/run/docker.sock:/var/run/docker.sock
     networks: [backend]
     depends_on:
       api: {condition: service_healthy}
@@ -148,10 +158,11 @@ secrets:
     file: "${BOOTSTRAP_PASSWORD_FILE:-./secrets/bootstrap_password}"
   enrollment_token:
     file: "${ENROLLMENT_TOKEN_FILE:-./secrets/enrollment_token}"
+  napcat_token:
+    file: "${NAPCAT_TOKEN_FILE:-./secrets/napcat_token}"
 
 volumes:
   postgres-data:
-  agent-state:
 
 networks:
   backend: {internal: true}
