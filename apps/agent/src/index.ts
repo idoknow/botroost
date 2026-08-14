@@ -269,6 +269,7 @@ export class NapCatRuntime {
   private readonly containerPrefix: string;
   private readonly fetcher: typeof fetch;
   private readonly commands = new Map<string, RuntimeCommand>();
+  private readonly snapshotCache = new Map<string, { at: number; value: Awaited<ReturnType<NapCatRuntime["snapshot"]>> }>();
   private commandsLoaded = false;
   constructor(private readonly options: {
     docker?: DockerClient;
@@ -448,8 +449,11 @@ export class NapCatRuntime {
   async observations(): Promise<NonNullable<Parameters<AgentCommandTransport["heartbeat"]>[0]>> {
     await this.loadCommands();
     return Promise.all([...this.commands.values()].map(async command => {
+      const cached = this.snapshotCache.get(command.endpointId);
+      if (cached && Date.now() - cached.at < 15_000) return { endpointId:cached.value.endpointId,generation:cached.value.generation,runtime:cached.value.runtime,provider:cached.value.provider,protocol:cached.value.protocol,convergence:cached.value.convergence,metadata:cached.value.metadata };
       try {
         const snapshot = await this.snapshot(command);
+        this.snapshotCache.set(command.endpointId, { at: Date.now(), value: snapshot });
         return { endpointId:snapshot.endpointId,generation:snapshot.generation,runtime:snapshot.runtime,provider:snapshot.provider,protocol:snapshot.protocol,convergence:snapshot.convergence,metadata:snapshot.metadata };
       } catch (error) {
         return { endpointId:command.endpointId,generation:command.generation,runtime:"failed" as const,provider:"degraded" as const,protocol:"disconnected" as const,convergence:"failed" as const,metadata:{error:error instanceof Error?error.message:String(error)} };
