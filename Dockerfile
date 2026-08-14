@@ -32,7 +32,6 @@ USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends docker.io \
  && rm -rf /var/lib/apt/lists/*
-USER node
 ENV BOTROOST_PROCESS=agent
 FROM runtime AS bootstrap
 ENV BOTROOST_PROCESS=bootstrap
