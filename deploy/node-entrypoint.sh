@@ -25,7 +25,11 @@ if [ "$#" -gt 0 ]; then exec setpriv --reuid=node --regid=node --init-groups "$@
 case "${BOTROOST_PROCESS:-}" in
   api) exec setpriv --reuid=node --regid=node --init-groups node apps/api/dist/server.js ;;
   worker) exec setpriv --reuid=node --regid=node --init-groups node apps/worker/dist/cli.js ;;
-  agent) exec setpriv --reuid=node --regid=node --keep-groups node apps/agent/dist/cli.js ;;
+  agent)
+    export ENROLLMENT_TOKEN="$(read_secret ENROLLMENT_TOKEN)"
+    export NAPCAT_TOKEN="$(read_secret NAPCAT_TOKEN)"
+    exec setpriv --reuid=node --regid=node --keep-groups node apps/agent/dist/cli.js
+    ;;
   migrate) exec setpriv --reuid=node --regid=node --init-groups node apps/api/dist/migrate.js ;;
   bootstrap)
     [ -n "${BOOTSTRAP_EMAIL:-}" ] && [ -n "${BOOTSTRAP_WORKSPACE:-}" ] || { echo "BOOTSTRAP_EMAIL and BOOTSTRAP_WORKSPACE are required" >&2; exit 1; }
