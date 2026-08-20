@@ -431,7 +431,7 @@ export class NapCatRuntime {
   private async webCredential(endpointId: string, base: URL) {
     const cached=this.webCredentials.get(endpointId);
     if(cached)return cached;
-    const loginToken=this.options.napcatToken??process.env.NAPCAT_TOKEN??"";
+    const loginToken=(this.options.napcatToken??process.env.NAPCAT_TOKEN??"").trim();
     const hashed=createHash("sha256").update(`${loginToken}.napcat`).digest("hex");
     const auth=await this.fetcher(new URL("/api/auth/login",base),{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({hash:hashed}),signal:AbortSignal.timeout(10_000)});
     if(!auth.ok)throw new Error(`NapCat auth failed: ${auth.status}`);
