@@ -435,8 +435,15 @@ export class NapCatRuntime {
     }
     const base = new URL(`http://${inspected.ipAddress}:6099`);
     const webToken=await this.webCredential(command.endpointId,base);
-    const qrcode = await this.napcatRequest(base, "/api/QQLogin/GetQQLoginQrcode", webToken, {}, command.endpointId);
-    const loginInfo = await this.napcatRequest(base, "/api/QQLogin/GetQQLoginInfo", webToken, {}, command.endpointId);
+    let qrcode:JsonObject;
+    try {
+      qrcode=await this.napcatRequest(base,"/api/QQLogin/GetQQLoginQrcode",webToken,{},command.endpointId);
+    } catch(error) {
+      if(!(error instanceof Error)||!error.message.includes("QRCode Get Error"))throw error;
+      await this.napcatRequest(base,"/api/QQLogin/RefreshQRcode",webToken,{},command.endpointId);
+      qrcode=await this.napcatRequest(base,"/api/QQLogin/GetQQLoginQrcode",await this.webCredential(command.endpointId,base),{},command.endpointId);
+    }
+    const loginInfo = await this.napcatRequest(base, "/api/QQLogin/GetQQLoginInfo", await this.webCredential(command.endpointId,base), {}, command.endpointId);
     const objectData = (value: JsonObject): JsonObject => {
       const data = value.data;
       return data !== null && typeof data === "object" && !Array.isArray(data) ? data : value;

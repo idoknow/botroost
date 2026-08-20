@@ -197,6 +197,16 @@ describe("NapCat runtime", () => {
     expect(paths).not.toContain("/api/Debug/create");
   });
 
+  it("asks NapCat to create a QR when none exists yet", async () => {
+    const docker = new RecordingDocker();
+    docker.inspect = async () => ({ id:"container-id",name:"botroost-napcat-33333333-3333-4333-8333-333333333333",state:"running" as const,ipAddress:"172.18.0.10",labels:{} });
+    let qrRequests=0;
+    const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"botroost-napcat-create-qr-")),napcatToken:"operator-token",fetcher:async url=>{const path=new URL(String(url)).pathname;if(path==="/api/auth/login")return new Response(JSON.stringify({code:0,data:{Credential:"credential"}}));if(path==="/api/QQLogin/GetQQLoginQrcode"){qrRequests++;return new Response(JSON.stringify(qrRequests===1?{code:-1,message:"QRCode Get Error"}:{code:0,data:{qrcode:"qr-created"}}))}if(path==="/api/QQLogin/RefreshQRcode")return new Response(JSON.stringify({code:0,data:null}));if(path==="/api/QQLogin/GetQQLoginInfo")return new Response(JSON.stringify({code:0,data:{online:false}}));throw new Error(`unexpected request ${path}`)}});
+    const snapshot=await runtime.snapshot(baseCommand);
+    expect(snapshot.metadata.login).toEqual({qrcode:"qr-created"});
+    expect(qrRequests).toBe(2);
+  });
+
   it("refreshes an expired QR code through NapCat and returns the replacement", async () => {
     const docker = new RecordingDocker();
     docker.inspect = async () => ({ id: "container-id", name: "botroost-napcat-33333333-3333-4333-8333-333333333333", state: "running" as const, ipAddress: "172.18.0.10", labels: {} });
