@@ -133,6 +133,8 @@ describe("NapCat API vertical slice", () => {
     const endpoint = (await api.inject({ method:"POST",url:"/api/v1/endpoints",headers:mutation(cookie),payload:{name:`napcat-refresh-${Date.now()}`,providerId:"napcat",nodeId:node.id} })).json();
     const response = await api.inject({ method:"POST",url:`/api/v1/endpoints/${endpoint.id}/napcat/login-qrcode`,headers:{...mutation(cookie),"idempotency-key":"refresh-qr"} });
     expect(response.statusCode).toBe(202);
+    const endpointAfter=(await api.inject({method:"GET",url:`/api/v1/endpoints/${endpoint.id}`,headers:{cookie}})).json();
+    expect(endpointAfter.desired).toEqual({state:"stopped"});
     await new DurableWorker(db).runOnce();
     const command=await db.pool.query("SELECT action FROM agent_commands WHERE endpoint_id=$1 ORDER BY created_at DESC LIMIT 1",[endpoint.id]);
     expect(command.rows[0]?.action).toBe("refresh-login-qr");

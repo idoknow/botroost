@@ -177,6 +177,16 @@ describe("NapCat runtime", () => {
     expect(authCalls).toBe(1);
   });
 
+  it("reauthenticates once when a cached WebUI credential expires", async () => {
+    const docker = new RecordingDocker();
+    docker.inspect = async () => ({ id:"container-id",name:"botroost-napcat-33333333-3333-4333-8333-333333333333",state:"running" as const,ipAddress:"172.18.0.10",labels:{} });
+    let authCalls=0;
+    const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"botroost-napcat-reauth-")),napcatToken:"operator-token",fetcher:async(url,init)=>{const path=new URL(String(url)).pathname;if(path==="/api/auth/login"){authCalls++;return new Response(JSON.stringify({code:0,data:{Credential:`credential-${authCalls}`}}))}const authorization=new Headers(init?.headers).get("authorization");if(authorization==="Bearer credential-1")return new Response("expired",{status:401});if(path==="/api/QQLogin/GetQQLoginQrcode")return new Response(JSON.stringify({code:0,data:{qrcode:"qr-current"}}));if(path==="/api/QQLogin/GetQQLoginInfo")return new Response(JSON.stringify({code:0,data:{online:false}}));throw new Error(`unexpected request ${path}`)}});
+    const snapshot=await runtime.snapshot(baseCommand);
+    expect(snapshot.metadata.login).toEqual({qrcode:"qr-current"});
+    expect(authCalls).toBe(2);
+  });
+
   it("keeps a fresh QR available while QQ is not logged in and skips unavailable OneBot probes", async () => {
     const docker = new RecordingDocker();
     docker.inspect = async () => ({ id:"container-id",name:"botroost-napcat-33333333-3333-4333-8333-333333333333",state:"running" as const,ipAddress:"172.18.0.10",labels:{} });

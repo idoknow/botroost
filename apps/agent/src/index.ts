@@ -367,7 +367,7 @@ export class NapCatRuntime {
       if (!existing?.ipAddress) throw new Error("NapCat container is not available for QR refresh");
       const base=new URL(`http://${existing.ipAddress}:6099`);
       const credential=await this.webCredential(command.endpointId,base);
-      await this.napcatRequest(base,"/api/QQLogin/RefreshQRcode",credential,{});
+      await this.napcatRequest(base,"/api/QQLogin/RefreshQRcode",credential,{},command.endpointId);
       this.snapshotCache.delete(command.endpointId);
     }
     const snapshot = await this.snapshot(command).catch(error => ({ endpointId:command.endpointId,generation:command.generation,runtime:"unknown" as const,provider:"degraded" as const,protocol:"disconnected" as const,convergence:"reconciling" as const,metadata:{error:error instanceof Error?error.message:String(error)} }));
@@ -383,13 +383,22 @@ export class NapCatRuntime {
       }, metadata: snapshot.metadata,
     };
   }
-  private async napcatRequest(base: URL, path: string, webToken: string, body?: unknown) {
-    const response = await this.fetcher(new URL(path, base), {
+  private async napcatRequest(base: URL, path: string, webToken: string, body?: unknown, endpointId?: string) {
+    const request = (token: string) => this.fetcher(new URL(path, base), {
       method: body === undefined ? "GET" : "POST",
-      headers: { authorization: `Bearer ${webToken}`, "content-type": "application/json" },
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
       signal: AbortSignal.timeout(10_000),
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
+    let response = await request(webToken);
+    if (response.status === 401 && endpointId) {
+      const current = this.webCredentials.get(endpointId);
+      if (current && current !== webToken) response = await request(current);
+      if (response.status === 401) {
+        this.webCredentials.delete(endpointId);
+        response = await request(await this.webCredential(endpointId, base));
+      }
+    }
     if (!response.ok) throw new Error(`NapCat request failed: ${response.status}`);
     const payload = await response.json() as JsonObject;
     if (typeof payload.code === "number" && payload.code !== 0) throw new Error(`NapCat request rejected: ${String(payload.message ?? payload.code)}`);
@@ -426,18 +435,18 @@ export class NapCatRuntime {
     }
     const base = new URL(`http://${inspected.ipAddress}:6099`);
     const webToken=await this.webCredential(command.endpointId,base);
-    const qrcode = await this.napcatRequest(base, "/api/QQLogin/GetQQLoginQrcode", webToken, {});
-    const loginInfo = await this.napcatRequest(base, "/api/QQLogin/GetQQLoginInfo", webToken, {});
+    const qrcode = await this.napcatRequest(base, "/api/QQLogin/GetQQLoginQrcode", webToken, {}, command.endpointId);
+    const loginInfo = await this.napcatRequest(base, "/api/QQLogin/GetQQLoginInfo", webToken, {}, command.endpointId);
     const objectData = (value: JsonObject): JsonObject => {
       const data = value.data;
       return data !== null && typeof data === "object" && !Array.isArray(data) ? data : value;
     };
     const qq=objectData(loginInfo);
     if(qq.online!==true){return{endpointId:command.endpointId,generation:command.generation,runtime:"ready",provider:"available",protocol:"disconnected",convergence:"reconciling",metadata:{qq,login:objectData(qrcode),onebot:null}}}
-    const debugSession = await this.napcatRequest(base, "/api/Debug/create", webToken, {});
+    const debugSession = await this.napcatRequest(base, "/api/Debug/create", webToken, {}, command.endpointId);
     const adapterName = (debugSession.data as Record<string, unknown> | undefined)?.adapterName;
     if (typeof adapterName !== "string" || !adapterName) throw new Error("NapCat debug adapter missing");
-    const callOneBot = (action: "get_status" | "get_login_info") => this.napcatRequest(base, `/api/Debug/call/${encodeURIComponent(adapterName)}`, webToken, { action, params: {} });
+    const callOneBot = (action: "get_status" | "get_login_info") => this.napcatRequest(base, `/api/Debug/call/${encodeURIComponent(adapterName)}`, webToken, { action, params: {} }, command.endpointId);
     const status = await callOneBot("get_status");
     const onebotLogin = await callOneBot("get_login_info");
     return {
