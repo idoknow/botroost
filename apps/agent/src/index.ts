@@ -35,6 +35,7 @@ export interface DockerCreateInput {
 export interface DockerInspectResult {
   id: string;
   name: string;
+  image: string;
   state: "created" | "running" | "exited" | "unknown";
   ipAddress: string | null;
   labels: Record<string, string>;
@@ -42,6 +43,7 @@ export interface DockerInspectResult {
 export interface DockerClient {
   inspect(name: string): Promise<DockerInspectResult | null>;
   create(input: DockerCreateInput): Promise<{ id: string }>;
+  remove(name: string): Promise<void>;
   start(name: string): Promise<void>;
   stop(name: string): Promise<void>;
   restart(name: string): Promise<void>;
@@ -66,6 +68,7 @@ export class DockerCliClient implements DockerClient {
       return {
         id: String(item.Id),
         name: String(item.Name).replace(/^\//, ""),
+        image: String((item.Config as Record<string, unknown> | undefined)?.Image ?? ""),
         state: state?.Running ? "running" : "exited",
         ipAddress,
         labels: ((item.Config as Record<string, unknown> | undefined)?.Labels as Record<string, string> | undefined) ?? {},
@@ -91,6 +94,7 @@ export class DockerCliClient implements DockerClient {
     const { stdout } = await this.docker(args);
     return { id: stdout.trim() };
   }
+  async remove(name: string) { await this.docker(["rm", "-f", name]); }
   async start(name: string) { await this.docker(["start", name]); }
   async stop(name: string) { await this.docker(["stop", "--time", "20", name]); }
   async restart(name: string) { await this.docker(["restart", "--time", "20", name]); }
@@ -345,6 +349,7 @@ export class NapCatRuntime {
     await this.persistCommands();
     const name = this.containerName(command.endpointId);
     const docker = this.docker();
+    const desiredImage = typeof command.metadata.image === "string" ? command.metadata.image : NAPCAT_IMAGE;
     const existing = await docker.inspect(name);
     if(command.action==="read-container-logs"){
       if(!existing||existing.labels["botroost.workspace_id"]!==command.workspaceId||existing.labels["botroost.endpoint_id"]!==command.endpointId||existing.labels["botroost.provider"]!=="napcat")throw new Error("NapCat container ownership check failed");
@@ -353,7 +358,8 @@ export class NapCatRuntime {
       const text=this.redactLogs(await docker.logs(name,{tail,sinceSeconds}));
       return{state:existing.state==="running"?"running":"stopped",observations:{node:"online",runtime:existing.state==="running"?"ready":"stopped",provider:"available",protocol:"unknown",convergence:"converged"},metadata:{logs:{text,tail,sinceSeconds}}};
     }
-    if (command.action !== "stop" && !existing) {
+    if (command.action !== "stop" && (!existing || existing.image !== desiredImage)) {
+      if (existing) await docker.remove(name);
       const qq = this.endpointDirectory(command.endpointId, "qq");
       const config = this.endpointDirectory(command.endpointId, "config");
       const hostQq = this.hostEndpointDirectory(command.endpointId, "qq");

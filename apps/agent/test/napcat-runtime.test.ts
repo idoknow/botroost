@@ -32,6 +32,7 @@ class RecordingDocker implements DockerClient {
   stopped: string[] = [];
   restarted: string[] = [];
   execs: { container: string; args: string[] }[] = [];
+  removes: string[] = [];
   inspected: string[] = [];
   async inspect(name: string): Promise<DockerInspectResult | null> {
     this.inspected.push(name);
@@ -41,6 +42,7 @@ class RecordingDocker implements DockerClient {
     this.created.push(input);
     return { id: "container-id" };
   }
+  async remove(name: string) { this.removes.push(name); }
   async start(name: string) {
     this.started.push(name);
   }
@@ -62,6 +64,17 @@ class RecordingDocker implements DockerClient {
 }
 
 describe("NapCat runtime", () => {
+  it("recreates an existing managed container when the pinned NapCat image changes", async () => {
+    const docker = new RecordingDocker();
+    docker.inspect = async name => ({ id: "old", name, image: "mlikiowa/napcat-docker@sha256:old", state: "running", ipAddress: "172.18.0.10", labels: { "botroost.workspace_id": baseCommand.workspaceId, "botroost.endpoint_id": baseCommand.endpointId, "botroost.provider": "napcat" } });
+    const runtime = new NapCatRuntime({ docker, stateDirectory: await mkdtemp(join(tmpdir(), "botroost-napcat-upgrade-")), napcatToken: "operator-token", qrPollAttempts:1, fetcher:async url=>{const path=new URL(String(url)).pathname;if(path==="/api/auth/login")return new Response(JSON.stringify({code:0,data:{Credential:"credential"}}));if(path==="/api/QQLogin/GetQQLoginQrcode")return new Response(JSON.stringify({code:0,data:{qrcode:"qr"}}));if(path==="/api/QQLogin/GetQQLoginInfo")return new Response(JSON.stringify({code:0,data:{online:false}}));throw new Error(`unexpected request ${path}`)} });
+
+    await runtime.apply("runtime:upgrade", baseCommand);
+
+    expect(docker.removes).toEqual([`botroost-napcat-${baseCommand.endpointId}`]);
+    expect(docker.created[0]?.image).toBe(NAPCAT_IMAGE);
+  });
+
   it("creates the pinned container with labels, persistent per-endpoint storage, and no host ports", async () => {
     const docker = new RecordingDocker();
     const root = await mkdtemp(join(tmpdir(), "botroost-napcat-"));
@@ -117,6 +130,7 @@ describe("NapCat runtime", () => {
     docker.inspect = async () => ({
       id: "container-id",
       name: "botroost-napcat-33333333-3333-4333-8333-333333333333",
+      image: NAPCAT_IMAGE,
       state: "running" as const,
       ipAddress: "172.18.0.10",
       labels: {},
@@ -159,7 +173,7 @@ describe("NapCat runtime", () => {
 
   it("reuses one WebUI credential across continuous snapshots instead of hitting the login limiter", async () => {
     const docker = new RecordingDocker();
-    docker.inspect = async () => ({ id: "container-id", name: "botroost-napcat-33333333-3333-4333-8333-333333333333", state: "running" as const, ipAddress: "172.18.0.10", labels: {} });
+    docker.inspect = async () => ({ id: "container-id", name: "botroost-napcat-33333333-3333-4333-8333-333333333333", image: NAPCAT_IMAGE, state: "running" as const, ipAddress: "172.18.0.10", labels: {} });
     let authCalls = 0;
     const runtime = new NapCatRuntime({
       docker,
@@ -184,7 +198,7 @@ describe("NapCat runtime", () => {
 
   it("reauthenticates once when a cached WebUI credential expires", async () => {
     const docker = new RecordingDocker();
-    docker.inspect = async () => ({ id:"container-id",name:"botroost-napcat-33333333-3333-4333-8333-333333333333",state:"running" as const,ipAddress:"172.18.0.10",labels:{} });
+    docker.inspect = async () => ({ id:"container-id",name:"botroost-napcat-33333333-3333-4333-8333-333333333333",image:NAPCAT_IMAGE,state:"running" as const,ipAddress:"172.18.0.10",labels:{} });
     let authCalls=0;
     const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"botroost-napcat-reauth-")),napcatToken:"operator-token",fetcher:async(url,init)=>{const path=new URL(String(url)).pathname;if(path==="/api/auth/login"){authCalls++;return new Response(JSON.stringify({code:0,data:{Credential:`credential-${authCalls}`}}))}const authorization=new Headers(init?.headers).get("authorization");if(authorization==="Bearer credential-1")return new Response("expired",{status:401});if(path==="/api/QQLogin/GetQQLoginQrcode")return new Response(JSON.stringify({code:0,data:{qrcode:"qr-current"}}));if(path==="/api/QQLogin/GetQQLoginInfo")return new Response(JSON.stringify({code:0,data:{online:false}}));throw new Error(`unexpected request ${path}`)}});
     const snapshot=await runtime.snapshot(baseCommand);
@@ -194,7 +208,7 @@ describe("NapCat runtime", () => {
 
   it("keeps a fresh QR available while QQ is not logged in and skips unavailable OneBot probes", async () => {
     const docker = new RecordingDocker();
-    docker.inspect = async () => ({ id:"container-id",name:"botroost-napcat-33333333-3333-4333-8333-333333333333",state:"running" as const,ipAddress:"172.18.0.10",labels:{} });
+    docker.inspect = async () => ({ id:"container-id",name:"botroost-napcat-33333333-3333-4333-8333-333333333333",image:NAPCAT_IMAGE,state:"running" as const,ipAddress:"172.18.0.10",labels:{} });
     const paths:string[]=[];
     const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"botroost-napcat-pending-")),napcatToken:"operator-token",fetcher:async url=>{const path=new URL(String(url)).pathname;paths.push(path);if(path==="/api/auth/login")return new Response(JSON.stringify({code:0,data:{Credential:"credential"}}));if(path==="/api/QQLogin/GetQQLoginQrcode")return new Response(JSON.stringify({code:0,data:{qrcode:"qr-current"}}));if(path==="/api/QQLogin/GetQQLoginInfo")return new Response(JSON.stringify({code:0,data:{online:false}}));throw new Error(`unexpected probe ${path}`)}});
     const snapshot=await runtime.snapshot(baseCommand);
@@ -204,7 +218,7 @@ describe("NapCat runtime", () => {
 
   it("asks NapCat to create a QR when none exists yet", async () => {
     const docker = new RecordingDocker();
-    docker.inspect = async () => ({ id:"container-id",name:"botroost-napcat-33333333-3333-4333-8333-333333333333",state:"running" as const,ipAddress:"172.18.0.10",labels:{} });
+    docker.inspect = async () => ({ id:"container-id",name:"botroost-napcat-33333333-3333-4333-8333-333333333333",image:NAPCAT_IMAGE,state:"running" as const,ipAddress:"172.18.0.10",labels:{} });
     let qrRequests=0;
     const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"botroost-napcat-create-qr-")),napcatToken:"operator-token",fetcher:async url=>{const path=new URL(String(url)).pathname;if(path==="/api/auth/login")return new Response(JSON.stringify({code:0,data:{Credential:"credential"}}));if(path==="/api/QQLogin/GetQQLoginQrcode"){qrRequests++;return new Response(JSON.stringify(qrRequests===1?{code:-1,message:"QRCode Get Error"}:{code:0,data:{qrcode:"qr-created"}}))}if(path==="/api/QQLogin/RefreshQRcode")return new Response(JSON.stringify({code:0,data:null}));if(path==="/api/QQLogin/GetQQLoginInfo")return new Response(JSON.stringify({code:0,data:{online:false}}));throw new Error(`unexpected request ${path}`)}});
     const snapshot=await runtime.snapshot(baseCommand);
@@ -214,7 +228,7 @@ describe("NapCat runtime", () => {
 
   it("waits for NapCat to publish a replacement QR after refresh", async () => {
     const docker = new RecordingDocker();
-    docker.inspect = async () => ({ id: "container-id", name: "botroost-napcat-33333333-3333-4333-8333-333333333333", state: "running" as const, ipAddress: "172.18.0.10", labels: {} });
+    docker.inspect = async () => ({ id: "container-id", name: "botroost-napcat-33333333-3333-4333-8333-333333333333", image: NAPCAT_IMAGE, state: "running" as const, ipAddress: "172.18.0.10", labels: {} });
     let reads = 0;
     const runtime = new NapCatRuntime({
       docker,
@@ -243,7 +257,7 @@ describe("NapCat runtime", () => {
 
   it("returns bounded, redacted logs only for the endpoint-owned NapCat container", async () => {
     const docker = new RecordingDocker();
-    docker.inspect = async name => ({ id: "container-id", name, state: "running" as const, ipAddress: "172.18.0.10", labels: { "botroost.workspace_id": baseCommand.workspaceId, "botroost.endpoint_id": baseCommand.endpointId, "botroost.provider": "napcat" } });
+    docker.inspect = async name => ({ id: "container-id", name, image: NAPCAT_IMAGE, state: "running" as const, ipAddress: "172.18.0.10", labels: { "botroost.workspace_id": baseCommand.workspaceId, "botroost.endpoint_id": baseCommand.endpointId, "botroost.provider": "napcat" } });
     const runtime = new NapCatRuntime({ docker, stateDirectory: await mkdtemp(join(tmpdir(), "botroost-napcat-logs-")), napcatToken: "operator-token" });
 
     const result = await runtime.apply("runtime:logs", { ...baseCommand, runtimeRequest:{...baseCommand.runtimeRequest,approvedArtifactId:"artifact:napcat:mlikiowa.napcat-docker.sha256.1336a777f9a4f1f8cb89fef42f7548deacd3645919a067a50df5b66b5e77390e"}, action: "read-container-logs", metadata: { ...baseCommand.metadata, image:NAPCAT_IMAGE,logTail: 250, logSinceSeconds: 900 } });
@@ -254,7 +268,7 @@ describe("NapCat runtime", () => {
 
   it("refreshes an expired QR code through NapCat and returns the replacement", async () => {
     const docker = new RecordingDocker();
-    docker.inspect = async () => ({ id: "container-id", name: "botroost-napcat-33333333-3333-4333-8333-333333333333", state: "running" as const, ipAddress: "172.18.0.10", labels: {} });
+    docker.inspect = async () => ({ id: "container-id", name: "botroost-napcat-33333333-3333-4333-8333-333333333333", image: NAPCAT_IMAGE, state: "running" as const, ipAddress: "172.18.0.10", labels: {} });
     const paths: string[] = [];
     let qrcode = "qr-expired";
     const runtime = new NapCatRuntime({
@@ -280,7 +294,7 @@ describe("NapCat runtime", () => {
 
   it("reports ongoing NapCat observations on later heartbeats", async () => {
     const docker = new RecordingDocker();
-    docker.inspect = async () => ({ id: "container-id", name: "botroost-napcat-33333333-3333-4333-8333-333333333333", state: "running" as const, ipAddress: "172.18.0.10", labels: {} });
+    docker.inspect = async () => ({ id: "container-id", name: "botroost-napcat-33333333-3333-4333-8333-333333333333", image: NAPCAT_IMAGE, state: "running" as const, ipAddress: "172.18.0.10", labels: {} });
     const runtime = new NapCatRuntime({
       docker,
       stateDirectory: await mkdtemp(join(tmpdir(), "botroost-napcat-heartbeat-")),
@@ -300,7 +314,7 @@ describe("NapCat runtime", () => {
 
   it("restores managed endpoints after an agent restart", async () => {
     const docker = new RecordingDocker();
-    docker.inspect = async () => ({ id: "container-id", name: "botroost-napcat-33333333-3333-4333-8333-333333333333", state: "running" as const, ipAddress: "172.18.0.10", labels: {} });
+    docker.inspect = async () => ({ id: "container-id", name: "botroost-napcat-33333333-3333-4333-8333-333333333333", image: NAPCAT_IMAGE, state: "running" as const, ipAddress: "172.18.0.10", labels: {} });
     const stateDirectory = await mkdtemp(join(tmpdir(), "botroost-napcat-restart-"));
     const fetcher = async (url: RequestInfo | URL) => {
       const path = new URL(String(url)).pathname;
