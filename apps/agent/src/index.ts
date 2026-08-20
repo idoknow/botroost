@@ -99,7 +99,10 @@ export class DockerCliClient implements DockerClient {
   async stop(name: string) { await this.docker(["stop", "--time", "20", name]); }
   async restart(name: string) { await this.docker(["restart", "--time", "20", name]); }
   async exec(container: string, args: string[]) { return this.docker(["exec", container, ...args]); }
-  async logs(container: string, options: { tail: number; sinceSeconds: number }) { return (await this.docker(["logs","--tail",String(options.tail),"--since",`${options.sinceSeconds}s`,container])).stdout; }
+  async logs(container: string, options: { tail: number; sinceSeconds: number }) {
+    const { stdout, stderr } = await this.docker(["logs","--tail",String(options.tail),"--since",`${options.sinceSeconds}s`,container]);
+    return `${stdout}${stderr}`.slice(-1024 * 1024);
+  }
 }
 
 export interface NodeCredential {
@@ -356,7 +359,7 @@ export class NapCatRuntime {
       const tail=Number(command.metadata.logTail),sinceSeconds=Number(command.metadata.logSinceSeconds);
       if(!Number.isInteger(tail)||tail<1||tail>1000||!Number.isInteger(sinceSeconds)||sinceSeconds<60||sinceSeconds>86400)throw new Error("NapCat log bounds are invalid");
       const text=this.redactLogs(await docker.logs(name,{tail,sinceSeconds}));
-      return{state:existing.state==="running"?"running":"stopped",observations:{node:"online",runtime:existing.state==="running"?"ready":"stopped",provider:"available",protocol:"unknown",convergence:"converged"},metadata:{logs:{text,tail,sinceSeconds}}};
+      return{state:existing.state==="running"?"running":"stopped",metadata:{logs:{text,tail,sinceSeconds}}};
     }
     if (command.action !== "stop" && (!existing || existing.image !== desiredImage)) {
       if (existing) await docker.remove(name);
