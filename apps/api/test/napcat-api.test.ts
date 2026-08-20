@@ -87,11 +87,11 @@ describe("NapCat API vertical slice", () => {
     const command = await db.pool.query("SELECT runtime_request,metadata FROM agent_commands WHERE operation_id=$1", [operation.id]);
     expect(command.rows[0]).toMatchObject({
       runtime_request: {
-        approvedArtifactId: "artifact:napcat:mlikiowa.napcat-docker.sha256.9254ec12af101576c5eeb4910847abd1d219297bc6d9a35c52511e12500f0f45",
+        approvedArtifactId: "artifact:napcat:mlikiowa.napcat-docker.sha256.1336a777f9a4f1f8cb89fef42f7548deacd3645919a067a50df5b66b5e77390e",
         approvedEgressProfile: "egress:onebot",
       },
       metadata: {
-        image: "mlikiowa/napcat-docker@sha256:9254ec12af101576c5eeb4910847abd1d219297bc6d9a35c52511e12500f0f45",
+        image: "mlikiowa/napcat-docker@sha256:1336a777f9a4f1f8cb89fef42f7548deacd3645919a067a50df5b66b5e77390e",
       },
     });
   });
@@ -124,6 +124,35 @@ describe("NapCat API vertical slice", () => {
       qq: { uin: "12345", nickname: "Operator QQ" },
       onebot: { status: { online: true }, loginInfo: { user_id: 12345 } },
     });
+  });
+
+  it("queues an audited, read-only NapCat container log command with strict bounds", async () => {
+    const login = await api.inject({ method: "POST", url: "/api/v1/auth/login", payload: { email: "owner@example.com", password: "correct horse battery staple" } });
+    const cookie = cookies(login.headers["set-cookie"]);
+    const node = (await api.inject({ method:"POST",url:"/api/v1/nodes",headers:mutation(cookie),payload:{name:`napcat-logs-${Date.now()}`,provider:"napcat"} })).json();
+    const endpoint = (await api.inject({ method:"POST",url:"/api/v1/endpoints",headers:mutation(cookie),payload:{name:`napcat-logs-${Date.now()}`,providerId:"napcat",nodeId:node.id} })).json();
+
+    const response = await api.inject({ method:"POST",url:`/api/v1/endpoints/${endpoint.id}/napcat/container-logs`,headers:{...mutation(cookie),"idempotency-key":"read-logs"},payload:{tail:250,sinceSeconds:900} });
+    expect(response.statusCode).toBe(202);
+    await new DurableWorker(db).runOnce();
+    const command = await db.pool.query("SELECT action,metadata FROM agent_commands WHERE endpoint_id=$1 ORDER BY created_at DESC LIMIT 1",[endpoint.id]);
+    expect(command.rows[0]).toMatchObject({ action:"read-container-logs", metadata:{ logTail:250,logSinceSeconds:900 } });
+    const audit = await db.pool.query("SELECT action,metadata FROM audit_events WHERE resource_id=$1 ORDER BY created_at DESC LIMIT 1",[response.json().id]);
+    expect(audit.rows[0]).toMatchObject({ action:"operation.queued",metadata:{ action:"read-container-logs",logTail:250,logSinceSeconds:900 } });
+
+    expect((await api.inject({ method:"POST",url:`/api/v1/endpoints/${endpoint.id}/napcat/container-logs`,headers:{...mutation(cookie),"idempotency-key":"bad-logs"},payload:{tail:5001,sinceSeconds:900} })).statusCode).toBe(400);
+  });
+
+  it("returns completed, redacted container logs from the operation result", async () => {
+    const login = await api.inject({ method: "POST", url: "/api/v1/auth/login", payload: { email: "owner@example.com", password: "correct horse battery staple" } });
+    const cookie = cookies(login.headers["set-cookie"]);
+    const node = (await api.inject({ method:"POST",url:"/api/v1/nodes",headers:mutation(cookie),payload:{name:`napcat-log-result-${Date.now()}`,provider:"napcat"} })).json();
+    const endpoint = (await api.inject({ method:"POST",url:"/api/v1/endpoints",headers:mutation(cookie),payload:{name:`napcat-log-result-${Date.now()}`,providerId:"napcat",nodeId:node.id} })).json();
+    const operation = (await api.inject({ method:"POST",url:`/api/v1/endpoints/${endpoint.id}/napcat/container-logs`,headers:{...mutation(cookie),"idempotency-key":"read-log-result"},payload:{tail:100,sinceSeconds:300} })).json();
+    await new DurableWorker(db).runOnce();
+    await db.pool.query("UPDATE operations SET status='succeeded',result=$2 WHERE id=$1",[operation.id,{outcome:"succeeded",metadata:{logs:{text:"Token=[REDACTED]\\nready",tail:100,sinceSeconds:300}}}]);
+    const result = await api.inject({ method:"GET",url:`/api/v1/operations/${operation.id}`,headers:{cookie} });
+    expect(result.json().result.metadata.logs).toEqual({ text:"Token=[REDACTED]\\nready",tail:100,sinceSeconds:300 });
   });
 
   it("queues a dedicated refresh command for an expired NapCat login QR", async () => {

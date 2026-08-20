@@ -17,9 +17,9 @@ type JsonObject = { [key: string]: JsonValue };
 
 const execFileAsync = promisify(execFile);
 export const NAPCAT_IMAGE =
-  "mlikiowa/napcat-docker@sha256:9254ec12af101576c5eeb4910847abd1d219297bc6d9a35c52511e12500f0f45";
+  "mlikiowa/napcat-docker@sha256:1336a777f9a4f1f8cb89fef42f7548deacd3645919a067a50df5b66b5e77390e";
 export const NAPCAT_ARTIFACT =
-  "artifact:napcat:mlikiowa.napcat-docker.sha256.9254ec12af101576c5eeb4910847abd1d219297bc6d9a35c52511e12500f0f45";
+  "artifact:napcat:mlikiowa.napcat-docker.sha256.1336a777f9a4f1f8cb89fef42f7548deacd3645919a067a50df5b66b5e77390e";
 const endpointIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const containerPrefixPattern = /^[a-z0-9][a-z0-9_.-]{0,63}$/i;
 
@@ -46,6 +46,7 @@ export interface DockerClient {
   stop(name: string): Promise<void>;
   restart(name: string): Promise<void>;
   exec(container: string, args: string[]): Promise<{ stdout: string; stderr: string }>;
+  logs(container: string, options: { tail: number; sinceSeconds: number }): Promise<string>;
 }
 
 export class DockerCliClient implements DockerClient {
@@ -94,6 +95,7 @@ export class DockerCliClient implements DockerClient {
   async stop(name: string) { await this.docker(["stop", "--time", "20", name]); }
   async restart(name: string) { await this.docker(["restart", "--time", "20", name]); }
   async exec(container: string, args: string[]) { return this.docker(["exec", container, ...args]); }
+  async logs(container: string, options: { tail: number; sinceSeconds: number }) { return (await this.docker(["logs","--tail",String(options.tail),"--since",`${options.sinceSeconds}s`,container])).stdout; }
 }
 
 export interface NodeCredential {
@@ -280,6 +282,8 @@ export class NapCatRuntime {
     networkMode?: string;
     napcatToken?: string;
     fetcher?: typeof fetch;
+    qrPollIntervalMs?: number;
+    qrPollAttempts?: number;
   }) {
     this.networkMode = options.networkMode ?? process.env.NAPCAT_DOCKER_NETWORK ?? "bridge";
     this.containerPrefix = options.containerPrefix ?? "botroost-napcat";
@@ -327,6 +331,13 @@ export class NapCatRuntime {
     if (image !== NAPCAT_IMAGE || command.runtimeRequest.approvedArtifactId !== NAPCAT_ARTIFACT)
       throw new Error("NapCat image is not allowlisted");
   }
+  private redactLogs(text:string){return text
+    .replace(/([?&](?:token|password|secret|key)=)[^&\s]+/gi,"$1[REDACTED]")
+    .replace(/((?:authorization|cookie)\s*:\s*)(?:bearer\s+)?[^\r\n]+/gi,"$1[REDACTED]")
+    .replace(/((?:token|password|secret|key|credential|session)\s*[=:]\s*)["']?[^\s,"'}]+["']?/gi,"$1[REDACTED]")
+    .replace(/("(?:token|password|secret|key|credential|session)"\s*:\s*")[^"]*(")/gi,"$1[REDACTED]$2")
+  }
+  private async waitForQr(base:URL,endpointId:string,credential:string){let last:Error|undefined;const attempts=this.options.qrPollAttempts??20;for(let attempt=0;attempt<attempts;attempt++){try{return await this.napcatRequest(base,"/api/QQLogin/GetQQLoginQrcode",credential,{},endpointId)}catch(error){last=error instanceof Error?error:new Error(String(error));if(!last.message.includes("QRCode Get Error"))throw last;if(attempt+1<attempts)await new Promise(resolve=>setTimeout(resolve,this.options.qrPollIntervalMs??500))}}throw new Error(`NapCat login kernel not ready: ${last?.message??"QR unavailable"}`)}
   async apply(_effectId: string, command: RuntimeCommand): Promise<{ state: "running" | "stopped"; observations?: Parameters<AgentCommandTransport["result"]>[0]["observations"]; metadata?: JsonObject }> {
     this.assertAllowed(command);
     await this.loadCommands();
@@ -335,6 +346,13 @@ export class NapCatRuntime {
     const name = this.containerName(command.endpointId);
     const docker = this.docker();
     const existing = await docker.inspect(name);
+    if(command.action==="read-container-logs"){
+      if(!existing||existing.labels["botroost.workspace_id"]!==command.workspaceId||existing.labels["botroost.endpoint_id"]!==command.endpointId||existing.labels["botroost.provider"]!=="napcat")throw new Error("NapCat container ownership check failed");
+      const tail=Number(command.metadata.logTail),sinceSeconds=Number(command.metadata.logSinceSeconds);
+      if(!Number.isInteger(tail)||tail<1||tail>1000||!Number.isInteger(sinceSeconds)||sinceSeconds<60||sinceSeconds>86400)throw new Error("NapCat log bounds are invalid");
+      const text=this.redactLogs(await docker.logs(name,{tail,sinceSeconds}));
+      return{state:existing.state==="running"?"running":"stopped",observations:{node:"online",runtime:existing.state==="running"?"ready":"stopped",provider:"available",protocol:"unknown",convergence:"converged"},metadata:{logs:{text,tail,sinceSeconds}}};
+    }
     if (command.action !== "stop" && !existing) {
       const qq = this.endpointDirectory(command.endpointId, "qq");
       const config = this.endpointDirectory(command.endpointId, "config");
@@ -441,7 +459,7 @@ export class NapCatRuntime {
     } catch(error) {
       if(!(error instanceof Error)||!error.message.includes("QRCode Get Error"))throw error;
       await this.napcatRequest(base,"/api/QQLogin/RefreshQRcode",webToken,{},command.endpointId);
-      qrcode=await this.napcatRequest(base,"/api/QQLogin/GetQQLoginQrcode",await this.webCredential(command.endpointId,base),{},command.endpointId);
+      qrcode=await this.waitForQr(base,command.endpointId,await this.webCredential(command.endpointId,base));
     }
     const loginInfo = await this.napcatRequest(base, "/api/QQLogin/GetQQLoginInfo", await this.webCredential(command.endpointId,base), {}, command.endpointId);
     const objectData = (value: JsonObject): JsonObject => {

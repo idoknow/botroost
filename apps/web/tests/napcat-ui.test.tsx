@@ -87,4 +87,24 @@ describe("NapCat endpoint UI", () => {
       expect(await screen.findByTitle("qr-fresh")).toBeInTheDocument();
     } finally { globalThis.fetch=previous; }
   });
+
+  it("shows bounded NapCat container logs in the endpoint console", async () => {
+    const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+      const path = new URL(url, "https://app.test").pathname;
+      if (path === "/api/v1/auth/csrf") return new Response(JSON.stringify({ csrfToken: "csrf" }));
+      if (path === "/api/v1/endpoints/endpoint-1") return new Response(JSON.stringify({ id:"endpoint-1",name:"Operator QQ",providerId:"napcat",node:{id:"node-1",name:"agent-1"},generation:1,desired:{state:"running"},status:{node:"online",runtime:"ready",provider:"available",protocol:"disconnected",convergence:"reconciling"},activeOperationId:null }), { headers:{"content-type":"application/json"} });
+      if (path.endsWith("/napcat/login-qrcode")) return new Response(JSON.stringify({ qrcode:"qr" }), { headers:{"content-type":"application/json"} });
+      if (path.endsWith("/napcat/status")) return new Response(JSON.stringify({ qq:null,onebot:null }), { headers:{"content-type":"application/json"} });
+      if (path.endsWith("/napcat/container-logs") && init?.method === "POST") return new Response(JSON.stringify({ id:"logs-op",endpointId:"endpoint-1",status:"queued" }), { status:202,headers:{"content-type":"application/json"} });
+      if (path === "/api/v1/operations/logs-op") return new Response(JSON.stringify({ id:"logs-op",endpointId:"endpoint-1",status:"succeeded",result:{metadata:{logs:{text:"NapCat ready\\nToken=[REDACTED]",tail:250,sinceSeconds:900}}} }), { headers:{"content-type":"application/json"} });
+      return new Response("{}", { status:404 });
+    });
+    const previous=globalThis.fetch;globalThis.fetch=fetcher as typeof fetch;
+    try {
+      render(<MantineProvider><QueryClientProvider client={new QueryClient({defaultOptions:{queries:{retry:false}}})}><MemoryRouter initialEntries={["/endpoints/endpoint-1"]}><Routes><Route path="/endpoints/:id" element={<EndpointDetail session={session}/>} /></Routes></MemoryRouter></QueryClientProvider></MantineProvider>);
+      await userEvent.click(await screen.findByRole("button",{name:"Load container logs"}));
+      expect(await screen.findByText(/NapCat ready/)).toBeInTheDocument();
+      expect(screen.getByText(/Token=\[REDACTED\]/)).toBeInTheDocument();
+    } finally { globalThis.fetch=previous; }
+  });
 });

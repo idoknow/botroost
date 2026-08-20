@@ -138,7 +138,7 @@ services:
       NAPCAT_HOST_STATE_DIR: "${AGENT_STATE_DIR:-/opt/botroost/agent-state}"
       ENROLLMENT_TOKEN_FILE: /run/secrets/enrollment_token
       NAPCAT_TOKEN_FILE: /run/secrets/napcat_token
-      NAPCAT_DOCKER_NETWORK: botroost_backend
+      NAPCAT_DOCKER_NETWORK: botroost_napcat
       AGENT_PROVIDER: napcat
     secrets:
       - source: enrollment_token
@@ -149,7 +149,7 @@ services:
     volumes:
       - "${AGENT_STATE_DIR:-/opt/botroost/agent-state}:/var/lib/botroost-agent"
       - /var/run/docker.sock:/var/run/docker.sock
-    networks: [backend]
+    networks: [backend, napcat]
     depends_on:
       api: {condition: service_healthy}
       agent-state-init: {condition: service_completed_successfully}
@@ -171,6 +171,7 @@ volumes:
 
 networks:
   backend: {name: botroost_backend, internal: true}
+  napcat: {name: botroost_napcat}
   egress: {}
   shared-network:
     external: true

@@ -15,7 +15,7 @@ const baseCommand: RuntimeCommand = {
   connectionEpoch: 1,
   action: "start",
   runtimeRequest: {
-    approvedArtifactId: "artifact:napcat:mlikiowa.napcat-docker.sha256.9254ec12af101576c5eeb4910847abd1d219297bc6d9a35c52511e12500f0f45",
+    approvedArtifactId: "artifact:napcat:mlikiowa.napcat-docker.sha256.1336a777f9a4f1f8cb89fef42f7548deacd3645919a067a50df5b66b5e77390e",
     approvedEgressProfile: "egress:onebot",
     resources: { cpuMillis: 500, memoryMiB: 512 },
     storage: { kind: "ephemeral", sizeMiB: 512 },
@@ -50,9 +50,14 @@ class RecordingDocker implements DockerClient {
   async restart(name: string) {
     this.restarted.push(name);
   }
+  logRequests: { container: string; tail: number; sinceSeconds: number }[] = [];
   async exec(container: string, args: string[]) {
     this.execs.push({ container, args });
     return { stdout: "", stderr: "" };
+  }
+  async logs(container: string, options: { tail: number; sinceSeconds: number }) {
+    this.logRequests.push({ container, ...options });
+    return "08-21 Token=hidden\n{\"token\":\"json-secret\"}\nAuthorization: Bearer bearer-secret\nCookie: session=cookie-secret\nCredential=credential-secret\nready\n";
   }
 }
 
@@ -205,6 +210,46 @@ describe("NapCat runtime", () => {
     const snapshot=await runtime.snapshot(baseCommand);
     expect(snapshot.metadata.login).toEqual({qrcode:"qr-created"});
     expect(qrRequests).toBe(2);
+  });
+
+  it("waits for NapCat to publish a replacement QR after refresh", async () => {
+    const docker = new RecordingDocker();
+    docker.inspect = async () => ({ id: "container-id", name: "botroost-napcat-33333333-3333-4333-8333-333333333333", state: "running" as const, ipAddress: "172.18.0.10", labels: {} });
+    let reads = 0;
+    const runtime = new NapCatRuntime({
+      docker,
+      stateDirectory: await mkdtemp(join(tmpdir(), "botroost-napcat-wait-qr-")),
+      napcatToken: "operator-token",
+      qrPollIntervalMs: 1,
+      qrPollAttempts: 4,
+      fetcher: async url => {
+        const path = new URL(String(url)).pathname;
+        if (path === "/api/auth/login") return new Response(JSON.stringify({ code: 0, data: { Credential: "credential" } }));
+        if (path === "/api/QQLogin/RefreshQRcode") return new Response(JSON.stringify({ code: 0, data: null }));
+        if (path === "/api/QQLogin/GetQQLoginQrcode") {
+          reads++;
+          return new Response(JSON.stringify(reads < 3 ? { code: -1, message: "QRCode Get Error" } : { code: 0, data: { qrcode: "qr-eventually-ready" } }));
+        }
+        if (path === "/api/QQLogin/GetQQLoginInfo") return new Response(JSON.stringify({ code: 0, data: { online: false } }));
+        throw new Error(`unexpected request ${path}`);
+      },
+    });
+
+    const result = await runtime.apply("runtime:refresh-wait", { ...baseCommand, action: "refresh-login-qr" });
+
+    expect(result.metadata).toMatchObject({ login: { qrcode: "qr-eventually-ready" } });
+    expect(reads).toBe(3);
+  });
+
+  it("returns bounded, redacted logs only for the endpoint-owned NapCat container", async () => {
+    const docker = new RecordingDocker();
+    docker.inspect = async name => ({ id: "container-id", name, state: "running" as const, ipAddress: "172.18.0.10", labels: { "botroost.workspace_id": baseCommand.workspaceId, "botroost.endpoint_id": baseCommand.endpointId, "botroost.provider": "napcat" } });
+    const runtime = new NapCatRuntime({ docker, stateDirectory: await mkdtemp(join(tmpdir(), "botroost-napcat-logs-")), napcatToken: "operator-token" });
+
+    const result = await runtime.apply("runtime:logs", { ...baseCommand, runtimeRequest:{...baseCommand.runtimeRequest,approvedArtifactId:"artifact:napcat:mlikiowa.napcat-docker.sha256.1336a777f9a4f1f8cb89fef42f7548deacd3645919a067a50df5b66b5e77390e"}, action: "read-container-logs", metadata: { ...baseCommand.metadata, image:NAPCAT_IMAGE,logTail: 250, logSinceSeconds: 900 } });
+
+    expect(docker.logRequests).toEqual([{ container: `botroost-napcat-${baseCommand.endpointId}`, tail: 250, sinceSeconds: 900 }]);
+    expect(result.metadata?.logs).toEqual({ text: "08-21 Token=[REDACTED]\n{\"token\":\"[REDACTED]\"}\nAuthorization: [REDACTED]\nCookie: [REDACTED]\nCredential=[REDACTED]\nready\n", tail: 250, sinceSeconds: 900 });
   });
 
   it("refreshes an expired QR code through NapCat and returns the replacement", async () => {
