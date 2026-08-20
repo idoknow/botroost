@@ -125,7 +125,7 @@ describe("NapCat runtime", () => {
         calls.push({ url: String(url), ...(init === undefined ? {} : { init }) });
         if (String(url).endsWith("/api/auth/login")) return new Response(JSON.stringify({ code: 0, data: { Credential: "web-token" } }), { status: 200 });
         if (String(url).endsWith("/api/QQLogin/GetQQLoginQrcode")) return new Response(JSON.stringify({ data: { qrcode: "otpauth://qq-login" } }), { status: 200 });
-        if (String(url).endsWith("/api/QQLogin/GetQQLoginInfo")) return new Response(JSON.stringify({ code: 0, data: { uin: "12345", nickname: "Operator QQ" } }), { status: 200 });
+        if (String(url).endsWith("/api/QQLogin/GetQQLoginInfo")) return new Response(JSON.stringify({ code: 0, data: { uin: "12345", nickname: "Operator QQ", online: true } }), { status: 200 });
         if (String(url).endsWith("/api/Debug/create")) return new Response(JSON.stringify({ data: { adapterName: "debug-session" } }), { status: 200 });
         return new Response(JSON.stringify({ status: "ok", retcode: 0, data: { online: true } }), { status: 200 });
       },
@@ -150,6 +150,67 @@ describe("NapCat runtime", () => {
       login: { qrcode: "otpauth://qq-login" },
       onebot: { status: { online: true } },
     });
+  });
+
+  it("reuses one WebUI credential across continuous snapshots instead of hitting the login limiter", async () => {
+    const docker = new RecordingDocker();
+    docker.inspect = async () => ({ id: "container-id", name: "botroost-napcat-33333333-3333-4333-8333-333333333333", state: "running" as const, ipAddress: "172.18.0.10", labels: {} });
+    let authCalls = 0;
+    const runtime = new NapCatRuntime({
+      docker,
+      stateDirectory: await mkdtemp(join(tmpdir(), "botroost-napcat-auth-cache-")),
+      napcatToken: "operator-token",
+      fetcher: async url => {
+        const path = new URL(String(url)).pathname;
+        if (path === "/api/auth/login") {
+          authCalls++;
+          return new Response(JSON.stringify(authCalls === 1 ? { code: 0, data: { Credential: "credential" } } : { code: -1, message: "login rate limit" }));
+        }
+        if (path === "/api/Debug/create") return new Response(JSON.stringify({ code: 0, data: { adapterName: "debug-session" } }));
+        return new Response(JSON.stringify({ code: 0, data: { online: true, qrcode: "qr-current" } }));
+      },
+    });
+
+    await runtime.snapshot(baseCommand);
+    await runtime.snapshot(baseCommand);
+
+    expect(authCalls).toBe(1);
+  });
+
+  it("keeps a fresh QR available while QQ is not logged in and skips unavailable OneBot probes", async () => {
+    const docker = new RecordingDocker();
+    docker.inspect = async () => ({ id:"container-id",name:"botroost-napcat-33333333-3333-4333-8333-333333333333",state:"running" as const,ipAddress:"172.18.0.10",labels:{} });
+    const paths:string[]=[];
+    const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"botroost-napcat-pending-")),napcatToken:"operator-token",fetcher:async url=>{const path=new URL(String(url)).pathname;paths.push(path);if(path==="/api/auth/login")return new Response(JSON.stringify({code:0,data:{Credential:"credential"}}));if(path==="/api/QQLogin/GetQQLoginQrcode")return new Response(JSON.stringify({code:0,data:{qrcode:"qr-current"}}));if(path==="/api/QQLogin/GetQQLoginInfo")return new Response(JSON.stringify({code:0,data:{online:false}}));throw new Error(`unexpected probe ${path}`)}});
+    const snapshot=await runtime.snapshot(baseCommand);
+    expect(snapshot).toMatchObject({runtime:"ready",provider:"available",protocol:"disconnected",metadata:{login:{qrcode:"qr-current"}}});
+    expect(paths).not.toContain("/api/Debug/create");
+  });
+
+  it("refreshes an expired QR code through NapCat and returns the replacement", async () => {
+    const docker = new RecordingDocker();
+    docker.inspect = async () => ({ id: "container-id", name: "botroost-napcat-33333333-3333-4333-8333-333333333333", state: "running" as const, ipAddress: "172.18.0.10", labels: {} });
+    const paths: string[] = [];
+    let qrcode = "qr-expired";
+    const runtime = new NapCatRuntime({
+      docker,
+      stateDirectory: await mkdtemp(join(tmpdir(), "botroost-napcat-refresh-")),
+      napcatToken: "operator-token",
+      fetcher: async url => {
+        const path = new URL(String(url)).pathname;
+        paths.push(path);
+        if (path === "/api/auth/login") return new Response(JSON.stringify({ code: 0, data: { Credential: "credential" } }));
+        if (path === "/api/QQLogin/RefreshQRcode") { qrcode = "qr-fresh"; return new Response(JSON.stringify({ code: 0, data: null })); }
+        if (path === "/api/QQLogin/GetQQLoginQrcode") return new Response(JSON.stringify({ code: 0, data: { qrcode } }));
+        if (path === "/api/Debug/create") return new Response(JSON.stringify({ code: 0, data: { adapterName: "debug-session" } }));
+        return new Response(JSON.stringify({ code: 0, data: { online: true } }));
+      },
+    });
+
+    const result = await runtime.apply("runtime:refresh", { ...baseCommand, action: "refresh-login-qr" });
+
+    expect(paths).toContain("/api/QQLogin/RefreshQRcode");
+    expect(result.metadata).toMatchObject({ login: { qrcode: "qr-fresh" } });
   });
 
   it("reports ongoing NapCat observations on later heartbeats", async () => {

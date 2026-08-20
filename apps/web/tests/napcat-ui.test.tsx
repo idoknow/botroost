@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MantineProvider } from "@mantine/core";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import { EndpointDetail } from "../src/pages";
@@ -64,5 +65,26 @@ describe("NapCat endpoint UI", () => {
     } finally {
       globalThis.fetch = previous;
     }
+  });
+
+  it("lets the operator refresh an expired QR code and displays the replacement", async () => {
+    let qrcode = "qr-expired";
+    const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+      const path = new URL(url, "https://app.test").pathname;
+      if (path === "/api/v1/auth/csrf") return new Response(JSON.stringify({ csrfToken: "csrf" }));
+      if (path === "/api/v1/endpoints/endpoint-1") return new Response(JSON.stringify({ id:"endpoint-1",name:"Operator QQ",providerId:"napcat",node:{id:"node-1",name:"agent-1"},generation:1,desired:{state:"running"},status:{node:"online",runtime:"ready",provider:"available",protocol:"disconnected",convergence:"reconciling"},activeOperationId:null }), { headers:{"content-type":"application/json"} });
+      if (path.endsWith("/napcat/login-qrcode") && init?.method !== "POST") return new Response(JSON.stringify({ qrcode }), { headers:{"content-type":"application/json"} });
+      if (path.endsWith("/napcat/status")) return new Response(JSON.stringify({ qq:null,onebot:null }), { headers:{"content-type":"application/json"} });
+      if (path.endsWith("/napcat/login-qrcode") && init?.method === "POST") { qrcode = "qr-fresh"; return new Response(JSON.stringify({ id:"refresh-op",endpointId:"endpoint-1",status:"queued" }), { status:202,headers:{"content-type":"application/json"} }); }
+      if (path === "/api/v1/operations/refresh-op") return new Response(JSON.stringify({ id:"refresh-op",endpointId:"endpoint-1",status:"succeeded" }), { headers:{"content-type":"application/json"} });
+      return new Response("{}", { status:404 });
+    });
+    const previous=globalThis.fetch;globalThis.fetch=fetcher as typeof fetch;
+    try {
+      render(<MantineProvider><QueryClientProvider client={new QueryClient({defaultOptions:{queries:{retry:false}}})}><MemoryRouter initialEntries={["/endpoints/endpoint-1"]}><Routes><Route path="/endpoints/:id" element={<EndpointDetail session={session}/>} /></Routes></MemoryRouter></QueryClientProvider></MantineProvider>);
+      expect(await screen.findByTitle("qr-expired")).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button",{name:"Refresh QR code"}));
+      expect(await screen.findByTitle("qr-fresh")).toBeInTheDocument();
+    } finally { globalThis.fetch=previous; }
   });
 });

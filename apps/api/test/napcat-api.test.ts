@@ -125,4 +125,16 @@ describe("NapCat API vertical slice", () => {
       onebot: { status: { online: true }, loginInfo: { user_id: 12345 } },
     });
   });
+
+  it("queues a dedicated refresh command for an expired NapCat login QR", async () => {
+    const login = await api.inject({ method: "POST", url: "/api/v1/auth/login", payload: { email: "owner@example.com", password: "correct horse battery staple" } });
+    const cookie = cookies(login.headers["set-cookie"]);
+    const node = (await api.inject({ method:"POST",url:"/api/v1/nodes",headers:mutation(cookie),payload:{name:`napcat-refresh-${Date.now()}`,provider:"napcat"} })).json();
+    const endpoint = (await api.inject({ method:"POST",url:"/api/v1/endpoints",headers:mutation(cookie),payload:{name:`napcat-refresh-${Date.now()}`,providerId:"napcat",nodeId:node.id} })).json();
+    const response = await api.inject({ method:"POST",url:`/api/v1/endpoints/${endpoint.id}/napcat/login-qrcode`,headers:{...mutation(cookie),"idempotency-key":"refresh-qr"} });
+    expect(response.statusCode).toBe(202);
+    await new DurableWorker(db).runOnce();
+    const command=await db.pool.query("SELECT action FROM agent_commands WHERE endpoint_id=$1 ORDER BY created_at DESC LIMIT 1",[endpoint.id]);
+    expect(command.rows[0]?.action).toBe("refresh-login-qr");
+  });
 });

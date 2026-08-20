@@ -270,6 +270,7 @@ export class NapCatRuntime {
   private readonly fetcher: typeof fetch;
   private readonly commands = new Map<string, RuntimeCommand>();
   private readonly snapshotCache = new Map<string, { at: number; value: Awaited<ReturnType<NapCatRuntime["snapshot"]>> }>();
+  private readonly webCredentials = new Map<string, string>();
   private commandsLoaded = false;
   constructor(private readonly options: {
     docker?: DockerClient;
@@ -360,8 +361,15 @@ export class NapCatRuntime {
       });
     }
     if (command.action === "stop" && existing) await docker.stop(name);
-    else if (command.action === "restart") await docker.restart(name);
-    else await docker.start(name);
+    else if (command.action === "restart") { this.webCredentials.delete(command.endpointId); await docker.restart(name); }
+    else if (command.action === "start") await docker.start(name);
+    if (command.action === "refresh-login-qr") {
+      if (!existing?.ipAddress) throw new Error("NapCat container is not available for QR refresh");
+      const base=new URL(`http://${existing.ipAddress}:6099`);
+      const credential=await this.webCredential(command.endpointId,base);
+      await this.napcatRequest(base,"/api/QQLogin/RefreshQRcode",credential,{});
+      this.snapshotCache.delete(command.endpointId);
+    }
     const snapshot = await this.snapshot(command).catch(error => ({ endpointId:command.endpointId,generation:command.generation,runtime:"unknown" as const,provider:"degraded" as const,protocol:"disconnected" as const,convergence:"reconciling" as const,metadata:{error:error instanceof Error?error.message:String(error)} }));
     const running = command.action !== "stop";
     return {
@@ -387,6 +395,21 @@ export class NapCatRuntime {
     if (typeof payload.code === "number" && payload.code !== 0) throw new Error(`NapCat request rejected: ${String(payload.message ?? payload.code)}`);
     return payload;
   }
+  private async webCredential(endpointId: string, base: URL) {
+    const cached=this.webCredentials.get(endpointId);
+    if(cached)return cached;
+    const loginToken=this.options.napcatToken??process.env.NAPCAT_TOKEN??"";
+    const hashed=createHash("sha256").update(`${loginToken}.napcat`).digest("hex");
+    const auth=await this.fetcher(new URL("/api/auth/login",base),{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({hash:hashed}),signal:AbortSignal.timeout(10_000)});
+    if(!auth.ok)throw new Error(`NapCat auth failed: ${auth.status}`);
+    const authBody=await auth.json() as JsonObject;
+    if(typeof authBody.code==="number"&&authBody.code!==0)throw new Error(`NapCat auth rejected: ${String(authBody.message??authBody.code)}`);
+    const authData=authBody.data;
+    const credential=authData!==null&&typeof authData==="object"&&!Array.isArray(authData)?authData.Credential:undefined;
+    if(typeof credential!=="string"||!credential)throw new Error("NapCat auth token missing");
+    this.webCredentials.set(endpointId,credential);
+    return credential;
+  }
   async snapshot(command: RuntimeCommand): Promise<{
     endpointId: string;
     generation: number;
@@ -402,33 +425,21 @@ export class NapCatRuntime {
       return { endpointId: command.endpointId, generation: command.generation, runtime: "stopped", provider: "unknown", protocol: "disconnected", convergence: "reconciling", metadata: {} };
     }
     const base = new URL(`http://${inspected.ipAddress}:6099`);
-    const loginToken = this.options.napcatToken ?? process.env.NAPCAT_TOKEN ?? "";
-    const hashed = createHash("sha256").update(`${loginToken}.napcat`).digest("hex");
-    const auth = await this.fetcher(new URL("/api/auth/login", base), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ hash: hashed }),
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!auth.ok) throw new Error(`NapCat auth failed: ${auth.status}`);
-    const authBody = await auth.json() as JsonObject;
-    if (typeof authBody.code === "number" && authBody.code !== 0) throw new Error(`NapCat auth rejected: ${String(authBody.message ?? authBody.code)}`);
-    const authData = authBody.data;
-    const credential = authData !== null && typeof authData === "object" && !Array.isArray(authData) ? authData.Credential : undefined;
-    const webToken = typeof credential === "string" ? credential : "";
-    if (!webToken) throw new Error("NapCat auth token missing");
+    const webToken=await this.webCredential(command.endpointId,base);
     const qrcode = await this.napcatRequest(base, "/api/QQLogin/GetQQLoginQrcode", webToken, {});
     const loginInfo = await this.napcatRequest(base, "/api/QQLogin/GetQQLoginInfo", webToken, {});
+    const objectData = (value: JsonObject): JsonObject => {
+      const data = value.data;
+      return data !== null && typeof data === "object" && !Array.isArray(data) ? data : value;
+    };
+    const qq=objectData(loginInfo);
+    if(qq.online!==true){return{endpointId:command.endpointId,generation:command.generation,runtime:"ready",provider:"available",protocol:"disconnected",convergence:"reconciling",metadata:{qq,login:objectData(qrcode),onebot:null}}}
     const debugSession = await this.napcatRequest(base, "/api/Debug/create", webToken, {});
     const adapterName = (debugSession.data as Record<string, unknown> | undefined)?.adapterName;
     if (typeof adapterName !== "string" || !adapterName) throw new Error("NapCat debug adapter missing");
     const callOneBot = (action: "get_status" | "get_login_info") => this.napcatRequest(base, `/api/Debug/call/${encodeURIComponent(adapterName)}`, webToken, { action, params: {} });
     const status = await callOneBot("get_status");
     const onebotLogin = await callOneBot("get_login_info");
-    const objectData = (value: JsonObject): JsonObject => {
-      const data = value.data;
-      return data !== null && typeof data === "object" && !Array.isArray(data) ? data : value;
-    };
     return {
       endpointId: command.endpointId,
       generation: command.generation,
