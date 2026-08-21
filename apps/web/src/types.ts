@@ -8,6 +8,6 @@ export type Node={id:string;name:string;provider:string;configured:boolean;lastH
 export type Provider={id:string;capabilities:string[];configSchema:Record<string,unknown>;availability:{enabled:boolean;reason?:string}};
 export type Operation={id:string;endpointId:string;action:string;status:string;generation:number;createdAt?:string;updatedAt?:string;result?:unknown};
 export type AuditEvent={id:string;action:string;resource_type?:string;resource_id?:string;created_at?:string;metadata?:unknown};
-export type Member={id:string;email:string;role:string;created_at?:string};
+export type Member={id:string;email:string;role:'owner'|'admin'|'operator'|'viewer';created_at?:string};
 export type Credential={id:string;name:string;configured:boolean;createdAt?:string};
 export type ResendSettings={enabled:boolean;recipient:string;from:string;graceSeconds:number;apiKeyConfigured:boolean};

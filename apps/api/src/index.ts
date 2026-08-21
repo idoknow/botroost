@@ -7,7 +7,7 @@ import { DatabaseError, digest, PostgresDatabase } from "@botroost/database";
 import { AgentEnrollmentRequestSchema, AgentHeartbeatRequestSchema, ClaimCommandRequestSchema, CommandReceiptRequestSchema, CommandResultRequestSchema } from "@botroost/agent-protocol";
 import { LoginAttemptLimiter } from "./security-policy.js";
 
-const credentials = z.object({ email: z.string().email(), password: z.string().min(12) });
+const credentials = z.object({ email: z.string().trim().email(), password: z.string().min(12).max(4096) });
 const endpointInput = z.object({ name: z.string().min(1).max(120), providerId: z.string().min(1), nodeId: z.string().uuid().optional() });
 const endpointName = z.object({ name: z.string().min(1).max(120) });
 const nodeInput = z.object({ name: z.string().min(1).max(120), provider: z.string().min(1), credential: z.string().min(1).optional() });
@@ -16,7 +16,9 @@ const operationInput = z.object({ action: z.enum(["start", "stop", "restart", "r
 const containerLogsInput=z.object({tail:z.number().int().min(1).max(1000).default(250),sinceSeconds:z.number().int().min(60).max(86400).default(900)});
 const websocketCommon=z.object({name:z.string().min(1).max(80),enable:z.boolean(),token:z.string().max(4096).optional(),messagePostFormat:z.enum(["array","string"]).default("array"),reportSelfMessage:z.boolean().default(false),debug:z.boolean().default(false),heartInterval:z.number().int().min(1000).max(300000).default(30000)});
 const onebotWebsocketsInput=z.object({websocketClients:z.array(websocketCommon.extend({url:z.string().url().refine(value=>value.startsWith("ws://")||value.startsWith("wss://"),"must use ws:// or wss://"),reconnectInterval:z.number().int().min(1000).max(300000).default(5000)})).max(20),websocketServers:z.array(websocketCommon.extend({host:z.string().min(1).max(253),port:z.number().int().min(1).max(65535),enableForcePushEvent:z.boolean().default(true)})).max(20)});
-const memberInput = z.object({ email: z.string().email(), password: z.string().min(12), role: z.enum(["admin", "operator", "viewer"]) });
+const memberInput = z.object({ email: z.string().trim().email(), password: z.string().min(12).max(4096), role: z.enum(["admin", "operator", "viewer"]) });
+const memberUpdateInput=z.object({email:z.string().trim().email().optional(),role:z.enum(["admin","operator","viewer"]).optional()}).refine(value=>value.email!==undefined||value.role!==undefined,"at least one field is required");
+const passwordInput=z.object({currentPassword:z.string().min(1).max(4096),newPassword:z.string().min(12).max(4096)});
 const credentialInput = z.object({ name: z.string().min(1).max(120), value: z.string().min(1).max(16_384) });
 const settingsInput = z.record(z.string(), z.unknown());
 const resendSettingsInput=z.object({enabled:z.boolean(),recipient:z.string().email(),from:z.string().min(3).max(320),graceSeconds:z.number().int().min(30).max(86_400),apiKey:z.string().min(1).max(16_384).optional()});
@@ -49,7 +51,7 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
   api.addHook("onSend",async(_request,reply,payload)=>{reply.header("x-content-type-options","nosniff").header("x-frame-options","DENY").header("referrer-policy","no-referrer").header("permissions-policy","camera=(), microphone=(), geolocation=()").header("content-security-policy","default-src 'none'; frame-ancestors 'none'");return payload});
   api.setErrorHandler((error, _request, reply) => {
     if (error instanceof ZodError) return reply.code(400).send({ error: { code: "validation_error", message: "invalid request", details: error.issues } });
-    if (error instanceof DatabaseError) return reply.code(error.code === "not_found" ? 404 : error.code === "unauthorized" ? 401 : 409).send({ error: { code: error.code, message: error.message } });
+    if (error instanceof DatabaseError) return reply.code(error.code === "not_found" ? 404 : error.code === "unauthorized" ? 401 : error.code === "forbidden" ? 403 : 409).send({ error: { code: error.code, message: error.message } });
     const status = statusCode(error) ?? 500;
     const message = error instanceof Error ? error.message : "internal error";
     return reply.code(status).send({ error: { code: status === 401 ? "unauthorized" : status === 403 ? "forbidden" : status === 409 ? "conflict" : "internal_error", message: status === 500 ? "internal error" : message } });
@@ -93,6 +95,7 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
   api.get("/api/v1/auth/me", async request => { const current = await principal(request); return { user: { id: current.userId, email: current.email }, workspaceId: current.workspaceId, role: current.role }; });
   api.get("/api/v1/auth/session", async request => {const current=await principal(request),workspace=await db.workspace(current.workspaceId);return{user:{id:current.userId,email:current.email,name:current.email},workspace:{id:current.workspaceId,name:workspace.name},role:current.role,permissions:rolePermissions[current.role],capabilities:{operations:["create","start","stop","restart"],providers:Object.fromEntries(providers.map(provider=>[provider.id,provider.availability])),configurationSchemas:Object.fromEntries(providers.map(provider=>[provider.id,provider.configSchema]))}}});
   api.get("/api/v1/auth/csrf", async request => { await principal(request); return { csrfToken: request.cookies.botroost_csrf }; });
+  api.put("/api/v1/auth/password",async(request,reply)=>{const current=await principal(request),body=passwordInput.parse(request.body),address=request.ip;if(loginAttempts.isBlocked(current.email,address))throw fail("too many password attempts",429);try{await auth.changePassword({...current,currentPassword:body.currentPassword,newPassword:body.newPassword});loginAttempts.recordSuccess(current.email,address)}catch(error){if(error instanceof DatabaseError&&error.code==="forbidden")loginAttempts.recordFailure(current.email,address);throw error}return reply.code(204).send()});
   api.get("/api/v1/workspaces/current", async request => db.workspace((await principal(request)).workspaceId));
   api.get("/api/v1/workspaces/current/summary", async request => db.summary((await principal(request)).workspaceId));
   api.get("/api/v1/overview", async request => db.summary((await principal(request)).workspaceId));
@@ -104,7 +107,9 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
   api.post("/api/v1/workspaces/current/settings/resend/test",async(request,reply)=>{const current=await authorizeContract(request,"settings:manage"),settings=await db.workspaceResendSettings(current.workspaceId);if(!settings.apiKeyConfigured)throw fail("Resend API key is not configured",409);if(!settings.recipient||!settings.from)throw fail("Resend sender and recipient are required",409);return reply.code(202).send(await db.enqueueTestNotification(current.workspaceId,settings))});
   api.get("/api/v1/workspaces/current/credentials", async request => page(await db.credentials((await authorizeContract(request,"credential:read")).workspaceId)));
   api.post("/api/v1/workspaces/current/credentials",async(request,reply)=>{const current=await authorizeContract(request,"credential:manage");const body=credentialInput.parse(request.body);return reply.code(201).send(await db.createCredential(current.workspaceId,body.name,body.value,key))});
-  api.post("/api/v1/workspaces/current/members", async (request, reply) => { const current = await authorize(request, "manage-members"); const body = memberInput.parse(request.body); return reply.code(201).send(await auth.addMember(current.workspaceId, body.email, body.password, body.role)); });
+  api.post("/api/v1/workspaces/current/members", async (request, reply) => { const current = await authorizeContract(request,"member:manage"),body=memberInput.parse(request.body); return reply.code(201).send(await auth.addMember(current.workspaceId,body.email,body.password,body.role,current.userId)); });
+  api.patch("/api/v1/workspaces/current/members/:id",async request=>{const current=await authorizeContract(request,"member:manage"),body=memberUpdateInput.parse(request.body),input={...(body.email!==undefined?{email:body.email}:{}),...(body.role!==undefined?{role:body.role}:{})};return db.updateMember(current.workspaceId,idParams.parse(request.params).id,input,{userId:current.userId,role:current.role})});
+  api.delete("/api/v1/workspaces/current/members/:id",async(request,reply)=>{const current=await authorizeContract(request,"member:manage");await db.deleteMember(current.workspaceId,idParams.parse(request.params).id,{userId:current.userId,role:current.role});return reply.code(204).send()});
   api.get("/api/v1/providers", async request => { await principal(request); return page([...providers]); });
   api.get("/api/v1/nodes", async request => page(await db.nodes((await principal(request)).workspaceId)));
   api.post("/api/v1/nodes", async (request, reply) => { const current = await authorize(request, "manage-nodes"); const body = nodeInput.parse(request.body); return reply.code(201).send(await db.createNode(current.workspaceId, body, key)); });

@@ -86,3 +86,5 @@
   .endpoint-lifecycle-actions [data-slot="button"]{flex-basis:78px;padding-inline:8px}
   .runtime-facts{grid-template-columns:1fr}
 }
+.member-actions{display:flex;align-items:center;gap:6px;white-space:nowrap}.member-actions [data-slot="button"]{min-height:30px}.account-password-form{display:grid;max-width:520px;gap:14px;margin-top:22px}.account-password-form>[data-slot="button"]{width:fit-content}.success-message{margin:0;color:var(--good);font-weight:600}
+@media(max-width:480px){.member-actions{align-items:stretch;flex-direction:column}.account-password-form>[data-slot="button"]{width:100%}}

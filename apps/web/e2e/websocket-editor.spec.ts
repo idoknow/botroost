@@ -78,7 +78,7 @@ test('failed save keeps the local server draft open',async({page})=>{
   await page.getByRole('button',{name:'Add server'}).click();
   await page.getByLabel('Server name').fill('Keep this draft');
   await page.getByRole('button',{name:'Save changes'}).click();
-  await expect(page.getByText('Request failed (500)')).toBeVisible();
+  await expect(page.getByText('Fixture save failed')).toBeVisible();
   await expect(page.getByLabel('Server name')).toHaveValue('Keep this draft');
 });
 

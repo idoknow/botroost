@@ -1,5 +1,5 @@
-import {AlertTriangle,Box,LoaderCircle} from 'lucide-react';import {Button} from './ui';
+import {AlertTriangle,Box,LoaderCircle} from 'lucide-react';import {useEffect,useRef} from 'react';import {Button} from './ui';
 export const Loading=({label='Loading',fullPage=false}:{label?:string;fullPage?:boolean})=><div className={`state ${fullPage?'full':''}`}><LoaderCircle className="spin" aria-label="Loading"/><span>{label}</span></div>;
-export const Failure=({error}:{error:unknown})=><div className="alert error"><AlertTriangle/> <div><strong>Unable to load</strong><p>{error instanceof Error?error.message:'Request failed'}</p></div></div>;
+export function Failure({error,id,focus=false,title='Unable to load'}:{error:unknown;id?:string;focus?:boolean;title?:string}){const ref=useRef<HTMLDivElement>(null),message=error instanceof Error?error.message:'Request failed';useEffect(()=>{if(focus)ref.current?.focus()},[focus,message]);return <div ref={ref} id={id} className="alert error" role="alert" aria-live="assertive" tabIndex={focus?-1:undefined}><AlertTriangle aria-hidden="true"/> <div><strong>{title}</strong><p>{message}</p></div></div>}
 export const Empty=({name}:{name:string})=><div className="state empty"><Box/><h2>No {name.toLowerCase()} found</h2><p>There is nothing to display yet.</p></div>;
 export const NotFound=()=> <div className="state full"><h1>Page not found</h1><p>The requested console route does not exist or is not available to your role.</p><Button onClick={()=>location.assign('/')}>Return to overview</Button></div>;

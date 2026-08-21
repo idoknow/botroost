@@ -41,6 +41,10 @@ describe('ApiClient',()=>{
   const api=new ApiClient(mock(()=>Promise.resolve(new Response('',{status:404}))));
   await expect(api.get('/missing')).rejects.toEqual(expect.objectContaining({name:'ApiError',status:404,message:'Unavailable'}));
  });
+ it('shows safe API validation messages for failed mutations',async()=>{
+  const fetcher=sequence(new Response(JSON.stringify({csrfToken:'csrf'})),new Response(JSON.stringify({error:{message:'current password is incorrect'}}),{status:403,headers:{'content-type':'application/json'}}));
+  await expect(new ApiClient(fetcher as unknown as typeof fetch).mutate('/auth/password',{},'PUT')).rejects.toEqual(expect.objectContaining({name:'ApiError',status:403,message:'current password is incorrect'}));
+ });
  it('does not send a JSON content type for bodyless mutations',async()=>{
   const fetcher=sequence(new Response(JSON.stringify({csrfToken:'csrf'})),new Response(null,{status:204}));
   await new ApiClient(fetcher as unknown as typeof fetch).mutate('/auth/logout');
