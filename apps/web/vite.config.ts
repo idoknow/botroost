@@ -1,3 +1,5 @@
-import { defineConfig } from 'vite';
+import {defineConfig} from 'vite';
 import react from '@vitejs/plugin-react';
-export default defineConfig({plugins:[react()],server:{proxy:{'/api':'http://localhost:3000'}},test:{environment:'jsdom',setupFiles:'./tests/setup.ts',css:true,exclude:['e2e/**','node_modules/**']}});
+import tailwindcss from '@tailwindcss/vite';
+import {fileURLToPath,URL} from 'node:url';
+export default defineConfig({plugins:[react(),tailwindcss()],resolve:{alias:{'@':fileURLToPath(new URL('./src',import.meta.url))}},server:{proxy:{'/api':'http://localhost:3000'}}});

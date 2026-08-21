@@ -1,18 +1,4 @@
-import {ActionIcon,Menu,Text} from '@mantine/core';
-import {IconCheck,IconDeviceDesktop,IconMoon,IconSun} from '@tabler/icons-react';
-import {useMantineColorScheme} from '@mantine/core';
-
-const choices=[
-  {value:'light' as const,label:'Light',description:'Use the light interface',icon:IconSun},
-  {value:'dark' as const,label:'Dark',description:'Use the dark interface',icon:IconMoon},
-  {value:'auto' as const,label:'System',description:'Follow your device',icon:IconDeviceDesktop},
-];
-
-export function ThemeModeControl(){
-  const {colorScheme,setColorScheme}=useMantineColorScheme();
-  const Current=colorScheme==='dark'?IconMoon:colorScheme==='light'?IconSun:IconDeviceDesktop;
-  return <Menu position="bottom-end" width={220} shadow="md">
-    <Menu.Target><ActionIcon variant="subtle" color="gray" size={40} aria-label="Appearance"><Current size={18}/></ActionIcon></Menu.Target>
-    <Menu.Dropdown><Menu.Label>Appearance</Menu.Label>{choices.map(choice=>{const Icon=choice.icon;return <Menu.Item key={choice.value} leftSection={<Icon size={16}/>} rightSection={colorScheme===choice.value?<IconCheck size={15}/>:null} onClick={()=>setColorScheme(choice.value)}><Text size="sm" fw={600}>{choice.label}</Text><Text size="xs" c="dimmed">{choice.description}</Text></Menu.Item>})}</Menu.Dropdown>
-  </Menu>;
-}
+import {Check,Monitor, Moon,Sun} from 'lucide-react';import {useEffect,useState} from 'react';
+type Theme='light'|'dark'|'system';const KEY='botroost-theme';
+function apply(theme:Theme){const dark=theme==='dark'||(theme==='system'&&matchMedia('(prefers-color-scheme: dark)').matches);document.documentElement.classList.toggle('dark',dark);document.documentElement.dataset.theme=dark?'dark':'light';document.documentElement.dataset.themeMode=theme}
+export function ThemeModeControl(){const [theme,setTheme]=useState<Theme>(()=>(localStorage.getItem(KEY) as Theme)||'system');const [open,setOpen]=useState(false);useEffect(()=>{apply(theme);localStorage.setItem(KEY,theme);if(theme!=='system')return;const media=matchMedia('(prefers-color-scheme: dark)');const update=()=>apply('system');media.addEventListener('change',update);return()=>media.removeEventListener('change',update)},[theme]);const Icon=theme==='dark'?Moon:theme==='light'?Sun:Monitor;return <div className="theme-menu"><button className="icon-button" aria-label="Appearance" onClick={()=>setOpen(!open)}><Icon/></button>{open&&<div className="popover">{([['light','Light',Sun],['dark','Dark',Moon],['system','System',Monitor]] as const).map(([v,l,I])=><button key={v} onClick={()=>{setTheme(v);setOpen(false)}}><I/>{l}{theme===v&&<Check/>}</button>)}</div>}</div>}

@@ -14,13 +14,8 @@ const temporaryDirectory = await mkdtemp(join(tmpdir(), "botroost-packs-"));
 try {
   for (const packageDirectory of packageDirectories) {
     const manifest = JSON.parse(await readFile(join(packageDirectory, "package.json"), "utf8"));
-    const packedJson = execFileSync(
-      "pnpm",
-      ["pack", "--json", "--pack-destination", temporaryDirectory],
-      { cwd: packageDirectory, encoding: "utf8" },
-    );
-    const parsed = JSON.parse(packedJson);
-    const packed = Array.isArray(parsed) ? parsed[0] : parsed;
+    const packedJson = execFileSync("npm", ["pack", "--json", "--pack-destination", temporaryDirectory], { cwd: packageDirectory, encoding: "utf8" });
+    const packed = JSON.parse(packedJson)[0];
     const files = packed.files.map(({ path }) => path).sort();
     for (const required of ["dist/index.js", "dist/index.d.ts"]) {
       if (!files.includes(required)) throw new Error(`${manifest.name}: missing ${required}`);

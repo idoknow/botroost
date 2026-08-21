@@ -1,2 +1,12 @@
-import {StrictMode} from 'react';import {createRoot} from 'react-dom/client';import {MantineProvider} from '@mantine/core';import {ConsoleApp} from './app';
-createRoot(document.getElementById('root')!).render(<StrictMode><MantineProvider defaultColorScheme="dark"><ConsoleApp/></MantineProvider></StrictMode>);
+import '@fontsource-variable/geist';
+import {StrictMode} from 'react';
+import {createRoot} from 'react-dom/client';
+import {Toaster} from 'sonner';
+import {ConsoleApp} from './app';
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <ConsoleApp/>
+    <Toaster richColors position="bottom-right"/>
+  </StrictMode>,
+);

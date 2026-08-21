@@ -1,19 +1,18 @@
 # syntax=docker/dockerfile:1.7
-FROM node:22.22.0-bookworm-slim AS build
-ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH CI=true
-RUN corepack enable && corepack prepare pnpm@11.17.0 --activate
+FROM oven/bun:1.3.14-debian AS build
+ENV CI=true
 WORKDIR /app
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json tsconfig.base.json eslint.config.mjs ./
+COPY package.json bun.lock turbo.json tsconfig.base.json eslint.config.mjs vitest.config.ts ./
 COPY apps ./apps
 COPY packages ./packages
 COPY scripts ./scripts
-RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
-RUN pnpm build
+RUN --mount=type=cache,id=bun,target=/root/.bun/install/cache bun install --frozen-lockfile
+RUN bun run build
 
 FROM node:22.22.0-bookworm-slim AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
-COPY --from=build --chown=node:node /app/package.json /app/pnpm-workspace.yaml ./
+COPY --from=build --chown=node:node /app/package.json ./
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/apps ./apps
 COPY --from=build --chown=node:node /app/packages ./packages

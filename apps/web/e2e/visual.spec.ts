@@ -21,8 +21,8 @@ async function mockProduct(page:Page){
 for(const colorScheme of ['light','dark'] as const){
   for(const viewport of [{name:'desktop',width:1440,height:1000},{name:'mobile',width:390,height:844}]){
     test(`visual fixture ${colorScheme} ${viewport.name}`,async({page})=>{
-      await page.addInitScript(scheme=>localStorage.setItem('mantine-color-scheme-value',scheme),colorScheme);await page.setViewportSize({width:viewport.width,height:viewport.height});await mockProduct(page);await page.goto('/endpoints/fixture-endpoint');await expect(page.getByRole('heading',{name:'Campux production'})).toBeVisible();await expect(page.locator('html')).toHaveAttribute('data-mantine-color-scheme',colorScheme);
-      await expect(page.getByText('OneBot 11')).toBeVisible();await expect(page.getByText('API available')).toBeVisible();await expect(page.getByText('OneBot connecting')).toHaveCount(0);
+      await page.addInitScript(scheme=>localStorage.setItem('botroost-theme',scheme),colorScheme);await page.setViewportSize({width:viewport.width,height:viewport.height});await mockProduct(page);await page.goto('/endpoints/fixture-endpoint');await expect(page.getByRole('heading',{name:'Campux production'})).toBeVisible();await expect(page.locator('html')).toHaveAttribute('data-theme',colorScheme);
+      await expect(page.getByText('NapCat OneBot implementation')).toBeVisible();await expect(page.getByText('API available')).toHaveCount(0);await expect(page.getByText('OneBot connecting')).toHaveCount(0);
       await expect(page.locator('input[value="wss://app.campux.top/onebot/v11/ws?key=fixture"]')).toBeVisible();
       expect(await page.evaluate(()=>({scrollWidth:document.documentElement.scrollWidth,clientWidth:document.documentElement.clientWidth}))).toEqual({scrollWidth:viewport.width,clientWidth:viewport.width});
       fs.mkdirSync('/tmp/botroost-ui-evidence',{recursive:true});

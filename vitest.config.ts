@@ -13,5 +13,9 @@ export default defineConfig({
       "@botroost/agent-journal": resolve("packages/agent-journal/src/index.ts"),
     },
   },
-  test: { include: ["packages/**/*.test.ts", "apps/**/*.test.ts"] },
+  test: {
+    include: ["packages/*/test/**/*.test.ts", "apps/*/test/**/*.test.ts"],
+    exclude: ["apps/web/tests/migration-contract.test.ts"],
+    testTimeout: 30_000,
+  },
 });

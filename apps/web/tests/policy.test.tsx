@@ -1,4 +1,4 @@
-import {describe,expect,it} from 'vitest';
+import {describe,expect,it} from 'bun:test';
 import {actionAvailability,nodeConnectionStatus,statusLayers} from '../src/policy';
 
 describe('console policies',()=>{

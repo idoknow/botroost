@@ -8,9 +8,9 @@ test('local fixture operator journey runs without production secrets',async({pag
   await page.getByLabel('Email').fill('fixture@example.test');
   await page.getByLabel('Password').fill('fixture-password');
   await page.getByRole('button',{name:'Sign in'}).click();
-  await expect(page.getByText('Operational overview')).toBeVisible();
-  await page.getByRole('link',{name:'Endpoints'}).click();
-  await expect(page.getByText('Fixture fake')).toBeVisible();
+  await expect(page.getByRole('heading',{name:'Cluster'})).toBeVisible();
+  await page.getByRole('link',{name:'Manage endpoints'}).click();
+  await expect(page.getByRole('table').getByRole('link',{name:'Fixture fake'})).toBeVisible();
   const headers=await page.locator('thead th').allTextContents();
   expect(headers.filter(header=>header==='Node')).toHaveLength(1);
   expect(headers).toContain('Node status');

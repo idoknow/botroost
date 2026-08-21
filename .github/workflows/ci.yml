@@ -11,18 +11,19 @@ jobs:
         with:
           node-version: 22.22.0
           package-manager-cache: false
-      - run: corepack enable
-      - run: corepack prepare pnpm@11.17.0 --activate
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm lint
-      - run: pnpm typecheck
-      - run: pnpm test
-      - run: pnpm --filter @botroost/web test
-      - run: pnpm build
-      - run: pnpm --filter @botroost/web build
-      - run: pnpm --filter @botroost/web exec playwright install --with-deps chromium
-      - run: pnpm --filter @botroost/web e2e -- fixture.spec.ts
-      - run: pnpm verify:packages
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - run: bun run lint
+      - run: bun run typecheck
+      - run: bun run test
+      - run: bun run --cwd apps/web test
+      - run: bun run build
+      - run: bun run --cwd apps/web build
+      - run: bunx playwright install --with-deps chromium
+      - run: bun run --cwd apps/web e2e -- fixture.spec.ts
+      - run: bun run verify:packages
   live-e2e:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: verify
@@ -34,9 +35,11 @@ jobs:
         with:
           node-version: 22.22.0
           package-manager-cache: false
-      - run: corepack enable && corepack prepare pnpm@11.17.0 --activate
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @botroost/web exec playwright install --with-deps chromium
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - run: bunx playwright install --with-deps chromium
       - name: Run staging browser journey
         env:
           LIVE_E2E: '1'
@@ -44,7 +47,7 @@ jobs:
           BOTROOST_E2E_EMAIL: ${{ vars.BOTROOST_E2E_EMAIL }}
           BOTROOST_E2E_NODE_NAME: ${{ vars.BOTROOST_E2E_NODE_NAME }}
           BOTROOST_E2E_PASSWORD: ${{ secrets.BOTROOST_E2E_PASSWORD }}
-        run: pnpm --filter @botroost/web exec playwright test e2e/live.spec.ts
+        run: bunx playwright test --config apps/web/playwright.config.ts apps/web/e2e/live.spec.ts
       - name: Validate Compose model
         env:
           BOTROOST_PUBLIC_ORIGIN: https://console.example.test

@@ -1,11 +1,20 @@
 {
   "name": "botroost",
   "private": true,
-  "packageManager": "pnpm@11.17.0",
+  "packageManager": "bun@1.3.14",
+  "workspaces": {
+    "packages": [
+      "packages/*",
+      "apps/*"
+    ],
+    "catalog": {
+      "zod": "^4.1.12"
+    }
+  },
   "scripts": {
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
-    "test": "vitest run",
+    "test": "vitest run && bun test apps/web/tests",
     "build": "turbo run build",
     "verify:packages": "node scripts/verify-packages.mjs"
   },
