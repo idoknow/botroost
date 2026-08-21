@@ -66,12 +66,12 @@ describe("NapCat endpoint UI", () => {
       expect(await screen.findByText("Alice")).toBeInTheDocument();
       expect(await screen.findByText("Botroost users")).toBeInTheDocument();
       expect(await screen.findByText("4.18.19")).toBeInTheDocument();
-      expect(screen.getAllByText("Protocol service").length).toBeGreaterThan(0);
-      expect(screen.getByText("OneBot 11")).toBeInTheDocument();
+      expect(screen.getAllByText("Protocol service")).toHaveLength(1);
+      expect(screen.queryByText("API available")).not.toBeInTheDocument();
       expect(screen.getByText("NapCat.OneBot11")).toBeInTheDocument();
       expect(screen.queryByText("Runtime")).not.toBeInTheDocument();
       expect(await screen.findByDisplayValue("wss://bot.example/ws")).toBeInTheDocument();
-      expect(await screen.findByText("API available")).toBeInTheDocument();
+      expect(screen.getByText("Implementation version")).toBeInTheDocument();
     } finally {
       globalThis.fetch = previous;
     }
