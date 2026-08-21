@@ -1,4 +1,4 @@
-import type {InputHTMLAttributes,ReactNode,SelectHTMLAttributes} from 'react';
+import type {AnchorHTMLAttributes,InputHTMLAttributes,ReactNode,SelectHTMLAttributes} from 'react';
 import {cn} from './lib/utils';
 import {Button as PrimitiveButton} from './components/button';
 import {Input as PrimitiveInput} from './components/input';
@@ -14,6 +14,6 @@ export function Select({label,children,...props}:SelectHTMLAttributes<HTMLSelect
 export const Badge=({children,good=false}:{children:ReactNode;good?:boolean})=><PrimitiveBadge variant="secondary" className={good?'status-good':undefined}>{children}</PrimitiveBadge>;
 export const Table=({headers,rows}:{headers:string[];rows:ReactNode[][]})=><div className="table-scroll"><table><thead><tr>{headers.map(h=><th key={h}>{h}</th>)}</tr></thead><tbody>{rows.map((r,i)=><tr key={i}>{r.map((c,j)=><td key={j}>{c}</td>)}</tr>)}</tbody></table></div>;
 export function Modal({open,title,onClose,children}:{open:boolean;title:string;onClose:()=>void;children:ReactNode}){return <Dialog open={open} onOpenChange={value=>!value&&onClose()}><DialogContent className="modal"><DialogHeader><DialogTitle>{title}</DialogTitle></DialogHeader>{children}</DialogContent></Dialog>}
-export const PageHeading=({kicker,title,description,action}:{kicker?:string;title:string;description?:string;action?:ReactNode})=><header className="page-header"><div>{kicker&&<p className="kicker">{kicker}</p>}<h1>{title}</h1>{description&&<p className="muted">{description}</p>}</div>{action}</header>;
+export const PageHeading=({kicker,title,description,action,className}:{kicker?:string;title:string;description?:string;action?:ReactNode;className?:string})=><header className={`page-header${className?` ${className}`:''}`}><div className="page-heading-copy">{kicker&&<p className="kicker">{kicker}</p>}<h1>{title}</h1>{description&&<p className="muted">{description}</p>}</div>{action}</header>;
 export function navigate(to:string,replace=false){history[replace?'replaceState':'pushState']({},'',to);dispatchEvent(new PopStateEvent('popstate'))}
-export const Link=({to,children,className,onClick}:{to:string;children:ReactNode;className?:string;onClick?:()=>void})=><a href={to} className={className} onClick={e=>{if(!e.metaKey&&!e.ctrlKey&&!e.shiftKey&&e.button===0){e.preventDefault();onClick?.();navigate(to)}}}>{children}</a>;
+export const Link=({to,children,onClick,...props}:Omit<AnchorHTMLAttributes<HTMLAnchorElement>,'href'>&{to:string})=><a {...props} href={to} onClick={e=>{onClick?.(e);if(!e.defaultPrevented&&!e.metaKey&&!e.ctrlKey&&!e.shiftKey&&e.button===0){e.preventDefault();navigate(to)}}}>{children}</a>;

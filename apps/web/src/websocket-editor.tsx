@@ -18,9 +18,9 @@ export function WebSocketConnectionEditor({clients,servers,onClientsChange,onSer
   const addServer=()=>onServersChange([...servers,{name:'WebSocket server',enable:true,host:'0.0.0.0',port:3001,messagePostFormat:'array',reportSelfMessage:false,debug:false,heartInterval:30000,enableForcePushEvent:true}]);
   return <Tabs defaultValue="clients" className="ws-tabs">
     <div className="ws-tabs-toolbar">
-      <TabsList>
-        <TabsTrigger value="clients"><ArrowUpFromLine/>Outbound clients <span>{clients.length}</span></TabsTrigger>
-        <TabsTrigger value="servers"><ArrowDownToLine/>Inbound servers <span>{servers.length}</span></TabsTrigger>
+      <TabsList className="product-tabs-list">
+        <TabsTrigger className="product-tabs-trigger after:hidden" value="clients"><ArrowUpFromLine/>Outbound clients <span>{clients.length}</span></TabsTrigger>
+        <TabsTrigger className="product-tabs-trigger after:hidden" value="servers"><ArrowDownToLine/>Inbound servers <span>{servers.length}</span></TabsTrigger>
       </TabsList>
     </div>
     <TabsContent value="clients">

@@ -1,28 +1,30 @@
 import {expect,test,type Page} from '@playwright/test';
 
-const endpoint={id:'fixture-endpoint',name:'Campux production',providerId:'napcat',node:{id:'fixture-node',name:'jp09-napcat-reenroll'},generation:4,desired:{state:'running'},status:{node:'online',runtime:'ready',provider:'available',protocol:'connected',convergence:'converged'},activeOperationId:null};
+const endpoint={id:'fixture-endpoint',name:'Campux production',providerId:'napcat',node:{id:'fixture-node',name:'jp09-napcat-reenroll'},generation:4,desired:{state:'running'},status:{node:'online',runtime:'ready',provider:'available',protocol:'connected',convergence:'converged'},activeOperationId:null,metadata:{qq:{uin:'960164003',online:true}}};
 const session={user:{id:'fixture-user',email:'ops@example.test',name:'Rock'},workspace:{id:'fixture-workspace',name:'Production'},role:'owner',permissions:['workspace:read','endpoint:read','endpoint:create','endpoint:start','endpoint:stop','endpoint:restart','node:read','node:create','provider:read','operation:read','audit:read','member:read','credential:read','settings:read'],capabilities:{operations:['create','start','stop','restart'],providers:{napcat:{enabled:true}}}};
 
-async function mockProduct(page:Page,{failSave=false}:{failSave?:boolean}={}){
+async function mockProduct(page:Page,{failSave=false,loggedIn=true}:{failSave?:boolean;loggedIn?:boolean}={}){
   let statusRequests=0;
+  let endpointRequests=0;
   await page.route('**/api/v1/**',async route=>{const path=new URL(route.request().url()).pathname;let body:unknown={},status=200;
     if(path.endsWith('/auth/session'))body=session;
     else if(path.endsWith('/auth/csrf'))body={csrfToken:'fixture-csrf'};
     else if(failSave&&route.request().method()==='PUT'&&path.endsWith('/napcat/onebot/websockets')){status=500;body={error:{message:'Fixture save failed'}};}
     else if(path.endsWith('/endpoints/fixture-endpoint/napcat/status')){
       statusRequests+=1;
-      body={qq:{uin:'960164003',online:true},onebot:{loginInfo:{user_id:960164003},config:{websocketClients:[{name:'Campux bridge',enable:true,url:'wss://app.campux.top/onebot/v11/ws',messagePostFormat:'array',reportSelfMessage:false,debug:false,heartInterval:30000,reconnectInterval:5000,tokenConfigured:true}],websocketServers:[]}}};
+      body={qq:loggedIn?{uin:'960164003',online:true}:null,onebot:{...(loggedIn?{loginInfo:{user_id:960164003}}:{}),config:{websocketClients:[{name:'Campux bridge',enable:true,url:'wss://app.campux.top/onebot/v11/ws',messagePostFormat:'array',reportSelfMessage:false,debug:false,heartInterval:30000,reconnectInterval:5000,tokenConfigured:true}],websocketServers:[]}}};
     }
+    else if(path.endsWith('/endpoints/fixture-endpoint/napcat/login-qrcode'))body={qrcode:'https://example.test/qq-login'};
     else if(path.endsWith('/endpoints/fixture-endpoint'))body=endpoint;
-    else if(path.endsWith('/endpoints'))body={items:[endpoint],page:1,pageSize:25,total:1};
+    else if(path.endsWith('/endpoints')){endpointRequests+=1;body={items:[endpoint,{...endpoint,id:'fixture-needs-login',name:'Needs QQ login',metadata:{qq:{online:false},login:{qrcode:'https://example.test/qq-login'}}},{...endpoint,id:'fixture-unreachable',name:'Unreachable endpoint',status:{...endpoint.status,node:'offline'},metadata:{qq:{uin:'10000',online:true}}},{...endpoint,id:'fixture-unknown',name:'Unknown QQ status',metadata:{qq:{uin:'22222'}}}],page:1,pageSize:25,total:4};}
     else body={items:[],page:1,pageSize:25,total:0};
     await route.fulfill({status,contentType:'application/json',body:JSON.stringify(body)});
   });
-  return ()=>statusRequests;
+  return {statusRequests:()=>statusRequests,endpointRequests:()=>endpointRequests};
 }
 
 test('inbound server draft survives background status polling',async({page})=>{
-  const statusRequests=await mockProduct(page);
+  const {statusRequests}=await mockProduct(page);
   await page.goto('/endpoints/fixture-endpoint');
   await page.getByRole('tab',{name:'Connections'}).click();
   await expect(page.getByLabel('Client URL')).toHaveValue('wss://app.campux.top/onebot/v11/ws');
@@ -75,4 +77,81 @@ test('failed save keeps the local server draft open',async({page})=>{
   await page.getByRole('button',{name:'Save changes'}).click();
   await expect(page.getByText('Request failed (500)')).toBeVisible();
   await expect(page.getByLabel('Server name')).toHaveValue('Keep this draft');
+});
+
+test('endpoint lifecycle actions live in the title row instead of Settings',async({page})=>{
+  await mockProduct(page);
+  await page.goto('/endpoints/fixture-endpoint');
+  const heading=page.locator('.endpoint-heading');
+  await expect(heading.getByRole('button',{name:'Start',exact:true})).toBeVisible();
+  await expect(heading.getByRole('button',{name:'Stop',exact:true})).toBeVisible();
+  await expect(heading.getByRole('button',{name:'Restart',exact:true})).toBeVisible();
+  expect(await heading.evaluate(element=>getComputedStyle(element).flexDirection)).toBe('row');
+  await page.getByRole('tab',{name:'Settings'}).click();
+  const settings=page.locator('[role="tabpanel"][data-state="active"]');
+  await expect(settings.getByRole('button',{name:'Start'})).toHaveCount(0);
+  await expect(settings.getByRole('button',{name:'Stop'})).toHaveCount(0);
+  await expect(settings.getByRole('button',{name:'Restart'})).toHaveCount(0);
+});
+
+for(const width of [390,320]){
+  test(`endpoint title actions fit a ${width}px viewport`,async({page})=>{
+    await page.setViewportSize({width,height:844});
+    await mockProduct(page);
+    await page.goto('/endpoints/fixture-endpoint');
+    const metrics=await page.locator('.endpoint-heading').evaluate(element=>{
+      const heading=element.getBoundingClientRect();
+      const actions=element.querySelector('.endpoint-lifecycle-actions')!.getBoundingClientRect();
+      return {headingLeft:heading.left,headingRight:heading.right,actionsLeft:actions.left,actionsRight:actions.right,scrollWidth:document.documentElement.scrollWidth,clientWidth:document.documentElement.clientWidth};
+    });
+    expect(metrics.actionsLeft).toBeGreaterThanOrEqual(metrics.headingLeft-.5);
+    expect(metrics.actionsRight).toBeLessThanOrEqual(metrics.headingRight+.5);
+    expect(metrics.scrollWidth).toBe(metrics.clientWidth);
+  });
+}
+
+test('QQ login card keeps a scannable QR and its action in one layout',async({page})=>{
+  await mockProduct(page,{loggedIn:false});
+  await page.goto('/endpoints/fixture-endpoint');
+  const qr=page.getByRole('img',{name:'NapCat QR code'});
+  const card=qr.locator('xpath=ancestor::*[contains(@class,"card")]');
+  await expect(card.getByRole('button',{name:'Refresh QR code'})).toBeVisible();
+  const box=await qr.boundingBox();
+  expect(box!.width).toBeGreaterThanOrEqual(160);
+  expect(box!.height).toBeGreaterThanOrEqual(160);
+  await expect(card.getByText('Protocol runtime')).toBeVisible();
+  await expect(card.getByText(/NapCat provides the OneBot 11 interface/)).toBeVisible();
+});
+
+test('endpoint tabs and selected sidebar entry use Campux product styling',async({page})=>{
+  await mockProduct(page);
+  await page.goto('/endpoints/fixture-endpoint');
+  const endpointTabs=page.locator('.endpoint-tabs-list');
+  await expect(endpointTabs).toHaveClass(/product-tabs-list/);
+  await expect(endpointTabs.getByRole('tab',{name:'Overview'})).toHaveClass(/product-tabs-trigger/);
+  const activeLink=page.locator('.sidebar a.active').first();
+  await expect(activeLink).toHaveAttribute('aria-current','page');
+  const activeStyle=await activeLink.evaluate(element=>{const style=getComputedStyle(element),box=element.getBoundingClientRect();return {borderRadius:parseFloat(style.borderRadius),height:box.height,fontWeight:Number(style.fontWeight),background:style.backgroundColor,color:style.color,paddingLeft:style.paddingLeft}});
+  expect(activeStyle.borderRadius).toBeGreaterThanOrEqual(activeStyle.height/2-1);
+  expect(activeStyle.fontWeight).toBeGreaterThanOrEqual(700);
+  expect(activeStyle.background).toBe('rgb(239, 246, 255)');
+  expect(activeStyle.color).toBe('rgb(29, 78, 216)');
+  expect(activeStyle.paddingLeft).toBe('12px');
+  await endpointTabs.getByRole('tab',{name:'Connections'}).click();
+  const connectionTabs=page.locator('.ws-tabs [data-slot="tabs-list"]');
+  await expect(connectionTabs).toHaveClass(/product-tabs-list/);
+  await expect(connectionTabs.getByRole('tab',{name:/Outbound clients/})).toHaveClass(/product-tabs-trigger/);
+});
+
+test('sidebar refreshes every endpoint and exposes QQ login state',async({page})=>{
+  const {endpointRequests}=await mockProduct(page);
+  await page.goto('/endpoints/fixture-endpoint');
+  const sidebar=page.locator('[data-sidebar-section="endpoints"]');
+  await expect(sidebar.getByText('QQ 960164003 online')).toBeVisible();
+  await expect(sidebar.getByText('QQ login required')).toBeVisible();
+  await expect(sidebar.getByText('Endpoint unreachable')).toBeVisible();
+  await expect(sidebar.getByText('QQ status unknown')).toBeVisible();
+  const before=endpointRequests();
+  await page.waitForTimeout(3300);
+  expect(endpointRequests()).toBeGreaterThan(before);
 });
