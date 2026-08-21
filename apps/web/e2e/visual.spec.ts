@@ -23,6 +23,7 @@ for(const colorScheme of ['light','dark'] as const){
     test(`visual fixture ${colorScheme} ${viewport.name}`,async({page})=>{
       await page.addInitScript(scheme=>localStorage.setItem('botroost-theme',scheme),colorScheme);await page.setViewportSize({width:viewport.width,height:viewport.height});await mockProduct(page);await page.goto('/endpoints/fixture-endpoint');await expect(page.getByRole('heading',{name:'Campux production'})).toBeVisible();await expect(page.locator('html')).toHaveAttribute('data-theme',colorScheme);
       await expect(page.getByText('NapCat OneBot implementation')).toBeVisible();await expect(page.getByText('API available')).toHaveCount(0);await expect(page.getByText('OneBot connecting')).toHaveCount(0);
+      await page.getByRole('tab',{name:'Connections'}).click();
       await expect(page.locator('input[value="wss://app.campux.top/onebot/v11/ws?key=fixture"]')).toBeVisible();
       expect(await page.evaluate(()=>({scrollWidth:document.documentElement.scrollWidth,clientWidth:document.documentElement.clientWidth}))).toEqual({scrollWidth:viewport.width,clientWidth:viewport.width});
       fs.mkdirSync('/tmp/botroost-ui-evidence',{recursive:true});
