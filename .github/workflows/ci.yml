@@ -47,7 +47,7 @@ jobs:
           BOTROOST_E2E_EMAIL: ${{ vars.BOTROOST_E2E_EMAIL }}
           BOTROOST_E2E_NODE_NAME: ${{ vars.BOTROOST_E2E_NODE_NAME }}
           BOTROOST_E2E_PASSWORD: ${{ secrets.BOTROOST_E2E_PASSWORD }}
-        run: bunx playwright test --config apps/web/playwright.config.ts apps/web/e2e/live.spec.ts
+        run: bun run --cwd apps/web e2e -- live.spec.ts
       - name: Validate Compose model
         env:
           BOTROOST_PUBLIC_ORIGIN: https://console.example.test
