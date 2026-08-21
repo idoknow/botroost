@@ -143,6 +143,11 @@ describe("NapCat API vertical slice", () => {
     await db.pool.query("UPDATE nodes SET last_heartbeat_at=now()-interval '3 minutes' WHERE id=$1",[node.id]);
     const offlineStatus=(await api.inject({ method: "GET", url: `/api/v1/endpoints/${endpoint.id}/napcat/status`, headers: { cookie } })).json();
     expect(offlineStatus.freshness).toMatchObject({fresh:false});
+
+    await db.pool.query("UPDATE observations SET created_at=now()+interval '5 minutes' WHERE endpoint_id=$1",[endpoint.id]);
+    await db.pool.query("UPDATE nodes SET last_heartbeat_at=now()+interval '5 minutes' WHERE id=$1",[node.id]);
+    const futureStatus=(await api.inject({ method: "GET", url: `/api/v1/endpoints/${endpoint.id}/napcat/status`, headers: { cookie } })).json();
+    expect(futureStatus.freshness).toMatchObject({fresh:false});
   });
 
   it("queues an audited, read-only NapCat container log command with strict bounds", async () => {

@@ -29,6 +29,14 @@ describe('ApiClient',()=>{
   expect(await api.requestSecret('/nodes/enrollment-tokens')).toEqual({token:'one-time-secret'});
   expect(JSON.stringify(api)).not.toContain('one-time-secret');
  });
+ it('forwards an abort signal to bounded polling requests',async()=>{
+  const controller=new AbortController();
+  const fetcher=mock((_url:RequestInfo|URL,init?:RequestInit)=>new Promise<Response>((_resolve,reject)=>init?.signal?.addEventListener('abort',()=>reject(init.signal?.reason),{once:true})));
+  const request=new ApiClient(fetcher as unknown as typeof fetch).get('/status',{signal:controller.signal});
+  controller.abort(new DOMException('timed out','TimeoutError'));
+  await expect(request).rejects.toMatchObject({name:'TimeoutError'});
+  expect((fetcher.mock.calls[0]?.[1] as RequestInit).signal).toBe(controller.signal);
+ });
  it('represents 404 API gaps as unavailable',async()=>{
   const api=new ApiClient(mock(()=>Promise.resolve(new Response('',{status:404}))));
   await expect(api.get('/missing')).rejects.toEqual(expect.objectContaining({name:'ApiError',status:404,message:'Unavailable'}));

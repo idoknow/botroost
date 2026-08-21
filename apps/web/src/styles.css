@@ -34,6 +34,16 @@
 .dark .product-tabs-trigger{color:oklch(.72 .018 255)}
 .dark .product-tabs-trigger[data-state="active"]{background:oklch(.32 .08 250)!important;color:oklch(.86 .09 245)!important}
 .endpoint-tabs-list{width:max-content;max-width:100%;margin-bottom:16px}
+.directory-table{margin-top:12px;min-width:0}
+.directory-pagination{display:flex;min-width:0;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 2px 0;color:var(--muted);font-size:12px}
+.directory-pagination-summary{margin-right:auto;font-variant-numeric:tabular-nums}
+.directory-page-size{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.directory-page-size select{height:32px;min-width:58px;border:1px solid var(--border);border-radius:8px;background:var(--surface);padding:0 24px 0 9px;color:var(--text);font:inherit}
+.directory-page-buttons,.directory-page-numbers{display:flex;align-items:center;gap:4px}
+.directory-page-buttons button{width:32px;height:32px;min-width:32px;padding:0;border-radius:8px;font-size:12px;font-variant-numeric:tabular-nums}
+.directory-page-buttons svg{width:14px;height:14px}
+.directory-page-ellipsis{display:grid;width:22px;place-items:center;color:var(--muted)}
+@media(max-width:480px){.directory-pagination{align-items:center;gap:8px}.directory-pagination-summary{width:100%;margin-right:0}.directory-page-size{margin-right:auto}.directory-page-numbers{display:none}}
 .ws-tabs-toolbar{padding-bottom:0;border-bottom:0}
 .ws-tabs-toolbar [data-slot="tabs-list"]{width:max-content;max-width:100%}
 

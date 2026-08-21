@@ -3,7 +3,8 @@ import {expect,test,type Page} from '@playwright/test';
 const endpoint={id:'fixture-endpoint',name:'Campux production',providerId:'napcat',node:{id:'fixture-node',name:'jp09-napcat-reenroll'},generation:4,desired:{state:'running'},status:{node:'online',runtime:'ready',provider:'available',protocol:'connected',convergence:'converged'},activeOperationId:null,metadata:{qq:{uin:'960164003',online:true}}};
 const session={user:{id:'fixture-user',email:'ops@example.test',name:'Rock'},workspace:{id:'fixture-workspace',name:'Production'},role:'owner',permissions:['workspace:read','endpoint:read','endpoint:create','endpoint:start','endpoint:stop','endpoint:restart','node:read','node:create','provider:read','operation:read','audit:read','member:read','credential:read','settings:read'],capabilities:{operations:['create','start','stop','restart'],providers:{napcat:{enabled:true}}}};
 
-async function mockProduct(page:Page,{failSave=false,loggedIn=true}:{failSave?:boolean;loggedIn?:boolean}={}){
+async function mockProduct(page:Page,{failSave=false,loggedIn=true,directorySize=1}:{failSave?:boolean;loggedIn?:boolean;directorySize?:number}={}){
+  const friends=Array.from({length:directorySize},(_,index)=>({user_id:index+7,nickname:directorySize===1?'Friend':`Friend ${index+1}`}));
   let statusRequests=0;
   let endpointRequests=0;
   let failStatus=false;
@@ -14,7 +15,7 @@ async function mockProduct(page:Page,{failSave=false,loggedIn=true}:{failSave?:b
     else if(path.endsWith('/endpoints/fixture-endpoint/napcat/status')){
       statusRequests+=1;
       if(failStatus){status=500;body={error:{message:'Fixture status failed'}};}
-      else{const sampledAt=new Date().toISOString();body={qq:loggedIn?{uin:'960164003',online:true}:null,onebot:{...(loggedIn?{loginInfo:{user_id:960164003},status:{online:true},version:{app_name:'NapCat.OneBot11',app_version:'4.18.19'},probes:{get_status:{ok:true,durationMs:5,error:null},get_login_info:{ok:true,durationMs:6,error:null},get_version_info:{ok:true,durationMs:7,error:null},get_friend_list:{ok:true,durationMs:841,error:null},get_group_list:{ok:true,durationMs:18,error:null}},directory:{observedAt:'2026-08-21T09:00:00.000Z',friends:{count:1,truncated:false,observedAt:'2026-08-21T09:00:00.000Z',items:[{user_id:7,nickname:'Friend'}],probe:{ok:true,durationMs:841,error:null}},groups:{count:1,truncated:false,observedAt:'2026-08-21T09:00:00.000Z',items:[{group_id:8,group_name:'Group'}],probe:{ok:true,durationMs:18,error:null}}}}:{}),config:{websocketClients:[{name:'Campux bridge',enable:true,url:'wss://app.campux.top/onebot/v11/ws',messagePostFormat:'array',reportSelfMessage:false,debug:false,heartInterval:30000,reconnectInterval:5000,tokenConfigured:true}],websocketServers:[]}},traffic:{status:'ok',source:'napcat.container_logs',privacy:'aggregate_only',observedAt:sampledAt,sampleIntervalSeconds:5,oneMinute:{inbound:1,outbound:1,total:2,bytes:196},fiveMinutes:{inbound:4,outbound:2,total:6,bytes:588},buckets:[{startedAt:'2026-08-21T08:59:10.000Z',inbound:0,outbound:0,total:0},{startedAt:'2026-08-21T08:59:20.000Z',inbound:1,outbound:0,total:1},{startedAt:'2026-08-21T08:59:30.000Z',inbound:0,outbound:1,total:1},{startedAt:'2026-08-21T08:59:40.000Z',inbound:2,outbound:0,total:2},{startedAt:'2026-08-21T08:59:50.000Z',inbound:0,outbound:0,total:0},{startedAt:'2026-08-21T09:00:00.000Z',inbound:1,outbound:1,total:2}],recent:[{at:'2026-08-21T09:00:04.000Z',direction:'inbound',scope:'group',bytes:120},{at:'2026-08-21T09:00:01.000Z',direction:'outbound',scope:'private',bytes:76}],recentConnections:[{at:'2026-08-21T09:00:03.000Z',transport:'websocket-client',status:'reconnecting'}]},freshness:{fresh:true,observationAt:sampledAt,nodeHeartbeatAt:sampledAt,checkedAt:sampledAt,staleAfterSeconds:15}};}
+      else{const sampledAt=new Date().toISOString();body={qq:loggedIn?{uin:'960164003',online:true}:null,onebot:{...(loggedIn?{loginInfo:{user_id:960164003},status:{online:true},version:{app_name:'NapCat.OneBot11',app_version:'4.18.19'},probes:{get_status:{ok:true,durationMs:5,error:null},get_login_info:{ok:true,durationMs:6,error:null},get_version_info:{ok:true,durationMs:7,error:null},get_friend_list:{ok:true,durationMs:841,error:null},get_group_list:{ok:true,durationMs:18,error:null}},directory:{observedAt:'2026-08-21T09:00:00.000Z',friends:{count:directorySize,truncated:false,observedAt:'2026-08-21T09:00:00.000Z',items:friends,probe:{ok:true,durationMs:841,error:null}},groups:{count:1,truncated:false,observedAt:'2026-08-21T09:00:00.000Z',items:[{group_id:8,group_name:'Group'}],probe:{ok:true,durationMs:18,error:null}}}}:{}),config:{websocketClients:[{name:'Campux bridge',enable:true,url:'wss://app.campux.top/onebot/v11/ws',messagePostFormat:'array',reportSelfMessage:false,debug:false,heartInterval:30000,reconnectInterval:5000,tokenConfigured:true}],websocketServers:[]}},traffic:{status:'ok',source:'napcat.container_logs',privacy:'aggregate_only',observedAt:sampledAt,sampleIntervalSeconds:5,oneMinute:{inbound:1,outbound:1,total:2,bytes:196},fiveMinutes:{inbound:4,outbound:2,total:6,bytes:588},buckets:[{startedAt:'2026-08-21T08:59:10.000Z',inbound:0,outbound:0,total:0},{startedAt:'2026-08-21T08:59:20.000Z',inbound:1,outbound:0,total:1},{startedAt:'2026-08-21T08:59:30.000Z',inbound:0,outbound:1,total:1},{startedAt:'2026-08-21T08:59:40.000Z',inbound:2,outbound:0,total:2},{startedAt:'2026-08-21T08:59:50.000Z',inbound:0,outbound:0,total:0},{startedAt:'2026-08-21T09:00:00.000Z',inbound:1,outbound:1,total:2}],recent:[{at:'2026-08-21T09:00:04.000Z',direction:'inbound',scope:'group',bytes:120},{at:'2026-08-21T09:00:01.000Z',direction:'outbound',scope:'private',bytes:76}],recentConnections:[{at:'2026-08-21T09:00:03.000Z',transport:'websocket-client',status:'reconnecting'}]},freshness:{fresh:true,observationAt:sampledAt,nodeHeartbeatAt:sampledAt,checkedAt:sampledAt,staleAfterSeconds:15}};}
     }
     else if(path.endsWith('/endpoints/fixture-endpoint/napcat/login-qrcode'))body={qrcode:'https://example.test/qq-login'};
     else if(path.endsWith('/endpoints/fixture-endpoint'))body=endpoint;
@@ -158,6 +159,23 @@ test('separates QQ account data from OneBot protocol operations',async({page})=>
   await expect(page.getByText('Protocol action support')).toBeVisible();
   await expect(page.getByText('get_status')).toBeVisible();
   await expect(page.getByRole('cell',{name:'Friend',exact:true})).toBeHidden();
+});
+
+test('paginates large QQ directories with compact Campux controls',async({page})=>{
+  await mockProduct(page,{directorySize:105});
+  await page.goto('/endpoints/fixture-endpoint');
+  await page.getByRole('tab',{name:'QQ data'}).click();
+  await expect(page.getByText('1–25 of 105',{exact:true})).toBeVisible();
+  await expect(page.getByRole('cell',{name:'Friend 1',exact:true})).toBeVisible();
+  await expect(page.getByRole('cell',{name:'Friend 26',exact:true})).toHaveCount(0);
+  await page.screenshot({path:'/tmp/botroost-ui-evidence/qq-directory-pagination-desktop.png',fullPage:true});
+  await page.setViewportSize({width:320,height:844});
+  await page.getByRole('button',{name:'Next page'}).click();
+  await expect(page.getByText('26–50 of 105',{exact:true})).toBeVisible();
+  await expect(page.getByRole('cell',{name:'Friend 1',exact:true})).toHaveCount(0);
+  await expect(page.getByRole('cell',{name:'Friend 26',exact:true})).toBeVisible();
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=document.documentElement.clientWidth)).toBe(true);
+  await page.screenshot({path:'/tmp/botroost-ui-evidence/qq-directory-pagination-320.png',fullPage:true});
 });
 
 test('shows lightweight aggregate traffic separately from connections and protocol actions',async({page})=>{
