@@ -70,12 +70,12 @@ export interface DockerClient {
   stop(name: string): Promise<void>;
   restart(name: string): Promise<void>;
   exec(container: string, args: string[]): Promise<{ stdout: string; stderr: string }>;
-  logs(container: string, options: { tail: number; sinceSeconds: number; timestamps?: boolean }): Promise<string>;
+  logs(container: string, options: { tail: number; sinceSeconds: number; timestamps?: boolean; maxBytes?: number }): Promise<string>;
 }
 
 export class DockerCliClient implements DockerClient {
-  private async docker(args: string[]) {
-    const { stdout, stderr } = await execFileAsync("docker", args, { timeout: 30_000, maxBuffer: 1024 * 1024 });
+  private async docker(args: string[], maxBuffer = 1024 * 1024) {
+    const { stdout, stderr } = await execFileAsync("docker", args, { timeout: 30_000, maxBuffer });
     return { stdout: String(stdout), stderr: String(stderr) };
   }
   async inspect(name: string): Promise<DockerInspectResult | null> {
@@ -121,9 +121,11 @@ export class DockerCliClient implements DockerClient {
   async stop(name: string) { await this.docker(["stop", "--time", "20", name]); }
   async restart(name: string) { await this.docker(["restart", "--time", "20", name]); }
   async exec(container: string, args: string[]) { return this.docker(["exec", container, ...args]); }
-  async logs(container: string, options: { tail: number; sinceSeconds: number; timestamps?: boolean }) {
-    const { stdout, stderr } = await this.docker(["logs","--tail",String(options.tail),"--since",`${options.sinceSeconds}s`,...(options.timestamps?["--timestamps"]:[]),container]);
-    return `${stdout}${stderr}`.slice(-1024 * 1024);
+  async logs(container: string, options: { tail: number; sinceSeconds: number; timestamps?: boolean; maxBytes?: number }) {
+    const limit = options.maxBytes ?? 1024 * 1024;
+    const { stdout, stderr } = await this.docker(["logs","--tail",String(options.tail),"--since",`${options.sinceSeconds}s`,...(options.timestamps?["--timestamps"]:[]),container], limit);
+    const combined = Buffer.from(`${stdout}${stderr}`);
+    return combined.subarray(Math.max(0, combined.length - limit)).toString("utf8");
   }
 }
 
@@ -309,6 +311,7 @@ export class NapCatRuntime {
   private readonly webCredentials = new Map<string, string>();
   private readonly trafficAccumulators = new Map<string, NapCatTrafficAccumulator>();
   private readonly trafficCache = new Map<string, { at: number; summary: JsonObject }>();
+  private readonly trafficLastSuccessAt = new Map<string, number>();
   private commandsLoaded = false;
   constructor(private readonly options: {
     docker?: DockerClient;
@@ -517,18 +520,31 @@ export class NapCatRuntime {
       accumulator = new NapCatTrafficAccumulator();
       this.trafficAccumulators.set(endpointId, accumulator);
     }
-    let status: "ok" | "unavailable" = "ok";
+    const lastSuccessAt = this.trafficLastSuccessAt.get(endpointId);
+    const sinceSeconds = lastSuccessAt === undefined
+      ? 15
+      : Math.min(300, Math.max(15, Math.ceil((now - lastSuccessAt) / 1000) + 5));
+    const maxBytes = 4 * 1024 * 1024;
+    let status: "ok" | "partial" | "unavailable" = "ok";
+    let complete = true;
     try {
-      const logs = await this.docker().logs(this.containerName(endpointId), { tail: 500, sinceSeconds: 15, timestamps: true });
-      accumulator.ingest(logs.split(/\r?\n/), now);
+      const logs = await this.docker().logs(this.containerName(endpointId), { tail: 5000, sinceSeconds, timestamps: true, maxBytes });
+      const lines = logs.split(/\r?\n/).filter(Boolean);
+      accumulator.ingest(lines, now);
+      complete = lines.length < 5000 && Buffer.byteLength(logs) < maxBytes;
+      status = complete ? "ok" : "partial";
+      this.trafficLastSuccessAt.set(endpointId, now);
     } catch {
       status = "unavailable";
+      complete = false;
     }
     const summary = {
       ...accumulator.summary(now),
       status,
+      complete,
       sampleIntervalSeconds: 5,
       ...(status === "unavailable" ? { error: "Container log telemetry unavailable" } : {}),
+      ...(status === "partial" ? { error: "High log volume truncated the latest sample; displayed rates are lower bounds" } : {}),
     } as unknown as JsonObject;
     this.trafficCache.set(endpointId, { at: now, summary });
     return summary;
@@ -651,7 +667,12 @@ export class NapCatRuntime {
     await this.loadCommands();
     return Promise.all([...this.commands.values()].map(async command => {
       const cached = this.snapshotCache.get(command.endpointId);
-      if (cached && Date.now() - cached.at < 15_000) return { endpointId:cached.value.endpointId,generation:cached.value.generation,runtime:cached.value.runtime,provider:cached.value.provider,protocol:cached.value.protocol,convergence:cached.value.convergence,metadata:cached.value.metadata };
+      if (cached && Date.now() - cached.at < 15_000) {
+        const metadata = cached.value.runtime === "ready"
+          ? { ...cached.value.metadata, traffic: await this.protocolTraffic(command.endpointId) }
+          : cached.value.metadata;
+        return { endpointId:cached.value.endpointId,generation:cached.value.generation,runtime:cached.value.runtime,provider:cached.value.provider,protocol:cached.value.protocol,convergence:cached.value.convergence,metadata };
+      }
       try {
         const snapshot = await this.snapshot(command);
         this.snapshotCache.set(command.endpointId, { at: Date.now(), value: snapshot });

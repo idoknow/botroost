@@ -1,7 +1,7 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { NAPCAT_IMAGE, NapCatRuntime, type DockerClient, type DockerInspectResult } from "../src/index.js";
 import type { RuntimeCommand } from "@botroost/agent-protocol";
 
@@ -52,13 +52,13 @@ class RecordingDocker implements DockerClient {
   async restart(name: string) {
     this.restarted.push(name);
   }
-  logRequests: { container: string; tail: number; sinceSeconds: number; timestamps?: boolean }[] = [];
+  logRequests: { container: string; tail: number; sinceSeconds: number; timestamps?: boolean; maxBytes?: number }[] = [];
   logOutput = "08-21 Token=hidden\n{\"token\":\"json-secret\"}\nAuthorization: Bearer auth-test-value\nCookie: session=cookie-test-value\nCredential=credential-secret\nready\n";
   async exec(container: string, args: string[]) {
     this.execs.push({ container, args });
     return { stdout: "", stderr: "" };
   }
-  async logs(container: string, options: { tail: number; sinceSeconds: number; timestamps?: boolean }) {
+  async logs(container: string, options: { tail: number; sinceSeconds: number; timestamps?: boolean; maxBytes?: number }) {
     this.logRequests.push({ container, ...options });
     return this.logOutput;
   }
@@ -129,7 +129,11 @@ describe("NapCat runtime", () => {
   it("uses NapCat web auth and authenticated QR/status/probe requests", async () => {
     const docker = new RecordingDocker();
     const trafficTimestamp = new Date().toISOString();
-    docker.logOutput = `${trafficTimestamp} 08-21 19:36:28 [info] QQ | 接收 <- 群聊 [Group(8)] [Friend(7)] hello\n${trafficTimestamp} 08-21 19:36:28 [info] QQ | 发送 -> 私聊 [Friend(7)] reply\n`;
+    docker.logOutput = [
+      `${trafficTimestamp} 08-21 19:36:28 [info] QQ | 接收 <- 群聊 [Group(8)] [Friend(7)] hello`,
+      `${trafficTimestamp} 08-21 19:36:28 [info] QQ | 发送 -> 私聊 [Friend(7)] reply`,
+      ...Array.from({ length: 4998 }, (_, index) => `${trafficTimestamp} [debug] unrelated runtime line ${index}`),
+    ].join("\n");
     docker.inspect = async () => ({
       id: "container-id",
       name: "botroost-napcat-33333333-3333-4333-8333-333333333333",
@@ -191,6 +195,8 @@ describe("NapCat runtime", () => {
       traffic: {
         source: "napcat.container_logs",
         privacy: "aggregate_only",
+        status: "partial",
+        complete: false,
         oneMinute: { inbound: 1, outbound: 1, total: 2 },
         fiveMinutes: { inbound: 1, outbound: 1, total: 2 },
         recent: expect.arrayContaining([
@@ -199,7 +205,7 @@ describe("NapCat runtime", () => {
         ]),
       },
     });
-    expect(docker.logRequests).toContainEqual({ container: `botroost-napcat-${baseCommand.endpointId}`, tail: 500, sinceSeconds: 15, timestamps: true });
+    expect(docker.logRequests).toContainEqual({ container: `botroost-napcat-${baseCommand.endpointId}`, tail: 5000, sinceSeconds: 15, timestamps: true, maxBytes: 4 * 1024 * 1024 });
     const onebot = snapshot.metadata.onebot as { directory: { friends: { items: unknown[] } } };
     expect(onebot.directory.friends.items).toHaveLength(500);
   });
@@ -276,11 +282,25 @@ describe("NapCat runtime", () => {
       },
     });
 
-    await runtime.snapshot(baseCommand);
-    await runtime.snapshot(baseCommand);
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      await runtime.snapshot(baseCommand);
+      await runtime.snapshot(baseCommand);
+      expect(docker.logRequests.filter(request=>request.timestamps)).toHaveLength(1);
 
+      clock.mockReturnValue(now + 6_000);
+      await runtime.snapshot(baseCommand);
+      expect(docker.logRequests.filter(request=>request.timestamps)).toHaveLength(2);
+      expect(docker.logRequests.at(-1)).toEqual(expect.objectContaining({ sinceSeconds: 15, tail: 5000 }));
+
+      clock.mockReturnValue(now + 46_000);
+      await runtime.snapshot(baseCommand);
+      expect(docker.logRequests.at(-1)).toEqual(expect.objectContaining({ sinceSeconds: 45, tail: 5000 }));
+    } finally {
+      clock.mockRestore();
+    }
     expect(authCalls).toBe(1);
-    expect(docker.logRequests.filter(request=>request.timestamps)).toHaveLength(1);
   });
 
   it("reauthenticates once when a cached WebUI credential expires", async () => {
