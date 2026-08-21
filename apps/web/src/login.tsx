@@ -27,7 +27,7 @@ export function Login(){
         <Paper component="section" className="login-panel" withBorder p={{base:'lg',sm:'xl'}}>
           <form onSubmit={submit}>
             <Stack gap="md">
-              <div><Text className="eyebrow">OneBot Cluster</Text><Title order={1}>Sign in</Title><Text c="dimmed" mt={6}>Manage cloud-native OneBot protocol endpoints and their agent nodes.</Text></div>
+              <div><Title order={1}>Sign in</Title><Text c="dimmed" mt={4}>Continue to Botroost.</Text></div>
               {error&&<Alert icon={<IconAlertCircle size={18}/>} color="red" title="Authentication failed">{error}</Alert>}
               <TextInput label="Email" type="email" autoComplete="email" autoFocus required value={email} onChange={e=>setEmail(e.currentTarget.value)}/>
               <PasswordInput label="Password" autoComplete="current-password" required value={password} onChange={e=>setPassword(e.currentTarget.value)}/>

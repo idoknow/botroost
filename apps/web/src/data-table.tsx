@@ -5,7 +5,7 @@ export function DataTable<T>({data,columns}:{data:T[];columns:ColumnDef<T>[]}){
   const table=useReactTable({data,columns,getCoreRowModel:getCoreRowModel()});
 
   return <ScrollArea type="auto" className="data-table-scroll">
-    <Table striped highlightOnHover horizontalSpacing="sm" verticalSpacing="xs" className="data-table">
+    <Table highlightOnHover horizontalSpacing="sm" verticalSpacing="xs" className="data-table">
       <Table.Thead>
         {table.getHeaderGroups().map(group=><Table.Tr key={group.id}>
           {group.headers.map(header=><Table.Th key={header.id}>

@@ -1,33 +1,32 @@
 # Botroost interface system
 
-## Product character
-Botroost is an operations control plane: calm, exact, and low-noise. The interface should privilege status, provenance, and safe action over decoration.
+The normative product design guidance is [`../DESIGN.md`](../DESIGN.md). This file records implementation tokens and must not contradict it.
 
 ## Foundations
-- **Canvas:** `#07090c`; **navigation:** `#0d1117`; **surface:** `#111720`; **raised surface:** `#161e28`.
-- **Borders:** `#202a35` default and `#2c3947` strong. Borders—not shadows—define hierarchy.
-- **Text:** `#edf3f7` primary, `#8795a5` muted.
-- **Accent:** electric cyan `#09aeda`, reserved for focus, active navigation, links, and primary actions.
-- **Status colors:** semantic red, amber, green only. Do not use them decoratively.
-- **Spacing:** 4 px base grid; primary rhythm 8 / 12 / 16 / 24 / 32 px.
-- **Radius:** 4 px micro, 6 px controls, 10 px panels. Avoid pills unless the data is genuinely a compact status.
-- **Type:** system sans for interface language; system monospace for identifiers, data, overlines, and technical metadata.
+
+- Light canvas `#f8fafc`, surface `#ffffff`, muted surface `#f1f5f9`, text `#0f172a`, border `#e2e8f0`.
+- Dark canvas `#0f172a`, surface `#111827`, muted surface `#1e293b`, text `#f8fafc`, border `#273449`.
+- Blue is reserved for links, focus, active navigation, and primary action.
+- Green, amber, red, gray, and violet are small semantic signals only.
+- System sans is used for interface language; monospace only for IDs, logs, and technical values.
+- Primary spacing rhythm: 8 / 12 / 16 / 24 px. Product surfaces use an 8 px radius and 1 px border.
 
 ## Global layout
-- Desktop uses a fixed 224 px sidebar and 56 px top bar.
-- Content is fluid up to 1440 px, with 32 px desktop and 12–16 px mobile gutters.
-- Mobile navigation becomes a drawer below the `sm` breakpoint.
-- Interactive controls must provide at least a 44 px touch target on mobile.
 
-## Components
-- Navigation entries are quiet by default; active state uses a cyan-tinted surface and border.
-- Panels use one surface tone and a 1 px border. Never use gradients or ornamental shadows.
-- Inputs are 44 px tall with a clear cyan focus border.
-- Empty, loading, error, unavailable, and 404 states share compact centered composition and plain language.
-- Primary actions are cyan; secondary actions are subtle or bordered.
+- Desktop: 190 px sidebar, 56 px header, centered 980 px content column with 16 px gutters.
+- Mobile: 56 px header and 64 px bottom navigation with Cluster, Endpoints, Nodes, Changes, and More.
+- Main page title is 20 px. Inner headings are 14–16 px. Body is 14 px; metadata is 12 px.
+- Surfaces represent real information groups. Do not nest decorative cards or add colored side rails.
+- Tabs are natural-width, left-aligned progressive-disclosure controls.
+
+## Product semantics
+
+- Endpoint is the primary managed OneBot protocol service.
+- Node hosts endpoint runtimes through an outbound agent connection.
+- NapCat is a runtime driver and OneBot implementation, not the protocol itself.
+- QQ account is observed identity; OneBot 11 is protocol availability; WebSocket entries are transport configuration.
+- Every status label names its subject. Never claim a live peer connection without telemetry.
 
 ## Voice
-Use concise operational language: name the resource, state, and next action. Avoid marketing copy, jokes, and anthropomorphic AI language.
 
-## Avoid
-Huge cards, gradient fills, purple “AI” styling, excessive rounding, decorative glow, redundant labels, and low-value dashboard chrome.
+Use concise operational language. Name the resource, measured state, and next action. Avoid product pitches inside authenticated pages, redundant headings, anthropomorphism, and ambiguous connection language.
