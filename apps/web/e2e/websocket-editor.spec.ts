@@ -220,3 +220,36 @@ test('sidebar refreshes every endpoint and exposes QQ login state',async({page})
   await page.waitForTimeout(3300);
   expect(endpointRequests()).toBeGreaterThan(before);
 });
+
+test('workspace navigation uses the shared Campux pill tab styling',async({page})=>{
+  await mockProduct(page);
+  await page.goto('/workspace');
+  const tabs=page.getByRole('navigation',{name:'Workspace sections'});
+  await expect(tabs).toHaveClass(/product-tabs-list/);
+  const members=tabs.getByRole('link',{name:'Members'});
+  await expect(members).toHaveClass(/product-tabs-trigger/);
+  await expect(members).toHaveAttribute('data-state','active');
+  await expect(members).toHaveAttribute('aria-current','page');
+  const activeStyle=await members.evaluate(element=>{const style=getComputedStyle(element),box=element.getBoundingClientRect();return{height:box.height,borderRadius:parseFloat(style.borderRadius),background:style.backgroundColor,color:style.color}});
+  expect(activeStyle.height).toBe(28);
+  expect(activeStyle.borderRadius).toBeGreaterThanOrEqual(activeStyle.height/2-1);
+  expect(activeStyle.background).toBe('rgb(219, 234, 254)');
+  expect(activeStyle.color).toBe('rgb(29, 78, 216)');
+  await tabs.getByRole('link',{name:'Credentials'}).click();
+  await expect(page).toHaveURL(/\/workspace\/credentials$/);
+  await expect(tabs.getByRole('link',{name:'Credentials'})).toHaveAttribute('data-state','active');
+  await expect(tabs.getByRole('link',{name:'Members'})).toHaveAttribute('data-state','inactive');
+});
+
+test('workspace pill tabs do not overflow a 320px viewport',async({page})=>{
+  await page.setViewportSize({width:320,height:720});
+  await mockProduct(page);
+  await page.goto('/workspace/settings');
+  const tabs=page.getByRole('navigation',{name:'Workspace sections'});
+  await expect(tabs.getByRole('link',{name:'Settings'})).toHaveAttribute('aria-current','page');
+  const geometry=await tabs.evaluate(element=>{const box=element.getBoundingClientRect();return{left:box.left,right:box.right,viewport:innerWidth,scrollWidth:document.documentElement.scrollWidth,clientWidth:document.documentElement.clientWidth}});
+  expect(geometry.left).toBeGreaterThanOrEqual(0);
+  expect(geometry.right).toBeLessThanOrEqual(geometry.viewport);
+  expect(geometry.scrollWidth).toBe(geometry.clientWidth);
+  await page.screenshot({path:'/tmp/botroost-ui-evidence/workspace-tabs-320.png',fullPage:true});
+});

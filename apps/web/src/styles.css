@@ -33,6 +33,7 @@
 .dark .product-tabs-list{border-color:oklch(.35 .018 255);background:oklch(.215 .018 255)}
 .dark .product-tabs-trigger{color:oklch(.72 .018 255)}
 .dark .product-tabs-trigger[data-state="active"]{background:oklch(.32 .08 250)!important;color:oklch(.86 .09 245)!important}
+.workspace-tabs-list .product-tabs-trigger{display:inline-flex;align-items:center;justify-content:center;text-decoration:none}
 .endpoint-tabs-list{width:max-content;max-width:100%;margin-bottom:16px}
 .directory-table{margin-top:12px;min-width:0}
 .directory-pagination{display:flex;min-width:0;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 2px 0;color:var(--muted);font-size:12px}
