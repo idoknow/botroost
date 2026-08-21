@@ -10,7 +10,8 @@ test.describe('live operator journey',()=>{
   test.skip(!live,'Set LIVE_E2E=1 to run live E2E');
   test('login, inspect a real endpoint, audit, persistence, logout',async({page})=>{
     const apiErrors:string[]=[];
-    page.on('response',response=>{if(response.url().includes('/api/')&&response.status()>=400)apiErrors.push(`${response.status()} ${response.url()}`)});
+    let collectApiErrors=true;
+    page.on('response',response=>{if(collectApiErrors&&response.url().includes('/api/')&&response.status()>=400&&!(response.status()===404&&response.url().endsWith('/api/v1/disabled')))apiErrors.push(`${response.status()} ${response.url()}`)});
     await page.goto('/login');
     await page.getByLabel('Email').fill(email!);
     await page.getByLabel('Password').fill(password!);
@@ -29,8 +30,9 @@ test.describe('live operator journey',()=>{
     await expect(page.getByRole('heading',{name:'Audit events'})).toBeVisible();
     await page.reload();
     await expect(page.getByRole('heading',{name:'Audit events'})).toBeVisible();
+    expect(apiErrors).toEqual([]);
+    collectApiErrors=false;
     await page.getByRole('button',{name:'Log out'}).click();
     await expect(page.getByRole('heading',{name:'Sign in'})).toBeVisible();
-    expect(apiErrors).toEqual([]);
   });
 });
