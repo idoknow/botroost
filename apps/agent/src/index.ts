@@ -427,7 +427,14 @@ export class NapCatRuntime {
       }
     }
     if (!response.ok) throw new Error(`NapCat request failed: ${response.status}`);
-    const payload = await response.json() as JsonObject;
+    let payload = await response.json() as JsonObject;
+    if (typeof payload.code === "number" && payload.code !== 0 && endpointId && String(payload.message ?? "").toLowerCase().includes("unauthorized")) {
+      const current = this.webCredentials.get(endpointId);
+      if (current === webToken) this.webCredentials.delete(endpointId);
+      response = await request(current && current !== webToken ? current : await this.webCredential(endpointId, base));
+      if (!response.ok) throw new Error(`NapCat request failed: ${response.status}`);
+      payload = await response.json() as JsonObject;
+    }
     if (typeof payload.code === "number" && payload.code !== 0) throw new Error(`NapCat request rejected: ${String(payload.message ?? payload.code)}`);
     return payload;
   }
