@@ -20,7 +20,7 @@ const session: Session = {
 };
 
 describe("NapCat endpoint UI", () => {
-  it("renders QR login, QQ metadata, and OneBot probe status for NapCat endpoints", async () => {
+  it("shows an online account dashboard, hides QR login, and renders OneBot resources", async () => {
     const fetcher = vi.fn(async (url: string) => {
       const path = new URL(url, "https://app.test").pathname;
       if (path === "/api/v1/endpoints/endpoint-1") {
@@ -41,7 +41,7 @@ describe("NapCat endpoint UI", () => {
       if (path === "/api/v1/endpoints/endpoint-1/napcat/status") {
         return new Response(JSON.stringify({
           qq: { uin: "12345", nickname: "Operator QQ" },
-          onebot: { status: { online: true }, loginInfo: { user_id: 12345 } },
+          onebot: { status: { online: true }, loginInfo: { user_id: 12345, nickname: "Operator QQ" }, friends:[{user_id:7,nickname:"Alice",remark:"Core"}], groups:[{group_id:8,group_name:"Botroost users",member_count:42}], version:{app_name:"NapCat.OneBot11",app_version:"4.18.19"}, config:{websocketClients:[{name:"LangBot",enable:true,url:"wss://bot.example/ws",tokenConfigured:true}],websocketServers:[]} },
         }), { status: 200, headers: { "content-type": "application/json" } });
       }
       return new Response("{}", { status: 404 });
@@ -59,8 +59,14 @@ describe("NapCat endpoint UI", () => {
         </MantineProvider>,
       );
 
-      expect(await screen.findByRole("img", { name: "NapCat QR code" })).toBeInTheDocument();
-      expect(await screen.findByText("12345")).toBeInTheDocument();
+      expect(await screen.findByText("QQ connected")).toBeInTheDocument();
+      expect(screen.queryByRole("img", { name: "NapCat QR code" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Refresh QR code" })).not.toBeInTheDocument();
+      expect(await screen.findByText("Alice")).toBeInTheDocument();
+      expect(await screen.findByText("Botroost users")).toBeInTheDocument();
+      expect(await screen.findByText("4.18.19")).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("tab",{name:"WebSocket connections"}));
+      expect(await screen.findByDisplayValue("wss://bot.example/ws")).toBeInTheDocument();
       expect(await screen.findByText(/OneBot online/)).toBeInTheDocument();
     } finally {
       globalThis.fetch = previous;

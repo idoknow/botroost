@@ -361,6 +361,21 @@ export class NapCatRuntime {
       const text=this.redactLogs(await docker.logs(name,{tail,sinceSeconds}));
       return{state:existing.state==="running"?"running":"stopped",metadata:{logs:{text,tail,sinceSeconds}}};
     }
+    if(command.action==="update-onebot-websockets"){
+      if(!existing?.ipAddress||existing.state!=="running"||existing.labels["botroost.workspace_id"]!==command.workspaceId||existing.labels["botroost.endpoint_id"]!==command.endpointId||existing.labels["botroost.provider"]!=="napcat")throw new Error("NapCat container ownership check failed");
+      const clients=command.metadata.websocketClients,servers=command.metadata.websocketServers;
+      if(!Array.isArray(clients)||clients.length>20||!Array.isArray(servers)||servers.length>20)throw new Error("OneBot websocket configuration is invalid");
+      const base=new URL(`http://${existing.ipAddress}:6099`),credential=await this.webCredential(command.endpointId,base);
+      const current=await this.napcatRequest(base,"/api/OB11Config/GetConfig",credential,{},command.endpointId);
+      const config=current.data!==null&&typeof current.data==="object"&&!Array.isArray(current.data)?current.data as Record<string,unknown>:{};
+      const network=config.network!==null&&typeof config.network==="object"&&!Array.isArray(config.network)?config.network as Record<string,unknown>:{};
+      const preserveTokens=(next:unknown[],previous:unknown)=>next.map(item=>{if(item===null||typeof item!=="object"||Array.isArray(item))throw new Error("OneBot websocket entry is invalid");const value=item as Record<string,unknown>;const old=Array.isArray(previous)?previous.find(entry=>entry!==null&&typeof entry==="object"&&!Array.isArray(entry)&&(entry as Record<string,unknown>).name===value.name) as Record<string,unknown>|undefined:undefined;return{...value,token:typeof value.token==="string"?value.token:typeof old?.token==="string"?old.token:""}});
+      const merged={...config,network:{...network,websocketClients:preserveTokens(clients,network.websocketClients),websocketServers:preserveTokens(servers,network.websocketServers)}};
+      await this.napcatRequest(base,"/api/OB11Config/SetConfig",await this.webCredential(command.endpointId,base),{config:JSON.stringify(merged)},command.endpointId);
+      this.snapshotCache.delete(command.endpointId);
+      const snapshot=await this.snapshot(command);
+      return{state:"running",observations:{node:"online",runtime:snapshot.runtime,provider:snapshot.provider,protocol:snapshot.protocol,convergence:snapshot.convergence},metadata:snapshot.metadata};
+    }
     if (command.action !== "stop" && (!existing || existing.image !== desiredImage)) {
       if (existing) await docker.remove(name);
       const qq = this.endpointDirectory(command.endpointId, "qq");
@@ -487,9 +502,16 @@ export class NapCatRuntime {
     const debugSession = await this.napcatRequest(base, "/api/Debug/create", webToken, {}, command.endpointId);
     const adapterName = (debugSession.data as Record<string, unknown> | undefined)?.adapterName;
     if (typeof adapterName !== "string" || !adapterName) throw new Error("NapCat debug adapter missing");
-    const callOneBot = (action: "get_status" | "get_login_info") => this.napcatRequest(base, `/api/Debug/call/${encodeURIComponent(adapterName)}`, webToken, { action, params: {} }, command.endpointId);
+    const callOneBot = (action: "get_status" | "get_login_info" | "get_friend_list" | "get_group_list" | "get_version_info") => this.napcatRequest(base, `/api/Debug/call/${encodeURIComponent(adapterName)}`, webToken, { action, params: {} }, command.endpointId);
     const status = await callOneBot("get_status");
     const onebotLogin = await callOneBot("get_login_info");
+    const friends = await callOneBot("get_friend_list");
+    const groups = await callOneBot("get_group_list");
+    const version = await callOneBot("get_version_info");
+    const obConfig = await this.napcatRequest(base,"/api/OB11Config/GetConfig",await this.webCredential(command.endpointId,base),{},command.endpointId);
+    const arrayData=(value:JsonObject)=>Array.isArray(value.data)?value.data.slice(0,500):[];
+    const configData=objectData(obConfig),network=configData.network!==null&&typeof configData.network==="object"&&!Array.isArray(configData.network)?configData.network as Record<string,unknown>:{};
+    const safeConnections=(value:unknown)=>Array.isArray(value)?value.slice(0,20).map(entry=>{if(entry===null||typeof entry!=="object"||Array.isArray(entry))return{};const {token,...safe}=entry as Record<string,unknown>;return{...safe,tokenConfigured:typeof token==="string"&&token.length>0}}):[];
     return {
       endpointId: command.endpointId,
       generation: command.generation,
@@ -503,6 +525,12 @@ export class NapCatRuntime {
         onebot: {
           status: objectData(status),
           loginInfo: objectData(onebotLogin),
+          friends: arrayData(friends),
+          friendCount: Array.isArray(friends.data)?friends.data.length:0,
+          groups: arrayData(groups),
+          groupCount: Array.isArray(groups.data)?groups.data.length:0,
+          version: objectData(version),
+          config:{websocketClients:safeConnections(network.websocketClients),websocketServers:safeConnections(network.websocketServers)},
         },
       },
     };

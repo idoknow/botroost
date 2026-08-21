@@ -146,6 +146,11 @@ describe("NapCat runtime", () => {
         if (String(url).endsWith("/api/QQLogin/GetQQLoginQrcode")) return new Response(JSON.stringify({ data: { qrcode: "otpauth://qq-login" } }), { status: 200 });
         if (String(url).endsWith("/api/QQLogin/GetQQLoginInfo")) return new Response(JSON.stringify({ code: 0, data: { uin: "12345", nickname: "Operator QQ", online: true } }), { status: 200 });
         if (String(url).endsWith("/api/Debug/create")) return new Response(JSON.stringify({ data: { adapterName: "debug-session" } }), { status: 200 });
+        if (String(url).endsWith("/api/OB11Config/GetConfig")) return new Response(JSON.stringify({ code: 0, data: { network: { websocketServers: [], websocketClients: [] } } }), { status: 200 });
+        const action = JSON.parse(String(init?.body ?? "{}"))?.action;
+        if (action === "get_friend_list") return new Response(JSON.stringify({ status: "ok", retcode: 0, data: [{ user_id: 7, nickname: "Friend" }] }), { status: 200 });
+        if (action === "get_group_list") return new Response(JSON.stringify({ status: "ok", retcode: 0, data: [{ group_id: 8, group_name: "Group" }] }), { status: 200 });
+        if (action === "get_version_info") return new Response(JSON.stringify({ status: "ok", retcode: 0, data: { app_name: "NapCat.OneBot11", app_version: "4.18.19" } }), { status: 200 });
         return new Response(JSON.stringify({ status: "ok", retcode: 0, data: { online: true } }), { status: 200 });
       },
     });
@@ -159,6 +164,10 @@ describe("NapCat runtime", () => {
       "/api/Debug/create",
       "/api/Debug/call/debug-session",
       "/api/Debug/call/debug-session",
+      "/api/Debug/call/debug-session",
+      "/api/Debug/call/debug-session",
+      "/api/Debug/call/debug-session",
+      "/api/OB11Config/GetConfig",
     ]);
     expect(JSON.parse(String(calls[0]!.init!.body))).toEqual({
       hash: "43b5038ddfcd49202012115189e327dc42f5dd49740202201cfbe0db05fc5037",
@@ -167,8 +176,19 @@ describe("NapCat runtime", () => {
     expect(snapshot.metadata).toMatchObject({
       qq: { uin: "12345", nickname: "Operator QQ" },
       login: { qrcode: "otpauth://qq-login" },
-      onebot: { status: { online: true } },
+      onebot: { status: { online: true }, friends: [{ user_id: 7, nickname: "Friend" }], groups: [{ group_id: 8, group_name: "Group" }], version: { app_version: "4.18.19" }, config: { websocketClients: [], websocketServers: [] } },
     });
+  });
+
+  it("updates only bounded OneBot websocket connections through the authenticated WebUI", async () => {
+    const docker = new RecordingDocker();
+    docker.inspect = async () => ({ id:"container-id",name:"botroost-napcat-33333333-3333-4333-8333-333333333333",image:NAPCAT_IMAGE,state:"running" as const,ipAddress:"172.18.0.10",labels:{"botroost.workspace_id":baseCommand.workspaceId,"botroost.endpoint_id":baseCommand.endpointId,"botroost.provider":"napcat"} });
+    const calls:{path:string;body:unknown}[]=[];
+    const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"botroost-napcat-ws-")),napcatToken:"operator-token",fetcher:async(url,init)=>{const path=new URL(String(url)).pathname;const body=init?.body?JSON.parse(String(init.body)):undefined;calls.push({path,body});if(path==="/api/auth/login")return new Response(JSON.stringify({code:0,data:{Credential:"credential"}}));if(path==="/api/OB11Config/GetConfig")return new Response(JSON.stringify({code:0,data:{network:{httpServers:[],httpSseServers:[],httpClients:[],websocketServers:[],websocketClients:[],plugins:[]},timeout:{baseTimeout:10000,uploadSpeedKBps:256,downloadSpeedKBps:256,maxTimeout:1800000}}}));if(path==="/api/OB11Config/SetConfig")return new Response(JSON.stringify({code:0,data:null}));if(path==="/api/QQLogin/GetQQLoginQrcode")return new Response(JSON.stringify({code:0,data:{}}));if(path==="/api/QQLogin/GetQQLoginInfo")return new Response(JSON.stringify({code:0,data:{online:false}}));throw new Error(`unexpected ${path}`)}});
+    await runtime.apply("runtime:update-ws",{...baseCommand,action:"update-onebot-websockets",metadata:{websocketClients:[{name:"LangBot",enable:true,url:"wss://bot.example/ws",token:"new-secret",reconnectInterval:5000,heartInterval:30000,messagePostFormat:"array",reportSelfMessage:false,debug:false}],websocketServers:[]}} as unknown as typeof baseCommand);
+    const set=calls.find(call=>call.path==="/api/OB11Config/SetConfig");
+    expect(set?.body).toMatchObject({config:expect.stringContaining("wss://bot.example/ws")});
+    expect(JSON.parse((set?.body as {config:string}).config).network.websocketClients[0].token).toBe("new-secret");
   });
 
   it("reuses one WebUI credential across continuous snapshots instead of hitting the login limiter", async () => {
