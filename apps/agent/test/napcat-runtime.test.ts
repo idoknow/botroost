@@ -148,10 +148,11 @@ describe("NapCat runtime", () => {
         if (String(url).endsWith("/api/Debug/create")) return new Response(JSON.stringify({ data: { adapterName: "debug-session" } }), { status: 200 });
         if (String(url).endsWith("/api/OB11Config/GetConfig")) return new Response(JSON.stringify({ code: 0, data: { network: { websocketServers: [], websocketClients: [] } } }), { status: 200 });
         const action = JSON.parse(String(init?.body ?? "{}"))?.action;
-        if (action === "get_friend_list") return new Response(JSON.stringify({ status: "ok", retcode: 0, data: [{ user_id: 7, nickname: "Friend" }] }), { status: 200 });
-        if (action === "get_group_list") return new Response(JSON.stringify({ status: "ok", retcode: 0, data: [{ group_id: 8, group_name: "Group" }] }), { status: 200 });
-        if (action === "get_version_info") return new Response(JSON.stringify({ status: "ok", retcode: 0, data: { app_name: "NapCat.OneBot11", app_version: "4.18.19" } }), { status: 200 });
-        return new Response(JSON.stringify({ status: "ok", retcode: 0, data: { online: true } }), { status: 200 });
+        if (action === "get_friend_list") return new Response(JSON.stringify({ code: 0, data: { status: "ok", retcode: 0, data: Array.from({ length: 501 }, (_, index) => ({ user_id: index + 7, nickname: `Friend ${index + 1}` })) } }), { status: 200 });
+        if (action === "get_group_list") return new Response(JSON.stringify({ code: 0, data: { status: "ok", retcode: 0, data: [{ group_id: 8, group_name: "Group" }] } }), { status: 200 });
+        if (action === "get_version_info") return new Response(JSON.stringify({ code: 0, data: { status: "ok", retcode: 0, data: { app_name: "NapCat.OneBot11", app_version: "4.18.19" } } }), { status: 200 });
+        if (action === "get_login_info") return new Response(JSON.stringify({ code: 0, data: { status: "ok", retcode: 0, data: { user_id: 12345, nickname: "Operator QQ" } } }), { status: 200 });
+        return new Response(JSON.stringify({ code: 0, data: { status: "ok", retcode: 0, data: { online: true, good: true } } }), { status: 200 });
       },
     });
 
@@ -175,7 +176,54 @@ describe("NapCat runtime", () => {
     expect(snapshot.metadata).toMatchObject({
       qq: { uin: "12345", nickname: "Operator QQ" },
       login: {},
-      onebot: { status: { online: true }, friends: [{ user_id: 7, nickname: "Friend" }], groups: [{ group_id: 8, group_name: "Group" }], version: { app_version: "4.18.19" }, config: { websocketClients: [], websocketServers: [] } },
+      onebot: {
+        status: { online: true },
+        directory: {
+          friends: { count: 501, truncated: true, probe: { ok: true, error: null } },
+          groups: { items: [{ group_id: 8, group_name: "Group" }], count: 1, probe: { ok: true, error: null } },
+        },
+        version: { app_version: "4.18.19" },
+        config: { websocketClients: [], websocketServers: [] },
+      },
+    });
+    const onebot = snapshot.metadata.onebot as { directory: { friends: { items: unknown[] } } };
+    expect(onebot.directory.friends.items).toHaveLength(500);
+  });
+
+  it("keeps protocol health and successful QQ resources when one directory action fails", async () => {
+    const docker = new RecordingDocker();
+    docker.inspect = async () => ({ id: "container-id", name: "botroost-napcat-33333333-3333-4333-8333-333333333333", image: NAPCAT_IMAGE, state: "running" as const, ipAddress: "172.18.0.10", labels: {} });
+    const runtime = new NapCatRuntime({
+      docker,
+      stateDirectory: await mkdtemp(join(tmpdir(), "botroost-napcat-partial-directory-")),
+      napcatToken: "operator-token",
+      fetcher: async (url, init) => {
+        const path = new URL(String(url)).pathname;
+        if (path === "/api/auth/login") return new Response(JSON.stringify({ code: 0, data: { Credential: "credential" } }));
+        if (path === "/api/QQLogin/GetQQLoginQrcode") return new Response(JSON.stringify({ code: 0, data: {} }));
+        if (path === "/api/QQLogin/GetQQLoginInfo") return new Response(JSON.stringify({ code: 0, data: { online: true, uin: "12345" } }));
+        if (path === "/api/Debug/create") return new Response(JSON.stringify({ code: 0, data: { adapterName: "debug-session" } }));
+        if (path === "/api/Debug/call/debug-session") {
+          const action = JSON.parse(String(init?.body)).action as string;
+          if (action === "get_friend_list") return new Response(JSON.stringify({ code: 0, data: { status: "failed", retcode: 100, data: null, message: "temporary failure" } }));
+          if (action === "get_version_info") return new Response(JSON.stringify({ code: 0, data: { status: "failed", retcode: 100, data: null, message: "version unavailable" } }));
+          if (action === "get_group_list") return new Response(JSON.stringify({ code: 0, data: { status: "ok", retcode: 0, data: [{ group_id: 8, group_name: "Group" }], message: "" } }));
+          return new Response(JSON.stringify({ code: 0, data: { status: "ok", retcode: 0, data: action === "get_status" ? { online: true } : {}, message: "" } }));
+        }
+        if (path === "/api/OB11Config/GetConfig") return new Response(JSON.stringify({ code: 0, data: { network: { websocketClients: [], websocketServers: [] } } }));
+        throw new Error(`unexpected request ${path}`);
+      },
+    });
+
+    const snapshot = await runtime.snapshot(baseCommand);
+
+    expect(snapshot).toMatchObject({ runtime: "ready", provider: "available", protocol: "connected" });
+    expect(snapshot.metadata.onebot).toMatchObject({
+      probes: { get_version_info: { ok: false, error: expect.stringContaining("version unavailable") } },
+      directory: {
+        friends: { count: 0, probe: { ok: false, error: expect.stringContaining("temporary failure") } },
+        groups: { count: 1, items: [{ group_id: 8, group_name: "Group" }], probe: { ok: true, error: null } },
+      },
     });
   });
 
@@ -198,13 +246,18 @@ describe("NapCat runtime", () => {
       docker,
       stateDirectory: await mkdtemp(join(tmpdir(), "botroost-napcat-auth-cache-")),
       napcatToken: "operator-token",
-      fetcher: async url => {
+      fetcher: async (url, init) => {
         const path = new URL(String(url)).pathname;
         if (path === "/api/auth/login") {
           authCalls++;
           return new Response(JSON.stringify(authCalls === 1 ? { code: 0, data: { Credential: "credential" } } : { code: -1, message: "login rate limit" }));
         }
         if (path === "/api/Debug/create") return new Response(JSON.stringify({ code: 0, data: { adapterName: "debug-session" } }));
+        if (path === "/api/Debug/call/debug-session") {
+          const action = JSON.parse(String(init?.body)).action as string;
+          return new Response(JSON.stringify({ code: 0, data: { status: "ok", retcode: 0, data: action.endsWith("_list") ? [] : { online: true }, message: "" } }));
+        }
+        if (path === "/api/OB11Config/GetConfig") return new Response(JSON.stringify({ code: 0, data: { network: { websocketClients: [], websocketServers: [] } } }));
         return new Response(JSON.stringify({ code: 0, data: { online: true, qrcode: "qr-current" } }));
       },
     });
@@ -329,10 +382,15 @@ describe("NapCat runtime", () => {
       docker,
       stateDirectory: await mkdtemp(join(tmpdir(), "botroost-napcat-heartbeat-")),
       napcatToken: "operator-token",
-      fetcher: async url => {
+      fetcher: async (url, init) => {
         const path = new URL(String(url)).pathname;
         if (path === "/api/auth/login") return new Response(JSON.stringify({ code: 0, data: { Credential: "credential" } }));
         if (path === "/api/Debug/create") return new Response(JSON.stringify({ code: 0, data: { adapterName: "debug-session" } }));
+        if (path === "/api/Debug/call/debug-session") {
+          const action = JSON.parse(String(init?.body)).action as string;
+          return new Response(JSON.stringify({ code: 0, data: { status: "ok", retcode: 0, data: action.endsWith("_list") ? [] : { online: true }, message: "" } }));
+        }
+        if (path === "/api/OB11Config/GetConfig") return new Response(JSON.stringify({ code: 0, data: { network: { websocketClients: [], websocketServers: [] } } }));
         return new Response(JSON.stringify({ code: 0, data: { online: true } }));
       },
     });
@@ -346,10 +404,15 @@ describe("NapCat runtime", () => {
     const docker = new RecordingDocker();
     docker.inspect = async () => ({ id: "container-id", name: "botroost-napcat-33333333-3333-4333-8333-333333333333", image: NAPCAT_IMAGE, state: "running" as const, ipAddress: "172.18.0.10", labels: {} });
     const stateDirectory = await mkdtemp(join(tmpdir(), "botroost-napcat-restart-"));
-    const fetcher = async (url: RequestInfo | URL) => {
+    const fetcher = async (url: RequestInfo | URL, init?: RequestInit) => {
       const path = new URL(String(url)).pathname;
       if (path === "/api/auth/login") return new Response(JSON.stringify({ code: 0, data: { Credential: "credential" } }));
       if (path === "/api/Debug/create") return new Response(JSON.stringify({ code: 0, data: { adapterName: "debug-session" } }));
+      if (path === "/api/Debug/call/debug-session") {
+        const action = JSON.parse(String(init?.body)).action as string;
+        return new Response(JSON.stringify({ code: 0, data: { status: "ok", retcode: 0, data: action.endsWith("_list") ? [] : { online: true }, message: "" } }));
+      }
+      if (path === "/api/OB11Config/GetConfig") return new Response(JSON.stringify({ code: 0, data: { network: { websocketClients: [], websocketServers: [] } } }));
       return new Response(JSON.stringify({ code: 0, data: { online: true } }));
     };
     await new NapCatRuntime({ docker, stateDirectory, napcatToken: "operator-token", fetcher }).apply("runtime:first", baseCommand);

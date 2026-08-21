@@ -15,6 +15,27 @@ import {
 type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
 type JsonObject = { [key: string]: JsonValue };
 
+type OneBotReadAction = "get_status" | "get_login_info" | "get_friend_list" | "get_group_list" | "get_version_info";
+type OneBotProbe = { ok: boolean; durationMs: number; error: string | null };
+
+function rejectedOneBotProbe(reason: unknown): OneBotProbe {
+  const withProbe = reason as { probe?: OneBotProbe } | undefined;
+  return withProbe?.probe ?? { ok: false, durationMs: 0, error: reason instanceof Error ? reason.message : String(reason) };
+}
+
+function oneBotActionData(response: JsonObject): JsonValue {
+  const nested = response.data;
+  const envelope = nested !== null && typeof nested === "object" && !Array.isArray(nested)
+    && ("retcode" in nested || "status" in nested)
+    ? nested as JsonObject
+    : response;
+  if (envelope.status !== "ok" || envelope.retcode !== 0) {
+    const message = typeof envelope.message === "string" && envelope.message ? envelope.message : "OneBot action failed";
+    throw new Error(`${message} (retcode ${String(envelope.retcode ?? "unknown")})`);
+  }
+  return envelope.data ?? null;
+}
+
 const execFileAsync = promisify(execFile);
 export const NAPCAT_IMAGE =
   "mlikiowa/napcat-docker@sha256:1336a777f9a4f1f8cb89fef42f7548deacd3645919a067a50df5b66b5e77390e";
@@ -279,6 +300,11 @@ export class NapCatRuntime {
   private readonly fetcher: typeof fetch;
   private readonly commands = new Map<string, RuntimeCommand>();
   private readonly snapshotCache = new Map<string, { at: number; value: Awaited<ReturnType<NapCatRuntime["snapshot"]>> }>();
+  private readonly directoryCache = new Map<string, {
+    at: number;
+    friends: { items: JsonObject[]; count: number; truncated: boolean; observedAt: string | null; probe: OneBotProbe };
+    groups: { items: JsonObject[]; count: number; truncated: boolean; observedAt: string | null; probe: OneBotProbe };
+  }>();
   private readonly webCredentials = new Map<string, string>();
   private commandsLoaded = false;
   constructor(private readonly options: {
@@ -291,6 +317,7 @@ export class NapCatRuntime {
     fetcher?: typeof fetch;
     qrPollIntervalMs?: number;
     qrPollAttempts?: number;
+    directoryRefreshMs?: number;
   }) {
     this.networkMode = options.networkMode ?? process.env.NAPCAT_DOCKER_NETWORK ?? "bridge";
     this.containerPrefix = options.containerPrefix ?? "botroost-napcat";
@@ -425,11 +452,11 @@ export class NapCatRuntime {
       }, metadata: snapshot.metadata,
     };
   }
-  private async napcatRequest(base: URL, path: string, webToken: string, body?: unknown, endpointId?: string) {
+  private async napcatRequest(base: URL, path: string, webToken: string, body?: unknown, endpointId?: string, timeoutMs = 10_000) {
     const request = (token: string) => this.fetcher(new URL(path, base), {
       method: body === undefined ? "GET" : "POST",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(timeoutMs),
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     let response = await request(webToken);
@@ -452,6 +479,16 @@ export class NapCatRuntime {
     }
     if (typeof payload.code === "number" && payload.code !== 0) throw new Error(`NapCat request rejected: ${String(payload.message ?? payload.code)}`);
     return payload;
+  }
+  private async callOneBot(base: URL, adapterName: string, webToken: string, endpointId: string, action: OneBotReadAction, timeoutMs = 10_000) {
+    const started = Date.now();
+    try {
+      const response = await this.napcatRequest(base, `/api/Debug/call/${encodeURIComponent(adapterName)}`, webToken, { action, params: {} }, endpointId, timeoutMs);
+      return { data: oneBotActionData(response), probe: { ok: true, durationMs: Date.now() - started, error: null } satisfies OneBotProbe };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw Object.assign(new Error(message), { probe: { ok: false, durationMs: Date.now() - started, error: message } satisfies OneBotProbe });
+    }
   }
   private async webCredential(endpointId: string, base: URL) {
     const cached=this.webCredentials.get(endpointId);
@@ -504,14 +541,56 @@ export class NapCatRuntime {
     const debugSession = await this.napcatRequest(base, "/api/Debug/create", webToken, {}, command.endpointId);
     const adapterName = (debugSession.data as Record<string, unknown> | undefined)?.adapterName;
     if (typeof adapterName !== "string" || !adapterName) throw new Error("NapCat debug adapter missing");
-    const callOneBot = (action: "get_status" | "get_login_info" | "get_friend_list" | "get_group_list" | "get_version_info") => this.napcatRequest(base, `/api/Debug/call/${encodeURIComponent(adapterName)}`, webToken, { action, params: {} }, command.endpointId);
-    const status = await callOneBot("get_status");
-    const onebotLogin = await callOneBot("get_login_info");
-    const friends = await callOneBot("get_friend_list");
-    const groups = await callOneBot("get_group_list");
-    const version = await callOneBot("get_version_info");
+    const [statusSettled, loginSettled, versionSettled] = await Promise.allSettled([
+      this.callOneBot(base, adapterName, webToken, command.endpointId, "get_status"),
+      this.callOneBot(base, adapterName, webToken, command.endpointId, "get_login_info"),
+      this.callOneBot(base, adapterName, webToken, command.endpointId, "get_version_info"),
+    ]);
+    if (statusSettled.status === "rejected") throw statusSettled.reason;
+    if (loginSettled.status === "rejected") throw loginSettled.reason;
+    const statusResult = statusSettled.value;
+    const loginResult = loginSettled.value;
+    const versionResult = versionSettled.status === "fulfilled"
+      ? versionSettled.value
+      : { data: null as JsonValue, probe: rejectedOneBotProbe(versionSettled.reason) };
+    const probes: Record<string, OneBotProbe> = {
+      get_status: statusResult.probe,
+      get_login_info: loginResult.probe,
+      get_version_info: versionResult.probe,
+    };
+    const asObject = (value: JsonValue): JsonObject => value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
+    const asCollection = (value: JsonValue) => {
+      const all = Array.isArray(value)
+        ? value.filter((entry): entry is JsonObject => entry !== null && typeof entry === "object" && !Array.isArray(entry))
+        : [];
+      return { items: all.slice(0, 500), count: all.length, truncated: all.length > 500 };
+    };
+    let directory = this.directoryCache.get(command.endpointId);
+    if (!directory || Date.now() - directory.at >= (this.options.directoryRefreshMs ?? 300_000)) {
+      const previous = directory;
+      const [friendsResult, groupsResult] = await Promise.allSettled([
+        this.callOneBot(base, adapterName, webToken, command.endpointId, "get_friend_list", 45_000),
+        this.callOneBot(base, adapterName, webToken, command.endpointId, "get_group_list", 45_000),
+      ]);
+
+      const now = new Date().toISOString();
+      const emptyCollection = { items: [] as JsonObject[], count: 0, truncated: false, observedAt: null };
+      const friends = friendsResult.status === "fulfilled"
+        ? { ...asCollection(friendsResult.value.data), observedAt: now, probe: friendsResult.value.probe }
+        : { ...(previous?.friends ?? emptyCollection), probe: rejectedOneBotProbe(friendsResult.reason) };
+      const groups = groupsResult.status === "fulfilled"
+        ? { ...asCollection(groupsResult.value.data), observedAt: now, probe: groupsResult.value.probe }
+        : { ...(previous?.groups ?? emptyCollection), probe: rejectedOneBotProbe(groupsResult.reason) };
+      directory = {
+        at: friendsResult.status === "fulfilled" && groupsResult.status === "fulfilled" ? Date.now() : 0,
+        friends,
+        groups,
+      };
+      this.directoryCache.set(command.endpointId, directory);
+    }
+    probes.get_friend_list = directory.friends.probe;
+    probes.get_group_list = directory.groups.probe;
     const obConfig = await this.napcatRequest(base,"/api/OB11Config/GetConfig",await this.webCredential(command.endpointId,base),{},command.endpointId);
-    const arrayData=(value:JsonObject)=>Array.isArray(value.data)?value.data.slice(0,500):[];
     const configData=objectData(obConfig),network=configData.network!==null&&typeof configData.network==="object"&&!Array.isArray(configData.network)?configData.network as Record<string,unknown>:{};
     const safeConnections=(value:unknown)=>Array.isArray(value)?value.slice(0,20).map(entry=>{if(entry===null||typeof entry!=="object"||Array.isArray(entry))return{};const {token,...safe}=entry as Record<string,unknown>;return{...safe,tokenConfigured:typeof token==="string"&&token.length>0}}):[];
     return {
@@ -525,13 +604,14 @@ export class NapCatRuntime {
         qq: objectData(loginInfo),
         login: {},
         onebot: {
-          status: objectData(status),
-          loginInfo: objectData(onebotLogin),
-          friends: arrayData(friends),
-          friendCount: Array.isArray(friends.data)?friends.data.length:0,
-          groups: arrayData(groups),
-          groupCount: Array.isArray(groups.data)?groups.data.length:0,
-          version: objectData(version),
+          status: asObject(statusResult.data),
+          loginInfo: asObject(loginResult.data),
+          version: asObject(versionResult.data),
+          probes,
+          directory: {
+            friends: directory.friends,
+            groups: directory.groups,
+          },
           config:{websocketClients:safeConnections(network.websocketClients),websocketServers:safeConnections(network.websocketServers)},
         },
       },

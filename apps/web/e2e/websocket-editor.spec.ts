@@ -12,7 +12,7 @@ async function mockProduct(page:Page,{failSave=false,loggedIn=true}:{failSave?:b
     else if(failSave&&route.request().method()==='PUT'&&path.endsWith('/napcat/onebot/websockets')){status=500;body={error:{message:'Fixture save failed'}};}
     else if(path.endsWith('/endpoints/fixture-endpoint/napcat/status')){
       statusRequests+=1;
-      body={qq:loggedIn?{uin:'960164003',online:true}:null,onebot:{...(loggedIn?{loginInfo:{user_id:960164003}}:{}),config:{websocketClients:[{name:'Campux bridge',enable:true,url:'wss://app.campux.top/onebot/v11/ws',messagePostFormat:'array',reportSelfMessage:false,debug:false,heartInterval:30000,reconnectInterval:5000,tokenConfigured:true}],websocketServers:[]}}};
+      body={qq:loggedIn?{uin:'960164003',online:true}:null,onebot:{...(loggedIn?{loginInfo:{user_id:960164003},status:{online:true},version:{app_name:'NapCat.OneBot11',app_version:'4.18.19'},probes:{get_status:{ok:true,durationMs:5,error:null},get_login_info:{ok:true,durationMs:6,error:null},get_version_info:{ok:true,durationMs:7,error:null},get_friend_list:{ok:true,durationMs:841,error:null},get_group_list:{ok:true,durationMs:18,error:null}},directory:{observedAt:'2026-08-21T09:00:00.000Z',friends:{count:1,truncated:false,observedAt:'2026-08-21T09:00:00.000Z',items:[{user_id:7,nickname:'Friend'}],probe:{ok:true,durationMs:841,error:null}},groups:{count:1,truncated:false,observedAt:'2026-08-21T09:00:00.000Z',items:[{group_id:8,group_name:'Group'}],probe:{ok:true,durationMs:18,error:null}}}}:{}),config:{websocketClients:[{name:'Campux bridge',enable:true,url:'wss://app.campux.top/onebot/v11/ws',messagePostFormat:'array',reportSelfMessage:false,debug:false,heartInterval:30000,reconnectInterval:5000,tokenConfigured:true}],websocketServers:[]}}};
     }
     else if(path.endsWith('/endpoints/fixture-endpoint/napcat/login-qrcode'))body={qrcode:'https://example.test/qq-login'};
     else if(path.endsWith('/endpoints/fixture-endpoint'))body=endpoint;
@@ -119,8 +119,8 @@ test('QQ login card keeps a scannable QR and its action in one layout',async({pa
   const box=await qr.boundingBox();
   expect(box!.width).toBeGreaterThanOrEqual(160);
   expect(box!.height).toBeGreaterThanOrEqual(160);
-  await expect(card.getByText('Protocol runtime')).toBeVisible();
-  await expect(card.getByText(/NapCat provides the OneBot 11 interface/)).toBeVisible();
+  await expect(card.getByText('Scan with the QQ mobile app')).toBeVisible();
+  await expect(page.getByRole('tab',{name:'OneBot'})).toBeDisabled();
 });
 
 test('endpoint tabs and selected sidebar entry use Campux product styling',async({page})=>{
@@ -141,6 +141,21 @@ test('endpoint tabs and selected sidebar entry use Campux product styling',async
   const connectionTabs=page.locator('.ws-tabs [data-slot="tabs-list"]');
   await expect(connectionTabs).toHaveClass(/product-tabs-list/);
   await expect(connectionTabs.getByRole('tab',{name:/Outbound clients/})).toHaveClass(/product-tabs-trigger/);
+});
+
+test('separates QQ account data from OneBot protocol operations',async({page})=>{
+  await mockProduct(page);
+  await page.goto('/endpoints/fixture-endpoint');
+  await expect(page.getByRole('tab',{name:'QQ data'})).toBeVisible();
+  await expect(page.getByRole('tab',{name:'OneBot'})).toBeVisible();
+  await page.getByRole('tab',{name:'QQ data'}).click();
+  await expect(page.getByRole('tab',{name:'Friends (1)'})).toBeVisible();
+  await expect(page.getByRole('cell',{name:'Friend',exact:true})).toBeVisible();
+  await expect(page.getByText('get_status')).toHaveCount(0);
+  await page.getByRole('tab',{name:'OneBot'}).click();
+  await expect(page.getByText('Protocol action support')).toBeVisible();
+  await expect(page.getByText('get_status')).toBeVisible();
+  await expect(page.getByRole('cell',{name:'Friend',exact:true})).toBeHidden();
 });
 
 test('sidebar refreshes every endpoint and exposes QQ login state',async({page})=>{
