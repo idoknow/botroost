@@ -121,11 +121,28 @@ describe("NapCat API vertical slice", () => {
     });
 
     expect((await api.inject({ method: "GET", url: `/api/v1/endpoints/${endpoint.id}/napcat/login-qrcode`, headers: { cookie } })).json()).toEqual({ qrcode: "otpauth://qq-login" });
-    expect((await api.inject({ method: "GET", url: `/api/v1/endpoints/${endpoint.id}/napcat/status`, headers: { cookie } })).json()).toMatchObject({
+    const freshStatus=(await api.inject({ method: "GET", url: `/api/v1/endpoints/${endpoint.id}/napcat/status`, headers: { cookie } })).json();
+    expect(freshStatus).toMatchObject({
       qq: { uin: "12345", nickname: "Operator QQ" },
       onebot: { status: { online: true }, loginInfo: { user_id: 12345 } },
       traffic: { status: "ok", privacy: "aggregate_only", oneMinute: { total: 3 } },
+      freshness: {
+        fresh: true,
+        staleAfterSeconds: 15,
+      },
     });
+    expect(Date.parse(freshStatus.freshness.observationAt)).not.toBeNaN();
+    expect(Date.parse(freshStatus.freshness.nodeHeartbeatAt)).not.toBeNaN();
+    expect(Date.parse(freshStatus.freshness.checkedAt)).not.toBeNaN();
+
+    await db.pool.query("UPDATE observations SET created_at=now()-interval '30 seconds' WHERE endpoint_id=$1",[endpoint.id]);
+    const staleStatus=(await api.inject({ method: "GET", url: `/api/v1/endpoints/${endpoint.id}/napcat/status`, headers: { cookie } })).json();
+    expect(staleStatus.freshness).toMatchObject({fresh:false,staleAfterSeconds:15});
+
+    await db.pool.query("UPDATE observations SET created_at=now() WHERE endpoint_id=$1",[endpoint.id]);
+    await db.pool.query("UPDATE nodes SET last_heartbeat_at=now()-interval '3 minutes' WHERE id=$1",[node.id]);
+    const offlineStatus=(await api.inject({ method: "GET", url: `/api/v1/endpoints/${endpoint.id}/napcat/status`, headers: { cookie } })).json();
+    expect(offlineStatus.freshness).toMatchObject({fresh:false});
   });
 
   it("queues an audited, read-only NapCat container log command with strict bounds", async () => {
