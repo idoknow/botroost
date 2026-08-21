@@ -12,28 +12,29 @@ import {Audit,Credentials,EndpointDetail,Endpoints,Members,NodeDetail,Nodes,Oper
 import {Loading,NotFound} from './states';
 import type {Session} from './types';
 import {BrandMark,PageContainer} from './ui';
+import {ThemeModeControl} from './theme-control';
 
 const theme=createTheme({
-  primaryColor:'cyan',
+  primaryColor:'blue',
   primaryShade:6,
-  fontFamily:'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+  fontFamily:'"PingFang SC", "Microsoft YaHei", Inter, system-ui, -apple-system, sans-serif',
   fontFamilyMonospace:'"SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace',
-  headings:{fontFamily:'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',fontWeight:'560'},
+  headings:{fontFamily:'"PingFang SC", "Microsoft YaHei", Inter, system-ui, -apple-system, sans-serif',fontWeight:'650'},
   defaultRadius:'sm',
   radius:{xs:'4px',sm:'6px',md:'10px',lg:'10px',xl:'10px'},
   spacing:{xs:'8px',sm:'12px',md:'16px',lg:'24px',xl:'32px'},
-  colors:{cyan:['#e5fbff','#c9f5ff','#98ebff','#60dcfb','#22c7ef','#09aeda','#008bb3','#06708e','#0a5c74','#0b4c61']},
-  components:{Button:{defaultProps:{radius:'sm'}},Card:{defaultProps:{radius:'md',withBorder:true}},Paper:{defaultProps:{radius:'md'}},TextInput:{defaultProps:{radius:'sm'}},PasswordInput:{defaultProps:{radius:'sm'}},Select:{defaultProps:{radius:'sm'}},Modal:{defaultProps:{radius:'md',overlayProps:{backgroundOpacity:.72,blur:2}}}},
+  colors:{blue:['#eff6ff','#dbeafe','#bfdbfe','#93c5fd','#60a5fa','#3b82f6','#2563eb','#1d4ed8','#1e40af','#1e3a8a']},
+  components:{Button:{defaultProps:{radius:'md'}},Card:{defaultProps:{radius:'sm',withBorder:true}},Paper:{defaultProps:{radius:'sm'}},TextInput:{defaultProps:{radius:'sm'}},PasswordInput:{defaultProps:{radius:'sm'}},Select:{defaultProps:{radius:'sm'}},Modal:{defaultProps:{radius:'md',overlayProps:{backgroundOpacity:.55,blur:2}}}},
 });
 
 const newClient=()=>new QueryClient({defaultOptions:{queries:{staleTime:15_000,retry:false}}});
 let activeClient:QueryClient|undefined;
 const nav=[
-  {label:'Overview',to:'/',permission:'workspace:read',icon:IconActivity},
-  {label:'Endpoints',to:'/endpoints',permission:'endpoint:read',icon:IconTopologyStar},
-  {label:'Nodes',to:'/nodes',permission:'node:read',icon:IconServer},
-  {label:'Providers',to:'/providers',permission:'provider:read',icon:IconCloud},
-  {label:'Operations',to:'/operations',permission:'operation:read',icon:IconDatabase},
+  {label:'Cluster',to:'/',permission:'workspace:read',icon:IconActivity},
+  {label:'Protocol endpoints',to:'/endpoints',permission:'endpoint:read',icon:IconTopologyStar},
+  {label:'Agent nodes',to:'/nodes',permission:'node:read',icon:IconServer},
+  {label:'Runtime drivers',to:'/providers',permission:'provider:read',icon:IconCloud},
+  {label:'Changes',to:'/operations',permission:'operation:read',icon:IconDatabase},
   {label:'Audit',to:'/audit',permission:'audit:read',icon:IconFileAnalytics},
   {label:'Workspace',to:'/workspace/members',permission:'workspace:sensitive',icon:IconBuilding},
 ] as const;
@@ -51,7 +52,7 @@ function Shell({session}:{session:Session}){
   const location=useLocation();
   const navigate=useNavigate();
   async function logout(){await api.mutate('/auth/logout');activeClient?.clear();navigate('/login',{replace:true})}
-  return <AppShell header={{height:56}} navbar={{width:224,breakpoint:'sm',collapsed:{mobile:!opened}}} padding={0}>
+  return <AppShell header={{height:64}} navbar={{width:190,breakpoint:'sm',collapsed:{mobile:!opened}}} padding={0}>
     <AppShell.Header className="app-header">
       <Group h="100%" px={{base:'sm',sm:'md'}} justify="space-between" wrap="nowrap">
         <Group gap="sm" wrap="nowrap">
@@ -65,13 +66,14 @@ function Shell({session}:{session:Session}){
             <Text size="sm" fw={550} truncate>{session.user.name}</Text>
             <Text size="xs" c="dimmed" truncate>{session.role}</Text>
           </Box>
-          <ActionIcon variant="subtle" color="gray" size={44} onClick={logout} aria-label="Log out"><IconLogout2 size={18}/></ActionIcon>
+          <ThemeModeControl/>
+          <ActionIcon variant="subtle" color="gray" size={40} onClick={logout} aria-label="Log out"><IconLogout2 size={18}/></ActionIcon>
         </Group>
       </Group>
     </AppShell.Header>
     <AppShell.Navbar className="app-navbar" p="sm">
       <AppShell.Section grow>
-        <Text className="nav-section-label">Workspace</Text>
+        <Text className="nav-section-label">OneBot cluster</Text>
         <Stack gap={4}>{nav.filter(item=>has(session,item.permission)).map(item=>{
           const Icon=item.icon;
           const active=location.pathname===item.to||(item.to!=='/'&&location.pathname.startsWith(item.to));
@@ -112,5 +114,5 @@ function RoutesRoot(){return <Routes><Route path="/login" element={<Login/>}/><R
 export function ConsoleApp(){
   const client=newClient();activeClient=client;
   const isTest=typeof navigator!=='undefined'&&navigator.userAgent.includes('jsdom');
-  return <MantineProvider theme={theme} defaultColorScheme="dark" env={isTest?'test':'default'}><QueryClientProvider client={client}><BrowserRouter><RoutesRoot/></BrowserRouter></QueryClientProvider></MantineProvider>;
+  return <MantineProvider theme={theme} defaultColorScheme="auto" env={isTest?'test':'default'}><QueryClientProvider client={client}><BrowserRouter><RoutesRoot/></BrowserRouter></QueryClientProvider></MantineProvider>;
 }

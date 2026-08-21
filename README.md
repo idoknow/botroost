@@ -1,82 +1,152 @@
-# botroost
+# Botroost
 
-botroost is a **backend vertical slice and architecture/contracts foundation**, not a complete product. The API, authentication, worker, and durable control-plane state use real PostgreSQL. The Web console remains a separate thin client surface.
+**Botroost is a cloud-native OneBot protocol endpoint cluster console.**
 
-## Workspace
+It gives operators one control plane for running multiple OneBot 11 protocol endpoints across Linux agent nodes, reconciling endpoint desired state, managing NapCat-backed QQ identities and WebSocket transports, and retaining an audited record of every change.
 
-- `packages/contracts`: neutral branded IDs, schemas, five-layer status, desired and operation state.
-- `packages/runtime-sdk`: schema/type for declarative, untrusted runtime requests.
-- `packages/agent-protocol`: strict outbound-agent HTTP payload schemas and transport redaction.
-- `packages/control-plane-policy`: control-plane resolution of approved artifact and egress references into driver-facing runtime specs.
-- `packages/provider-sdk`: capabilities and adapter contract; it never resolves executable runtime specs.
-- `packages/reconciler`: deterministic pure endpoint simulation.
-- `packages/agent-journal`: fsync-backed JSONL receipt/effect/result replay.
-- `packages/provider-fake`: contract-test reference provider.
-- `packages/provider-napcat`: declaration/schema/redaction skeleton only.
-- `packages/database`: PostgreSQL schema, idempotent migration, tenant-scoped repositories, outbox.
-- `packages/auth`: Argon2id credentials, opaque server-side sessions, RBAC and CSRF policy.
-- `apps/api`: Fastify HTTP API and one-time owner bootstrap CLI.
-- `apps/worker`: PostgreSQL outbox polling worker; only deterministic `fake` effects execute.
-- `apps/agent`: durable fake outbound agent using HTTP bearer long-poll, local 0600 node credentials, and `agent-journal`.
+Botroost is not a generic container dashboard and OneBot is not a runtime. The product model deliberately keeps infrastructure, implementation, identity, protocol, and transport as separate concepts.
 
-## Verify
+## Product model
 
-```sh
-corepack pnpm install --frozen-lockfile
-corepack pnpm lint
-corepack pnpm typecheck
-corepack pnpm test
-corepack pnpm build
-corepack pnpm verify:packages
+```text
+Workspace
+├── Members / roles / credentials / alert settings
+├── Agent nodes
+│   └── Protocol endpoints
+│       ├── Runtime driver (for example, NapCat)
+│       ├── Managed container / process
+│       ├── QQ account identity
+│       ├── OneBot 11 protocol service
+│       ├── WebSocket clients and servers
+│       └── Operations and audit events
+└── Audit log
 ```
 
-The integration suite starts a real `postgres:16-alpine` Docker container with a random host port and always removes it. Docker must be available; the four original PostgreSQL tests plus Web-contract regression run without skip.
+### Entities
 
-## Run the backend vertical slice
+| Entity | Meaning |
+| --- | --- |
+| **Workspace** | Tenant and RBAC boundary. Owns nodes, endpoints, members, credentials, alert settings, operations, and audit events. |
+| **Agent node** | A machine running the Botroost agent. It maintains an authenticated control connection and hosts endpoint workloads. |
+| **Protocol endpoint** | The primary managed resource: one desired OneBot service assigned to one agent node and one runtime driver. |
+| **Runtime driver** | Provider-specific integration that turns endpoint desired state into a workload. `napcat` manages a pinned NapCat container; it is not the OneBot protocol itself. |
+| **QQ account** | The messaging identity signed into NapCat. QR login and account profile belong to this layer. |
+| **OneBot 11 service** | The protocol API exposed by the endpoint implementation. A successful status probe means the API answered; it does not mean every WebSocket peer is connected. |
+| **WebSocket client** | An outbound connection initiated by the endpoint toward a OneBot consumer, such as LangBot. |
+| **WebSocket server** | A listening interface exposed by the endpoint for consumers that connect inbound. |
+| **Operation** | An audited desired-state change such as start, stop, restart, QR refresh, WebSocket configuration, or bounded log retrieval. |
 
-```sh
-export DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DB
-export CREDENTIAL_MASTER_KEY="$(openssl rand -base64 32)"
-export TRUST_PROXY=false # set true only behind a trusted proxy that sets X-Forwarded-Host
-corepack pnpm --filter @botroost/database build
-corepack pnpm --filter @botroost/auth build
-corepack pnpm --filter @botroost/worker build
-corepack pnpm --filter @botroost/api build
-corepack pnpm --filter @botroost/api bootstrap -- bootstrap --email owner@example.com --password 'replace-with-12+-chars' --workspace Primary
-corepack pnpm --filter @botroost/api start
-# separate process:
-node apps/worker/dist/server.js
+### Endpoint health layers
+
+The console reports five independent layers rather than collapsing unrelated states into one ambiguous badge:
+
+1. **Agent node** — whether the assigned node's control heartbeat is fresh.
+2. **Container** — whether the managed endpoint workload is running and ready.
+3. **Driver probe** — whether the runtime driver can inspect and manage its implementation.
+4. **Protocol service** — whether the OneBot status API is available.
+5. **Desired state** — whether observed state has converged with the requested generation.
+
+WebSocket client and server configuration is shown separately because transport configuration and peer connectivity are not equivalent to OneBot API availability.
+
+## Capabilities
+
+- Multi-workspace authentication and role-based authorization
+- One-time agent enrollment tokens and persistent agent control sessions
+- Agent heartbeat, connection fencing, generation checks, and stale-operation handling
+- Multiple protocol endpoints per agent node
+- Runtime-driver capability discovery and license gates
+- Immutable, digest-pinned NapCat deployment
+- QQ login bootstrap and QR refresh with immediate QR removal after login
+- Read-only OneBot queries for login, status, version, friends, and groups
+- Forward WebSocket client and listening WebSocket server management
+- Write-only token handling: configured tokens are never returned to the browser
+- Bounded, redacted container log retrieval
+- Audited operations, workspace credentials, and Resend offline/recovery alerts
+- Campux-aligned responsive UI with light, dark, and system appearance modes
+
+## Architecture
+
+| Component | Responsibility |
+| --- | --- |
+| `apps/api` | HTTP API, sessions, RBAC, endpoint desired state, operation dispatch, audit, settings, node WebSocket control plane |
+| `apps/agent` | Node enrollment, control session, runtime-driver execution, NapCat lifecycle and management commands |
+| `apps/worker` | Operation timeout/recovery and notification processing |
+| `apps/web` | Operator console for cluster, endpoint, node, change, audit, and workspace views |
+| `packages/contracts` | Shared API and control-plane contracts |
+| `packages/database` | PostgreSQL schema, migrations, and repositories |
+| `packages/provider-sdk` | Runtime-driver interface |
+| `packages/provider-napcat` | NapCat runtime driver |
+| `packages/provider-fake` | Deterministic test driver |
+
+The agent opens an outbound authenticated WebSocket to the API. The API claims operations transactionally and dispatches commands with endpoint generation and node connection-session fencing. The agent reports results and observed endpoint state; PostgreSQL remains the source of truth.
+
+## Quick start
+
+Requirements: Node.js 22+, pnpm 10+, Docker, and PostgreSQL 16+.
+
+```bash
+pnpm install
+cp .env.example .env
+pnpm db:migrate
+pnpm db:seed
+pnpm dev
 ```
 
-## Outbound fake agent
+Package scripts:
 
-Owner/admin users create one-use enrollment tokens without putting token material in a URL:
-
-```sh
-curl -X POST "$CONTROL_PLANE_URL/api/v1/nodes/enrollment-tokens" \
-  -H "cookie: botroost_session=..." \
-  -H "x-csrf-token: ..." \
-  -H "origin: https://app.test" \
-  -H "content-type: application/json" \
-  --data '{"name":"agent-a","ttlSeconds":900,"labels":{"rack":"test"}}'
+```bash
+pnpm typecheck
+pnpm lint
+pnpm test
+pnpm build
+pnpm --filter @botroost/web e2e
 ```
 
-The agent uses `CONTROL_PLANE_URL`, `NODE_STATE_DIR`, and `ENROLLMENT_TOKEN` only on first start. It exchanges the enrollment token for a hashed, revocable node bearer credential, stores that credential at `$NODE_STATE_DIR/node-credential.json` with mode `0600`, and then ignores `ENROLLMENT_TOKEN` on later starts. Never put enrollment tokens or bearer credentials in URLs or logs.
+For a production-shaped local stack:
 
-```sh
-export CONTROL_PLANE_URL=https://control-plane.example
-export NODE_STATE_DIR=/var/lib/botroost-agent
-export ENROLLMENT_TOKEN=...
-corepack pnpm --filter @botroost/agent build
-corepack pnpm --filter @botroost/agent start
+```bash
+docker compose -f deploy/compose.yml up -d --build
 ```
 
-`packages/database/migrations/0001_control_plane.sql` and `0002_outbound_agent.sql` are applied in lexical order and are idempotent. Cookies are `HttpOnly` (session), `Secure`, and `SameSite=Lax`; every user mutation including logout requires same-origin plus the double-submit CSRF token. Agent routes are separate bearer-authenticated endpoints: enroll, heartbeat, command claim, receipt, and result. Heartbeats use a strict allowlist and reject extra fields. Commands are leased durably with attempts, deadlines, node binding, operation/generation fencing, connection epoch fencing, and declarative `RuntimeRequest` payloads. Node enrollment/revocation is owner/admin-only. Endpoint operation is owner/admin/operator. Viewer is read-only. Member creation deliberately rejects `owner`; ownership transfer is not implemented in this slice. Only provider `fake` is executable; NapCat is returned as unavailable/license-gated.
+Open the web console through the configured public origin. Do not expose PostgreSQL or internal service ports publicly.
 
-The worker dispatches node-bound operations as durable outbound commands. Unassigned fake endpoints retain the original in-process deterministic path for local vertical-slice compatibility; deployable agent flows should bind endpoints to a node.
+## NapCat endpoint lifecycle
 
-NapCat has **not** been downloaded, copied, run, integrated, or validated. No license is selected for botroost, so this repository intentionally contains no `LICENSE` file; see `docs/license-boundary.md`.
+1. Enroll an agent node with a one-time token.
+2. Create a protocol endpoint, assign the node, and select the NapCat runtime driver.
+3. Start the endpoint. The agent creates the digest-pinned workload and observes its state.
+4. If no QQ account is signed in, scan the QR code in the endpoint's **QQ account** section.
+5. After login, inspect the separate **OneBot 11 service** section and query friends/groups.
+6. Configure outbound WebSocket clients or listening WebSocket servers under **WebSocket connections**.
+7. Use **Changes** and **Audit** to trace desired-state and administrative actions.
 
-## Journal writer lock recovery
+NapCat images must be referenced by digest. Mutable tags and credential values are rejected or redacted at the relevant boundaries.
 
-`FileAgentJournal` uses an atomic, exclusive `journal.jsonl.lock/` directory. An existing lock always fails closed; the journal never guesses that a lock is stale or removes it automatically. After a writer crash, an operator must first confirm that the owning process is dead and that no writer can still access the journal, then manually remove the lock directory. Do not remove a live or uncertain lock.
+## Security model
+
+- Server-side sessions and CSRF protection on mutations
+- Workspace-scoped RBAC for every API resource
+- One-time enrollment credentials and hashed long-lived agent credentials
+- Connection-session fencing to reject stale agents
+- Optimistic endpoint generation checks
+- Encrypted credential storage with write-only API responses
+- WebSocket token presence only (`tokenConfigured`), never plaintext readback
+- Strict OneBot action allowlist
+- Bounded logs with credential redaction
+- Append-only audit records for sensitive actions
+
+## Deployment
+
+Production images are built from a single Git SHA and published for API, worker, web, and agent. Deploy all components from the same SHA, run database migrations before application rollout, reconcile the runtime, and verify:
+
+- public health endpoint;
+- exact image SHA for every service;
+- fresh agent heartbeat and new connection epoch;
+- endpoint health-layer convergence;
+- authenticated web behavior in both light and dark modes.
+
+See [`deploy/compose.yml`](deploy/compose.yml), [`docs/deployment-runbook.md`](docs/deployment-runbook.md), and [`docs/agent-installation.md`](docs/agent-installation.md).
+
+## License
+
+Apache-2.0. See [`LICENSE`](LICENSE).

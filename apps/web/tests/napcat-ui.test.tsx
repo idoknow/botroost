@@ -59,15 +59,19 @@ describe("NapCat endpoint UI", () => {
         </MantineProvider>,
       );
 
-      expect(await screen.findByText("QQ connected")).toBeInTheDocument();
+      expect(await screen.findByText("QQ account")).toBeInTheDocument();
       expect(screen.queryByRole("img", { name: "NapCat QR code" })).not.toBeInTheDocument();
+      await screen.findByText("Alice");
       expect(screen.queryByRole("button", { name: "Refresh QR code" })).not.toBeInTheDocument();
       expect(await screen.findByText("Alice")).toBeInTheDocument();
       expect(await screen.findByText("Botroost users")).toBeInTheDocument();
       expect(await screen.findByText("4.18.19")).toBeInTheDocument();
-      await userEvent.click(screen.getByRole("tab",{name:"WebSocket connections"}));
+      expect(screen.getAllByText("Protocol service").length).toBeGreaterThan(0);
+      expect(screen.getByText("OneBot 11")).toBeInTheDocument();
+      expect(screen.getByText("NapCat.OneBot11")).toBeInTheDocument();
+      expect(screen.queryByText("Runtime")).not.toBeInTheDocument();
       expect(await screen.findByDisplayValue("wss://bot.example/ws")).toBeInTheDocument();
-      expect(await screen.findByText(/OneBot online/)).toBeInTheDocument();
+      expect(await screen.findByText("API available")).toBeInTheDocument();
     } finally {
       globalThis.fetch = previous;
     }

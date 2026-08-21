@@ -2,7 +2,7 @@ import {test,expect,type Page} from '@playwright/test';
 import fs from 'node:fs';
 
 const endpoint={id:'fixture-endpoint',name:'Campux production',providerId:'napcat',node:{id:'fixture-node',name:'jp09-napcat-reenroll'},generation:4,desired:{state:'running'},status:{node:'online',runtime:'ready',provider:'available',protocol:'connected',convergence:'converged'},activeOperationId:null};
-const session={user:{id:'fixture-user',email:'ops@example.test',name:'Rock'},workspace:{id:'fixture-workspace',name:'Production'},role:'owner',permissions:['workspace:read','endpoint:read','endpoint:create','endpoint:start','node:read','node:create','provider:read','operation:read','audit:read','member:read','credential:read','settings:read'],capabilities:{operations:['create','start','stop','restart'],providers:{napcat:{enabled:true}}}};
+const session={user:{id:'fixture-user',email:'ops@example.test',name:'Rock'},workspace:{id:'fixture-workspace',name:'Production'},role:'owner',permissions:['workspace:read','endpoint:read','endpoint:create','endpoint:start','endpoint:stop','endpoint:restart','node:read','node:create','provider:read','operation:read','audit:read','member:read','credential:read','settings:read'],capabilities:{operations:['create','start','stop','restart'],providers:{napcat:{enabled:true}}}};
 
 async function mockProduct(page:Page){
   await page.route('**/api/v1/**',async route=>{const path=new URL(route.request().url()).pathname;let body:unknown={};
@@ -18,13 +18,15 @@ async function mockProduct(page:Page){
   });
 }
 
-for(const viewport of [{name:'desktop',width:1440,height:1000},{name:'mobile',width:390,height:844}]){
-  test(`visual fixture ${viewport.name}`,async({page})=>{
-    await page.setViewportSize({width:viewport.width,height:viewport.height});await mockProduct(page);await page.goto('/endpoints/fixture-endpoint');await expect(page.getByRole('heading',{name:'Campux production'})).toBeVisible();
-    await page.getByRole('tab',{name:'WebSocket connections'}).click();
-    await expect(page.locator('input[value="wss://app.campux.top/onebot/v11/ws?key=fixture"]')).toBeVisible();
-    expect(await page.evaluate(()=>({scrollWidth:document.documentElement.scrollWidth,clientWidth:document.documentElement.clientWidth}))).toEqual({scrollWidth:viewport.width,clientWidth:viewport.width});
-    fs.mkdirSync('/tmp/botroost-ui-evidence',{recursive:true});
-    await page.screenshot({path:`/tmp/botroost-ui-evidence/endpoint-${viewport.name}.png`,fullPage:true});
-  });
+for(const colorScheme of ['light','dark'] as const){
+  for(const viewport of [{name:'desktop',width:1440,height:1000},{name:'mobile',width:390,height:844}]){
+    test(`visual fixture ${colorScheme} ${viewport.name}`,async({page})=>{
+      await page.addInitScript(scheme=>localStorage.setItem('mantine-color-scheme-value',scheme),colorScheme);await page.setViewportSize({width:viewport.width,height:viewport.height});await mockProduct(page);await page.goto('/endpoints/fixture-endpoint');await expect(page.getByRole('heading',{name:'Campux production'})).toBeVisible();await expect(page.locator('html')).toHaveAttribute('data-mantine-color-scheme',colorScheme);
+      await expect(page.getByText('OneBot 11')).toBeVisible();await expect(page.getByText('API available')).toBeVisible();await expect(page.getByText('OneBot connecting')).toHaveCount(0);
+      await expect(page.locator('input[value="wss://app.campux.top/onebot/v11/ws?key=fixture"]')).toBeVisible();
+      expect(await page.evaluate(()=>({scrollWidth:document.documentElement.scrollWidth,clientWidth:document.documentElement.clientWidth}))).toEqual({scrollWidth:viewport.width,clientWidth:viewport.width});
+      fs.mkdirSync('/tmp/botroost-ui-evidence',{recursive:true});
+      await page.screenshot({path:`/tmp/botroost-ui-evidence/endpoint-${colorScheme}-${viewport.name}.png`,fullPage:true});
+    });
+  }
 }
