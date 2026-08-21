@@ -4,7 +4,8 @@ const live=process.env.LIVE_E2E==='1';
 const email=process.env.BOTROOST_E2E_EMAIL;
 const password=process.env.BOTROOST_E2E_PASSWORD;
 const baseURL=process.env.BOTROOST_E2E_BASE_URL;
-const fixtureName='ci-e2e-fixture';
+const fixtureScope=(process.env.BOTROOST_E2E_FIXTURE_SCOPE??process.env.GITHUB_REF_NAME??'local').replace(/[^a-zA-Z0-9-]+/g,'-').slice(0,64);
+const fixtureName=`ci-e2e-${fixtureScope}`;
 if(live&&(!email||!password||!baseURL))throw new Error('LIVE_E2E=1 requires BOTROOST_E2E_EMAIL, BOTROOST_E2E_PASSWORD, and BOTROOST_E2E_BASE_URL');
 
 async function ensureFixture(page:Page){
