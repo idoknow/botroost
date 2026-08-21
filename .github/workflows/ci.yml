@@ -44,7 +44,7 @@ jobs:
         env:
           LIVE_E2E: '1'
           BOTROOST_E2E_BASE_URL: ${{ vars.BOTROOST_E2E_BASE_URL }}
-          BOTROOST_E2E_EMAIL: ${{ vars.BOTROOST_E2E_EMAIL }}
+          BOTROOST_E2E_EMAIL: e2e@botroost.local
           BOTROOST_E2E_PASSWORD: ${{ secrets.BOTROOST_E2E_PASSWORD }}
         run: bun run --cwd apps/web e2e -- live.spec.ts
       - name: Validate Compose model
