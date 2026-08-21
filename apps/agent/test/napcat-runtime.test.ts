@@ -159,7 +159,6 @@ describe("NapCat runtime", () => {
 
     expect(calls.map(call => new URL(call.url).pathname)).toEqual([
       "/api/auth/login",
-      "/api/QQLogin/GetQQLoginQrcode",
       "/api/QQLogin/GetQQLoginInfo",
       "/api/Debug/create",
       "/api/Debug/call/debug-session",
@@ -175,7 +174,7 @@ describe("NapCat runtime", () => {
     expect(calls.slice(1).every(call => (call.init?.headers as Record<string, string>).authorization === "Bearer web-token")).toBe(true);
     expect(snapshot.metadata).toMatchObject({
       qq: { uin: "12345", nickname: "Operator QQ" },
-      login: { qrcode: "otpauth://qq-login" },
+      login: {},
       onebot: { status: { online: true }, friends: [{ user_id: 7, nickname: "Friend" }], groups: [{ group_id: 8, group_name: "Group" }], version: { app_version: "4.18.19" }, config: { websocketClients: [], websocketServers: [] } },
     });
   });
@@ -311,6 +310,7 @@ describe("NapCat runtime", () => {
         if (path === "/api/auth/login") return new Response(JSON.stringify({ code: 0, data: { Credential: "credential" } }));
         if (path === "/api/QQLogin/RefreshQRcode") { qrcode = "qr-fresh"; return new Response(JSON.stringify({ code: 0, data: null })); }
         if (path === "/api/QQLogin/GetQQLoginQrcode") return new Response(JSON.stringify({ code: 0, data: { qrcode } }));
+        if (path === "/api/QQLogin/GetQQLoginInfo") return new Response(JSON.stringify({ code: 0, data: { online: false } }));
         if (path === "/api/Debug/create") return new Response(JSON.stringify({ code: 0, data: { adapterName: "debug-session" } }));
         return new Response(JSON.stringify({ code: 0, data: { online: true } }));
       },

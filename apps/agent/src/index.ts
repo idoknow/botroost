@@ -484,21 +484,23 @@ export class NapCatRuntime {
     }
     const base = new URL(`http://${inspected.ipAddress}:6099`);
     const webToken=await this.webCredential(command.endpointId,base);
-    let qrcode:JsonObject;
-    try {
-      qrcode=await this.napcatRequest(base,"/api/QQLogin/GetQQLoginQrcode",webToken,{},command.endpointId);
-    } catch(error) {
-      if(!(error instanceof Error)||!error.message.includes("QRCode Get Error"))throw error;
-      await this.napcatRequest(base,"/api/QQLogin/RefreshQRcode",webToken,{},command.endpointId);
-      qrcode=await this.waitForQr(base,command.endpointId,await this.webCredential(command.endpointId,base));
-    }
     const loginInfo = await this.napcatRequest(base, "/api/QQLogin/GetQQLoginInfo", await this.webCredential(command.endpointId,base), {}, command.endpointId);
     const objectData = (value: JsonObject): JsonObject => {
       const data = value.data;
       return data !== null && typeof data === "object" && !Array.isArray(data) ? data : value;
     };
     const qq=objectData(loginInfo);
-    if(qq.online!==true){return{endpointId:command.endpointId,generation:command.generation,runtime:"ready",provider:"available",protocol:"disconnected",convergence:"reconciling",metadata:{qq,login:objectData(qrcode),onebot:null}}}
+    if(qq.online!==true){
+      let qrcode:JsonObject;
+      try {
+        qrcode=await this.napcatRequest(base,"/api/QQLogin/GetQQLoginQrcode",webToken,{},command.endpointId);
+      } catch(error) {
+        if(!(error instanceof Error)||!error.message.includes("QRCode Get Error"))throw error;
+        await this.napcatRequest(base,"/api/QQLogin/RefreshQRcode",webToken,{},command.endpointId);
+        qrcode=await this.waitForQr(base,command.endpointId,await this.webCredential(command.endpointId,base));
+      }
+      return{endpointId:command.endpointId,generation:command.generation,runtime:"ready",provider:"available",protocol:"disconnected",convergence:"reconciling",metadata:{qq,login:objectData(qrcode),onebot:null}}
+    }
     const debugSession = await this.napcatRequest(base, "/api/Debug/create", webToken, {}, command.endpointId);
     const adapterName = (debugSession.data as Record<string, unknown> | undefined)?.adapterName;
     if (typeof adapterName !== "string" || !adapterName) throw new Error("NapCat debug adapter missing");
@@ -521,7 +523,7 @@ export class NapCatRuntime {
       convergence: "converged",
       metadata: {
         qq: objectData(loginInfo),
-        login: objectData(qrcode),
+        login: {},
         onebot: {
           status: objectData(status),
           loginInfo: objectData(onebotLogin),
