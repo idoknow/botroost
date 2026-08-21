@@ -52,14 +52,15 @@ class RecordingDocker implements DockerClient {
   async restart(name: string) {
     this.restarted.push(name);
   }
-  logRequests: { container: string; tail: number; sinceSeconds: number }[] = [];
+  logRequests: { container: string; tail: number; sinceSeconds: number; timestamps?: boolean }[] = [];
+  logOutput = "08-21 Token=hidden\n{\"token\":\"json-secret\"}\nAuthorization: Bearer auth-test-value\nCookie: session=cookie-test-value\nCredential=credential-secret\nready\n";
   async exec(container: string, args: string[]) {
     this.execs.push({ container, args });
     return { stdout: "", stderr: "" };
   }
-  async logs(container: string, options: { tail: number; sinceSeconds: number }) {
+  async logs(container: string, options: { tail: number; sinceSeconds: number; timestamps?: boolean }) {
     this.logRequests.push({ container, ...options });
-    return "08-21 Token=hidden\n{\"token\":\"json-secret\"}\nAuthorization: Bearer bearer-secret\nCookie: session=cookie-secret\nCredential=credential-secret\nready\n";
+    return this.logOutput;
   }
 }
 
@@ -127,6 +128,8 @@ describe("NapCat runtime", () => {
 
   it("uses NapCat web auth and authenticated QR/status/probe requests", async () => {
     const docker = new RecordingDocker();
+    const trafficTimestamp = new Date().toISOString();
+    docker.logOutput = `${trafficTimestamp} 08-21 19:36:28 [info] QQ | 接收 <- 群聊 [Group(8)] [Friend(7)] hello\n${trafficTimestamp} 08-21 19:36:28 [info] QQ | 发送 -> 私聊 [Friend(7)] reply\n`;
     docker.inspect = async () => ({
       id: "container-id",
       name: "botroost-napcat-33333333-3333-4333-8333-333333333333",
@@ -185,7 +188,18 @@ describe("NapCat runtime", () => {
         version: { app_version: "4.18.19" },
         config: { websocketClients: [], websocketServers: [] },
       },
+      traffic: {
+        source: "napcat.container_logs",
+        privacy: "aggregate_only",
+        oneMinute: { inbound: 1, outbound: 1, total: 2 },
+        fiveMinutes: { inbound: 1, outbound: 1, total: 2 },
+        recent: expect.arrayContaining([
+          expect.objectContaining({ direction: "inbound", scope: "group" }),
+          expect.objectContaining({ direction: "outbound", scope: "private" }),
+        ]),
+      },
     });
+    expect(docker.logRequests).toContainEqual({ container: `botroost-napcat-${baseCommand.endpointId}`, tail: 500, sinceSeconds: 15, timestamps: true });
     const onebot = snapshot.metadata.onebot as { directory: { friends: { items: unknown[] } } };
     expect(onebot.directory.friends.items).toHaveLength(500);
   });
@@ -266,6 +280,7 @@ describe("NapCat runtime", () => {
     await runtime.snapshot(baseCommand);
 
     expect(authCalls).toBe(1);
+    expect(docker.logRequests.filter(request=>request.timestamps)).toHaveLength(1);
   });
 
   it("reauthenticates once when a cached WebUI credential expires", async () => {

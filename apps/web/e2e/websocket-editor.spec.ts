@@ -12,7 +12,7 @@ async function mockProduct(page:Page,{failSave=false,loggedIn=true}:{failSave?:b
     else if(failSave&&route.request().method()==='PUT'&&path.endsWith('/napcat/onebot/websockets')){status=500;body={error:{message:'Fixture save failed'}};}
     else if(path.endsWith('/endpoints/fixture-endpoint/napcat/status')){
       statusRequests+=1;
-      body={qq:loggedIn?{uin:'960164003',online:true}:null,onebot:{...(loggedIn?{loginInfo:{user_id:960164003},status:{online:true},version:{app_name:'NapCat.OneBot11',app_version:'4.18.19'},probes:{get_status:{ok:true,durationMs:5,error:null},get_login_info:{ok:true,durationMs:6,error:null},get_version_info:{ok:true,durationMs:7,error:null},get_friend_list:{ok:true,durationMs:841,error:null},get_group_list:{ok:true,durationMs:18,error:null}},directory:{observedAt:'2026-08-21T09:00:00.000Z',friends:{count:1,truncated:false,observedAt:'2026-08-21T09:00:00.000Z',items:[{user_id:7,nickname:'Friend'}],probe:{ok:true,durationMs:841,error:null}},groups:{count:1,truncated:false,observedAt:'2026-08-21T09:00:00.000Z',items:[{group_id:8,group_name:'Group'}],probe:{ok:true,durationMs:18,error:null}}}}:{}),config:{websocketClients:[{name:'Campux bridge',enable:true,url:'wss://app.campux.top/onebot/v11/ws',messagePostFormat:'array',reportSelfMessage:false,debug:false,heartInterval:30000,reconnectInterval:5000,tokenConfigured:true}],websocketServers:[]}}};
+      body={qq:loggedIn?{uin:'960164003',online:true}:null,onebot:{...(loggedIn?{loginInfo:{user_id:960164003},status:{online:true},version:{app_name:'NapCat.OneBot11',app_version:'4.18.19'},probes:{get_status:{ok:true,durationMs:5,error:null},get_login_info:{ok:true,durationMs:6,error:null},get_version_info:{ok:true,durationMs:7,error:null},get_friend_list:{ok:true,durationMs:841,error:null},get_group_list:{ok:true,durationMs:18,error:null}},directory:{observedAt:'2026-08-21T09:00:00.000Z',friends:{count:1,truncated:false,observedAt:'2026-08-21T09:00:00.000Z',items:[{user_id:7,nickname:'Friend'}],probe:{ok:true,durationMs:841,error:null}},groups:{count:1,truncated:false,observedAt:'2026-08-21T09:00:00.000Z',items:[{group_id:8,group_name:'Group'}],probe:{ok:true,durationMs:18,error:null}}}}:{}),config:{websocketClients:[{name:'Campux bridge',enable:true,url:'wss://app.campux.top/onebot/v11/ws',messagePostFormat:'array',reportSelfMessage:false,debug:false,heartInterval:30000,reconnectInterval:5000,tokenConfigured:true}],websocketServers:[]}},traffic:{status:'ok',source:'napcat.container_logs',privacy:'aggregate_only',observedAt:'2026-08-21T09:00:05.000Z',sampleIntervalSeconds:5,oneMinute:{inbound:1,outbound:1,total:2,bytes:196},fiveMinutes:{inbound:4,outbound:2,total:6,bytes:588},buckets:[{startedAt:'2026-08-21T08:59:10.000Z',inbound:0,outbound:0,total:0},{startedAt:'2026-08-21T08:59:20.000Z',inbound:1,outbound:0,total:1},{startedAt:'2026-08-21T08:59:30.000Z',inbound:0,outbound:1,total:1},{startedAt:'2026-08-21T08:59:40.000Z',inbound:2,outbound:0,total:2},{startedAt:'2026-08-21T08:59:50.000Z',inbound:0,outbound:0,total:0},{startedAt:'2026-08-21T09:00:00.000Z',inbound:1,outbound:1,total:2}],recent:[{at:'2026-08-21T09:00:04.000Z',direction:'inbound',scope:'group',bytes:120},{at:'2026-08-21T09:00:01.000Z',direction:'outbound',scope:'private',bytes:76}],recentConnections:[{at:'2026-08-21T09:00:03.000Z',transport:'websocket-client',status:'reconnecting'}]}};
     }
     else if(path.endsWith('/endpoints/fixture-endpoint/napcat/login-qrcode'))body={qrcode:'https://example.test/qq-login'};
     else if(path.endsWith('/endpoints/fixture-endpoint'))body=endpoint;
@@ -156,6 +156,26 @@ test('separates QQ account data from OneBot protocol operations',async({page})=>
   await expect(page.getByText('Protocol action support')).toBeVisible();
   await expect(page.getByText('get_status')).toBeVisible();
   await expect(page.getByRole('cell',{name:'Friend',exact:true})).toBeHidden();
+});
+
+test('shows lightweight aggregate traffic separately from connections and protocol actions',async({page})=>{
+  await mockProduct(page);
+  await page.goto('/endpoints/fixture-endpoint');
+  const trafficTab=page.getByRole('tab',{name:'Traffic'});
+  await expect(trafficTab).toBeVisible();
+  await trafficTab.click();
+  await expect(page.getByText('Real-time message traffic')).toBeVisible();
+  await expect(page.getByText('2 messages / min')).toBeVisible();
+  await expect(page.getByText('6 messages / 5 min')).toBeVisible();
+  await expect(page.getByLabel('Message traffic in the last minute')).toBeVisible();
+  await expect(page.getByRole('cell',{name:'In',exact:true})).toBeVisible();
+  await expect(page.getByRole('cell',{name:'Group'})).toBeVisible();
+  await expect(page.getByRole('cell',{name:'Out',exact:true})).toBeVisible();
+  await expect(page.getByRole('cell',{name:'Private'})).toBeVisible();
+  await expect(page.getByRole('cell',{name:'Retrying'})).toBeVisible();
+  await expect(page.getByText('Message content and account identifiers are not stored')).toBeVisible();
+  await expect(page.getByText('Protocol action support')).toHaveCount(0);
+  await expect(page.getByText('Outbound clients')).toHaveCount(0);
 });
 
 test('sidebar refreshes every endpoint and exposes QQ login state',async({page})=>{

@@ -19,7 +19,29 @@ export function Endpoints({session}:{session:Session}){
 }
 type OneBotProbe={ok:boolean;durationMs:number;error:string|null};
 type OneBotDirectoryCollection={count:number;items:Record<string,unknown>[];truncated:boolean;observedAt:string|null;probe:OneBotProbe};
-type NapCatStatus={qq:null|Record<string,unknown>;onebot:null|{status?:Record<string,unknown>;loginInfo?:Record<string,unknown>;version?:Record<string,unknown>;probes?:Record<string,OneBotProbe>;directory?:{friends:OneBotDirectoryCollection;groups:OneBotDirectoryCollection};config?:{websocketClients?:WsClient[];websocketServers?:WsServer[]}}};
+type TrafficWindow={inbound:number;outbound:number;total:number;bytes:number};
+type TrafficEvent={at:string;direction:'inbound'|'outbound';scope:'group'|'private'|'unknown';bytes:number};
+type ConnectionEvent={at:string;transport:'websocket-client'|'websocket-server';status:'listening'|'connected'|'disconnected'|'reconnecting'|'error'};
+type ProtocolTraffic={status:'ok'|'unavailable';source:string;privacy:'aggregate_only';observedAt:string;sampleIntervalSeconds:number;oneMinute:TrafficWindow;fiveMinutes:TrafficWindow;buckets:{startedAt:string;inbound:number;outbound:number;total:number}[];recent:TrafficEvent[];recentConnections:ConnectionEvent[];error?:string};
+type NapCatStatus={qq:null|Record<string,unknown>;onebot:null|{status?:Record<string,unknown>;loginInfo?:Record<string,unknown>;version?:Record<string,unknown>;probes?:Record<string,OneBotProbe>;directory?:{friends:OneBotDirectoryCollection;groups:OneBotDirectoryCollection};config?:{websocketClients?:WsClient[];websocketServers?:WsServer[]}};traffic?:ProtocolTraffic};
+const titleCase=(value:string)=>value.charAt(0).toUpperCase()+value.slice(1).replaceAll('-',' ');
+const eventTime=(value:string)=>new Date(value).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+function TrafficPanel({traffic}:{traffic?:ProtocolTraffic}){
+  if(!traffic)return <Card><h2>Real-time message traffic</h2><p className="muted">Waiting for the agent to publish a lightweight traffic sample.</p></Card>;
+  const maxBucket=Math.max(1,...traffic.buckets.map(bucket=>bucket.total));
+  const connectionRows=traffic.recentConnections.map(event=>[eventTime(event.at),event.transport==='websocket-client'?'WS client':'WS server',<Badge good={event.status==='connected'||event.status==='listening'}>{event.status==='reconnecting'?'Retrying':titleCase(event.status)}</Badge>]);
+  const messageRows=traffic.recent.map(event=>[eventTime(event.at),event.direction==='inbound'?'In':'Out',titleCase(event.scope),`${event.bytes} B`]);
+  return <>
+    <Card className="traffic-card"><div className="card-section-heading"><div><h2>Real-time message traffic</h2><p className="muted">Five-second aggregate samples from the managed NapCat runtime.</p></div><Badge good={traffic.status==='ok'}>{traffic.status==='ok'?'Live':'Unavailable'}</Badge></div>
+      {traffic.error?<div className="alert error" role="status">{traffic.error}</div>:null}
+      <div className="traffic-summary"><div><small>Current rate</small><strong>{traffic.oneMinute.total} messages / min</strong><span>{traffic.oneMinute.inbound} inbound · {traffic.oneMinute.outbound} outbound</span></div><div><small>Rolling window</small><strong>{traffic.fiveMinutes.total} messages / 5 min</strong><span>{traffic.fiveMinutes.bytes} bytes observed</span></div></div>
+      <div className="traffic-chart" role="img" aria-label="Message traffic in the last minute">{traffic.buckets.map(bucket=><div className="traffic-bucket" key={bucket.startedAt} title={`${bucket.total} messages`}><div className="traffic-bars"><span className="traffic-bar inbound" style={{height:`${Math.max(bucket.inbound?6:0,bucket.inbound/maxBucket*100)}%`}}/><span className="traffic-bar outbound" style={{height:`${Math.max(bucket.outbound?6:0,bucket.outbound/maxBucket*100)}%`}}/></div><small>{new Date(bucket.startedAt).toLocaleTimeString([],{minute:'2-digit',second:'2-digit'})}</small></div>)}</div>
+      <div className="traffic-legend"><span><i className="inbound"/>Inbound</span><span><i className="outbound"/>Outbound</span><small>Sampled {new Date(traffic.observedAt).toLocaleTimeString()}</small></div>
+    </Card>
+    <Card><div className="card-section-heading"><div><h2>Connection events</h2><p className="muted">Recent WebSocket lifecycle changes reported by the protocol runtime.</p></div></div>{connectionRows.length?<div className="traffic-event-table"><Table headers={['Time','Transport','State']} rows={connectionRows}/></div>:<Empty name="connection events in the last 5 minutes"/>}</Card>
+    <Card><div className="card-section-heading"><div><h2>Recent message events</h2><p className="muted">Direction, chat scope and approximate log size only.</p></div></div>{messageRows.length?<div className="traffic-event-table"><Table headers={['Time','Flow','Scope','Size']} rows={messageRows}/></div>:<Empty name="message events in the last 5 minutes"/>}<p className="traffic-privacy muted">Message content and account identifiers are not stored.</p></Card>
+  </>;
+}
 export function EndpointDetail({session,id}:{session:Session;id:string}){
   const q=useApi<Endpoint>(`/endpoints/${id}`);
   const canOperate=session.permissions.includes('endpoint:start');
@@ -35,6 +57,7 @@ export function EndpointDetail({session,id}:{session:Session;id:string}){
   const ep=q.data;
   const qq=napcat.data?.qq;
   const onebot=napcat.data?.onebot;
+  const traffic=napcat.data?.traffic;
   const loggedIn=qq?.online===true||onebot?.status?.online===true;
   const qr=useApi<{qrcode:string}>(canOperate&&ep?.providerId==='napcat'&&!loggedIn?`/endpoints/${id}/napcat/login-qrcode`:'/disabled',5000);
 
@@ -96,15 +119,17 @@ export function EndpointDetail({session,id}:{session:Session;id:string}){
     {canOperate&&endpoint.providerId==='napcat'?<Tabs defaultValue="overview" className="endpoint-tabs">
       <TabsList className="endpoint-tabs-list product-tabs-list">
         <TabsTrigger className="product-tabs-trigger after:hidden" value="overview">Overview</TabsTrigger>
+        <TabsTrigger className="product-tabs-trigger after:hidden" value="traffic">Traffic</TabsTrigger>
+        <TabsTrigger className="product-tabs-trigger after:hidden" value="connections" disabled={!loggedIn}>Connections</TabsTrigger>
         <TabsTrigger className="product-tabs-trigger after:hidden" value="qq-data" disabled={!loggedIn}>QQ data</TabsTrigger>
         <TabsTrigger className="product-tabs-trigger after:hidden" value="onebot" disabled={!loggedIn}>OneBot</TabsTrigger>
-        <TabsTrigger className="product-tabs-trigger after:hidden" value="connections" disabled={!loggedIn}>Connections</TabsTrigger>
         <TabsTrigger className="product-tabs-trigger after:hidden" value="logs">Logs</TabsTrigger>
         <TabsTrigger className="product-tabs-trigger after:hidden" value="settings">Settings</TabsTrigger>
       </TabsList>
       <TabsContent value="overview" className="endpoint-tab-panel">
         <Card className="qq-account-card"><div className="card-section-heading"><div><h2>QQ account</h2><p className="muted">Identity and login state for the QQ session managed by this endpoint.</p></div>{loggedIn&&<Badge good>Logged in</Badge>}</div>{loggedIn?<div className="info-grid"><Info label="Nickname">{String(qq?.nickname??qq?.nick??onebot?.loginInfo?.nickname??'QQ account')}</Info><Info label="QQ number">{String(qq?.uin??qq?.uid??onebot?.loginInfo?.user_id??'—')}</Info></div>:<div className="qq-login-panel"><div className="endpoint-qr">{qr.data?.qrcode?<QRCodeSVG value={qr.data.qrcode} size={184} role="img" aria-label="NapCat QR code"/>:<span>Waiting for a QR code.</span>}</div><div className="qq-login-copy"><h3>Scan with the QQ mobile app</h3><p className="muted">Open QQ, scan this code, then confirm the login on your phone. The status updates automatically; refresh only if the code expires.</p><Button busy={busy==='qr'} disabled={Boolean(endpoint.activeOperationId)} onClick={()=>run('qr',async()=>{await wait(await api.mutate<Operation>(`/endpoints/${id}/napcat/login-qrcode`),'QR refresh failed');await Promise.all([qr.refresh(),napcat.refresh(),q.refresh()])})}>Refresh QR code</Button></div></div>}</Card>
       </TabsContent>
+      <TabsContent value="traffic" className="endpoint-tab-panel"><TrafficPanel traffic={traffic}/></TabsContent>
       <TabsContent value="qq-data" className="endpoint-tab-panel">
         <Card><div className="card-section-heading"><div><h2>QQ account data</h2><p className="muted">Account-owned directory content retrieved through OneBot. It is kept separate from protocol operations and transport configuration.</p></div>{currentDirectory?.observedAt?<small className="muted">Observed {new Date(currentDirectory.observedAt).toLocaleString()}</small>:null}</div><Tabs value={directory} onValueChange={value=>setDirectory(value as 'friends'|'groups')}><TabsList className="product-tabs-list"><TabsTrigger className="product-tabs-trigger after:hidden" value="friends">Friends ({directoryData?.friends.count??0})</TabsTrigger><TabsTrigger className="product-tabs-trigger after:hidden" value="groups">Groups ({directoryData?.groups.count??0})</TabsTrigger></TabsList>{currentDirectory&&!currentDirectory.probe.ok?<div className="alert error" role="status">Latest refresh failed{currentDirectory.observedAt?'; showing the last successful result':''}. {currentDirectory.probe.error}</div>:null}{currentDirectory?.truncated?<p className="muted">Showing the first {currentDirectory.items.length} of {currentDirectory.count} entries.</p>:null}<TabsContent value="friends">{directoryData?.friends.items.length?<Table headers={['Nickname','Remark','QQ']} rows={directoryData.friends.items.map(friend=>[String(friend.nickname??'—'),String(friend.remark??'—'),String(friend.user_id)])}/>:<Empty name="friends"/>}</TabsContent><TabsContent value="groups">{directoryData?.groups.items.length?<Table headers={['Group','Members','ID']} rows={directoryData.groups.items.map(group=>[String(group.group_name??'—'),String(group.member_count??'—'),String(group.group_id)])}/>:<Empty name="groups"/>}</TabsContent></Tabs></Card>
       </TabsContent>

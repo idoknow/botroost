@@ -11,6 +11,7 @@ import {
   type CommandResultRequest,
   type RuntimeCommand,
 } from "@botroost/agent-protocol";
+import { NapCatTrafficAccumulator } from "./traffic.js";
 
 type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
 type JsonObject = { [key: string]: JsonValue };
@@ -69,7 +70,7 @@ export interface DockerClient {
   stop(name: string): Promise<void>;
   restart(name: string): Promise<void>;
   exec(container: string, args: string[]): Promise<{ stdout: string; stderr: string }>;
-  logs(container: string, options: { tail: number; sinceSeconds: number }): Promise<string>;
+  logs(container: string, options: { tail: number; sinceSeconds: number; timestamps?: boolean }): Promise<string>;
 }
 
 export class DockerCliClient implements DockerClient {
@@ -120,8 +121,8 @@ export class DockerCliClient implements DockerClient {
   async stop(name: string) { await this.docker(["stop", "--time", "20", name]); }
   async restart(name: string) { await this.docker(["restart", "--time", "20", name]); }
   async exec(container: string, args: string[]) { return this.docker(["exec", container, ...args]); }
-  async logs(container: string, options: { tail: number; sinceSeconds: number }) {
-    const { stdout, stderr } = await this.docker(["logs","--tail",String(options.tail),"--since",`${options.sinceSeconds}s`,container]);
+  async logs(container: string, options: { tail: number; sinceSeconds: number; timestamps?: boolean }) {
+    const { stdout, stderr } = await this.docker(["logs","--tail",String(options.tail),"--since",`${options.sinceSeconds}s`,...(options.timestamps?["--timestamps"]:[]),container]);
     return `${stdout}${stderr}`.slice(-1024 * 1024);
   }
 }
@@ -306,6 +307,8 @@ export class NapCatRuntime {
     groups: { items: JsonObject[]; count: number; truncated: boolean; observedAt: string | null; probe: OneBotProbe };
   }>();
   private readonly webCredentials = new Map<string, string>();
+  private readonly trafficAccumulators = new Map<string, NapCatTrafficAccumulator>();
+  private readonly trafficCache = new Map<string, { at: number; summary: JsonObject }>();
   private commandsLoaded = false;
   constructor(private readonly options: {
     docker?: DockerClient;
@@ -505,6 +508,31 @@ export class NapCatRuntime {
     this.webCredentials.set(endpointId,credential);
     return credential;
   }
+  private async protocolTraffic(endpointId: string): Promise<JsonObject> {
+    const now = Date.now();
+    const cached = this.trafficCache.get(endpointId);
+    if (cached && now - cached.at < 5_000) return cached.summary;
+    let accumulator = this.trafficAccumulators.get(endpointId);
+    if (!accumulator) {
+      accumulator = new NapCatTrafficAccumulator();
+      this.trafficAccumulators.set(endpointId, accumulator);
+    }
+    let status: "ok" | "unavailable" = "ok";
+    try {
+      const logs = await this.docker().logs(this.containerName(endpointId), { tail: 500, sinceSeconds: 15, timestamps: true });
+      accumulator.ingest(logs.split(/\r?\n/), now);
+    } catch {
+      status = "unavailable";
+    }
+    const summary = {
+      ...accumulator.summary(now),
+      status,
+      sampleIntervalSeconds: 5,
+      ...(status === "unavailable" ? { error: "Container log telemetry unavailable" } : {}),
+    } as unknown as JsonObject;
+    this.trafficCache.set(endpointId, { at: now, summary });
+    return summary;
+  }
   async snapshot(command: RuntimeCommand): Promise<{
     endpointId: string;
     generation: number;
@@ -520,6 +548,7 @@ export class NapCatRuntime {
       return { endpointId: command.endpointId, generation: command.generation, runtime: "stopped", provider: "unknown", protocol: "disconnected", convergence: "reconciling", metadata: {} };
     }
     const base = new URL(`http://${inspected.ipAddress}:6099`);
+    const traffic = await this.protocolTraffic(command.endpointId);
     const webToken=await this.webCredential(command.endpointId,base);
     const loginInfo = await this.napcatRequest(base, "/api/QQLogin/GetQQLoginInfo", await this.webCredential(command.endpointId,base), {}, command.endpointId);
     const objectData = (value: JsonObject): JsonObject => {
@@ -536,7 +565,7 @@ export class NapCatRuntime {
         await this.napcatRequest(base,"/api/QQLogin/RefreshQRcode",webToken,{},command.endpointId);
         qrcode=await this.waitForQr(base,command.endpointId,await this.webCredential(command.endpointId,base));
       }
-      return{endpointId:command.endpointId,generation:command.generation,runtime:"ready",provider:"available",protocol:"disconnected",convergence:"reconciling",metadata:{qq,login:objectData(qrcode),onebot:null}}
+      return{endpointId:command.endpointId,generation:command.generation,runtime:"ready",provider:"available",protocol:"disconnected",convergence:"reconciling",metadata:{qq,login:objectData(qrcode),onebot:null,traffic}}
     }
     const debugSession = await this.napcatRequest(base, "/api/Debug/create", webToken, {}, command.endpointId);
     const adapterName = (debugSession.data as Record<string, unknown> | undefined)?.adapterName;
@@ -614,6 +643,7 @@ export class NapCatRuntime {
           },
           config:{websocketClients:safeConnections(network.websocketClients),websocketServers:safeConnections(network.websocketServers)},
         },
+        traffic,
       },
     };
   }

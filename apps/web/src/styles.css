@@ -53,6 +53,7 @@
 .protocol-runtime h3,.protocol-runtime p{margin:0}
 .protocol-runtime p{margin-top:5px;color:var(--muted);font-size:13px;line-height:1.5}
 .runtime-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.traffic-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-bottom:18px}.traffic-summary>div{display:flex;min-width:0;flex-direction:column;gap:4px;padding:14px;border:1px solid var(--border);border-radius:10px;background:color-mix(in srgb,var(--bg) 64%,var(--surface))}.traffic-summary small,.traffic-summary span{color:var(--muted)}.traffic-summary strong{font-size:20px;letter-spacing:-.02em}.traffic-chart{display:grid;height:178px;grid-template-columns:repeat(6,minmax(28px,1fr));align-items:end;gap:8px;padding:14px 12px 8px;border:1px solid var(--border);border-radius:10px;background:linear-gradient(to bottom,transparent 24%,var(--border) 25%,transparent 26%,transparent 49%,var(--border) 50%,transparent 51%,transparent 74%,var(--border) 75%,transparent 76%)}.traffic-bucket{display:grid;height:100%;min-width:0;grid-template-rows:minmax(0,1fr) 18px;gap:4px}.traffic-bars{display:flex;min-height:0;align-items:flex-end;justify-content:center;gap:3px}.traffic-bar{display:block;width:min(12px,42%);min-height:0;border-radius:3px 3px 0 0}.traffic-bar.inbound,.traffic-legend i.inbound{background:#2563eb}.traffic-bar.outbound,.traffic-legend i.outbound{background:#16a34a}.traffic-bucket small{overflow:hidden;color:var(--muted);font-size:10px;text-align:center;white-space:nowrap}.traffic-legend{display:flex;align-items:center;gap:14px;margin-top:10px;color:var(--muted);font-size:12px}.traffic-legend span{display:inline-flex;align-items:center;gap:5px}.traffic-legend i{display:block;width:8px;height:8px;border-radius:2px}.traffic-legend small{margin-left:auto}.traffic-event-table table{width:100%;min-width:0!important;table-layout:fixed}.traffic-event-table th,.traffic-event-table td{overflow:hidden;padding-inline:12px;text-overflow:ellipsis;white-space:nowrap}.traffic-privacy{margin:14px 0 0;padding-top:12px;border-top:1px solid var(--border);font-size:12px}
 
 @media(max-width:760px){
   .app-main{padding-left:0}
@@ -65,6 +66,10 @@
   .endpoint-qr svg{width:176px!important;height:176px!important}
   .protocol-runtime{grid-template-columns:1fr;gap:14px}
   .runtime-facts{grid-template-columns:1fr 1fr}
+  .traffic-summary{grid-template-columns:1fr}
+  .traffic-chart{gap:4px;padding-inline:8px}
+  .traffic-legend{flex-wrap:wrap}.traffic-legend small{width:100%;margin-left:0}
+  .traffic-event-table th,.traffic-event-table td{padding-inline:6px;font-size:11.5px}
 }
 @media(max-width:340px){
   .endpoint-lifecycle-actions [data-slot="button"]{flex-basis:78px;padding-inline:8px}

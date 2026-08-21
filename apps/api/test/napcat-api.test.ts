@@ -115,6 +115,7 @@ describe("NapCat API vertical slice", () => {
           qq: { uin: "12345", nickname: "Operator QQ" },
           login: { qrcode: "otpauth://qq-login" },
           onebot: { status: { online: true }, loginInfo: { user_id: 12345 } },
+          traffic: { status: "ok", privacy: "aggregate_only", oneMinute: { inbound: 2, outbound: 1, total: 3, bytes: 240 } },
         },
       }],
     });
@@ -123,6 +124,7 @@ describe("NapCat API vertical slice", () => {
     expect((await api.inject({ method: "GET", url: `/api/v1/endpoints/${endpoint.id}/napcat/status`, headers: { cookie } })).json()).toMatchObject({
       qq: { uin: "12345", nickname: "Operator QQ" },
       onebot: { status: { online: true }, loginInfo: { user_id: 12345 } },
+      traffic: { status: "ok", privacy: "aggregate_only", oneMinute: { total: 3 } },
     });
   });
 
