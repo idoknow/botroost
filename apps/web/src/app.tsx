@@ -1,8 +1,7 @@
 import '@mantine/core/styles.css';
 import './styles.css';
-import {ActionIcon,AppShell,Box,Burger,Divider,Group,MantineProvider,NavLink,Stack,Text,createTheme} from '@mantine/core';
-import {useDisclosure} from '@mantine/hooks';
-import {IconActivity,IconAdjustments,IconBuilding,IconCloud,IconDatabase,IconFileAnalytics,IconLogout2,IconServer,IconTopologyStar} from '@tabler/icons-react';
+import {ActionIcon,AppShell,Box,Divider,Group,MantineProvider,Menu,NavLink,Stack,Text,createTheme} from '@mantine/core';
+import {IconActivity,IconAdjustments,IconBuilding,IconCloud,IconDatabase,IconDots,IconFileAnalytics,IconLogout2,IconServer,IconTopologyStar} from '@tabler/icons-react';
 import {QueryClient,QueryClientProvider,useQuery} from '@tanstack/react-query';
 import type {ReactNode} from 'react';
 import {BrowserRouter,Link,Navigate,Route,Routes,useLocation,useNavigate} from 'react-router-dom';
@@ -48,15 +47,16 @@ function Guard({session,permission,children}:{session:Session;permission:string;
 }
 
 function Shell({session}:{session:Session}){
-  const [opened,{toggle,close}]=useDisclosure(false);
   const location=useLocation();
   const navigate=useNavigate();
   async function logout(){await api.mutate('/auth/logout');activeClient?.clear();navigate('/login',{replace:true})}
-  return <AppShell header={{height:64}} navbar={{width:190,breakpoint:'sm',collapsed:{mobile:!opened}}} padding={0}>
+  const visible=nav.filter(item=>has(session,item.permission));
+  const mobilePrimary=visible.filter(item=>['/','/endpoints','/nodes','/operations'].includes(item.to));
+  const mobileMore=visible.filter(item=>!mobilePrimary.includes(item));
+  return <AppShell header={{height:56}} navbar={{width:190,breakpoint:'sm',collapsed:{mobile:true}}} padding={0}>
     <AppShell.Header className="app-header">
       <Group h="100%" px={{base:'sm',sm:'md'}} justify="space-between" wrap="nowrap">
         <Group gap="sm" wrap="nowrap">
-          <Burger opened={opened} onClick={toggle} hiddenFrom="sm" size="sm" aria-label="Toggle navigation"/>
           <BrandMark/>
           <Divider orientation="vertical" h={24} visibleFrom="sm"/>
           <Text className="workspace-name" visibleFrom="sm">{session.workspace.name}</Text>
@@ -74,10 +74,10 @@ function Shell({session}:{session:Session}){
     <AppShell.Navbar className="app-navbar" p="sm">
       <AppShell.Section grow>
         <Text className="nav-section-label">OneBot cluster</Text>
-        <Stack gap={4}>{nav.filter(item=>has(session,item.permission)).map(item=>{
+        <Stack gap={4}>{visible.map(item=>{
           const Icon=item.icon;
           const active=location.pathname===item.to||(item.to!=='/'&&location.pathname.startsWith(item.to));
-          return <NavLink key={item.to} component={Link} to={item.to} label={item.label} leftSection={<Icon size={17} stroke={1.7}/>} active={active} onClick={close}/>;
+          return <NavLink key={item.to} component={Link} to={item.to} label={item.label} leftSection={<Icon size={17} stroke={1.7}/>} active={active}/>;
         })}</Stack>
       </AppShell.Section>
       <AppShell.Section className="nav-footer">
@@ -100,6 +100,7 @@ function Shell({session}:{session:Session}){
       <Route path="/workspace/settings" element={<Guard session={session} permission="settings:read"><Settings session={session}/></Guard>}/>
       <Route path="*" element={<NotFound/>}/>
     </Routes></PageContainer></AppShell.Main>
+    <nav className="mobile-tabbar" aria-label="Primary navigation">{mobilePrimary.map(item=>{const Icon=item.icon;const active=location.pathname===item.to||(item.to!=='/'&&location.pathname.startsWith(item.to));return <Link key={item.to} to={item.to} className={active?'mobile-tab is-active':'mobile-tab'} aria-current={active?'page':undefined}><Icon size={20}/><span>{item.label==='Protocol endpoints'?'Endpoints':item.label==='Agent nodes'?'Nodes':item.label==='Changes'?'Changes':'Cluster'}</span></Link>})}{mobileMore.length>0&&<Menu position="top-end" withinPortal><Menu.Target><button className={mobileMore.some(item=>location.pathname.startsWith(item.to))?'mobile-tab is-active':'mobile-tab'}><IconDots size={20}/><span>More</span></button></Menu.Target><Menu.Dropdown>{mobileMore.map(item=>{const Icon=item.icon;return <Menu.Item key={item.to} component={Link} to={item.to} leftSection={<Icon size={16}/>}>{item.label}</Menu.Item>})}</Menu.Dropdown></Menu>}</nav>
   </AppShell>;
 }
 
