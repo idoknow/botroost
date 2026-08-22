@@ -131,12 +131,13 @@ export function EndpointDetail({session,id}:{session:Session;id:string}){
   const directoryData=onebot?.directory;
   const currentDirectory=directoryData?.[directory];
   const probeRows=probeCatalog.map(([action,category])=>{const probe=onebot?.probes?.[action];return [<code>{action}</code>,category,probe?<Badge good={probe.ok}>{probe.ok?'Available':'Failed'}</Badge>:<Badge>Not observed</Badge>,probe?`${probe.durationMs} ms${probe.error?` · ${probe.error}`:''}`:'—']});
+  const hasTabbedConsole=canOperate&&endpoint.providerId==='napcat';
 
-  return <Stack className="endpoint-console">
+  return <Stack className={`endpoint-console${hasTabbedConsole?' endpoint-console-with-tabs':''}`}>
     <PageHeading className="endpoint-heading" kicker="OneBot protocol endpoint · NapCat driver" title={endpoint.name} description={`Hosted by ${endpoint.node?.name??'an unassigned agent node'} · ${endpoint.id}`} action={lifecycleActions}/>
     <div className="health-strip">{statusLayers(endpoint.status).map(layer=><Info key={layer.label} label={layer.label}><Badge good={['connected','online','ready','available','converged'].includes(layer.value)}>{layer.value}</Badge></Info>)}</div>
     {endpoint.activeOperationId&&<div className="alert">Operation in progress. Actions are disabled until <Link to={`/operations/${endpoint.activeOperationId}`}>{endpoint.activeOperationId}</Link> completes.</div>}
-    {canOperate&&endpoint.providerId==='napcat'?<Tabs defaultValue="overview" className="endpoint-tabs">
+    {hasTabbedConsole?<Tabs defaultValue="overview" className="endpoint-tabs">
       <TabsList className="endpoint-tabs-list product-tabs-list">
         <TabsTrigger className="product-tabs-trigger after:hidden" value="overview">Overview</TabsTrigger>
         <TabsTrigger className="product-tabs-trigger after:hidden" value="traffic">Traffic</TabsTrigger>

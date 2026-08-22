@@ -52,6 +52,12 @@
 .page-heading-copy{min-width:0;flex:1}
 .endpoint-lifecycle-actions{display:flex;flex:none;flex-wrap:wrap;justify-content:flex-end;gap:8px}
 .endpoint-lifecycle-actions [data-slot="button"]{min-width:74px}
+@media(min-width:761px){
+  .endpoint-console-with-tabs{height:calc(100vh - 104px);height:calc(100dvh - 104px);min-height:0;overflow:hidden}
+  .endpoint-console-with-tabs>.endpoint-tabs{min-height:0;flex:1 1 0;gap:0;overflow:hidden}
+  .endpoint-console-with-tabs>.endpoint-tabs>.endpoint-tabs-list{flex:0 0 auto}
+  .endpoint-console-with-tabs>.endpoint-tabs>.endpoint-tab-panel{min-height:0;overflow-x:hidden;overflow-y:auto;overscroll-behavior-y:contain;padding-right:6px;padding-bottom:24px;scrollbar-gutter:stable}
+}
 .card-section-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:18px}
 .card-section-heading h2,.card-section-heading p{margin:0}
 .card-section-heading p{margin-top:4px}
