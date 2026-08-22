@@ -88,12 +88,31 @@ describe("NapCat runtime", () => {
     expect(docker.created[0]?.image).toBe(NAPCAT_IMAGE);
   });
 
+  it("does not replace an outdated container after the progress fence is rejected", async () => {
+    const docker=new RecordingDocker();
+    docker.inspect=async name=>({id:"old",name,image:"mlikiowa/napcat-docker@sha256:old",state:"running",ipAddress:"172.18.0.10",labels:{"botroost.workspace_id":baseCommand.workspaceId,"botroost.endpoint_id":baseCommand.endpointId,"botroost.provider":"napcat"}});
+    const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"botroost-napcat-fence-")),napcatToken:"operator-token"});
+    await expect(runtime.apply("runtime:fenced-replace",baseCommand,async progress=>{if(progress.message.includes("Replacing outdated"))throw new Error("fence") })).rejects.toThrow("fence");
+    expect(docker.removes).toHaveLength(0);
+    expect(docker.created).toHaveLength(0);
+  });
+
+  it("does not erase host runtime data after the delete fence is rejected", async () => {
+    const docker=new RecordingDocker();
+    docker.inspect=async name=>({id:"owned",name,image:NAPCAT_IMAGE,state:"running",ipAddress:"172.18.0.10",labels:{"botroost.workspace_id":baseCommand.workspaceId,"botroost.endpoint_id":baseCommand.endpointId,"botroost.provider":"napcat"}});
+    const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"botroost-napcat-delete-fence-")),napcatToken:"operator-token"});
+    await expect(runtime.apply("runtime:fenced-delete",{...baseCommand,action:"delete"},async progress=>{if(progress.message.includes("persisted host runtime data"))throw new Error("fence") })).rejects.toThrow("fence");
+    expect(docker.removes).toHaveLength(1);
+    expect(docker.hostStateRemovals).toHaveLength(0);
+  });
+
   it("creates the pinned container with labels, persistent per-endpoint storage, and no host ports", async () => {
     const docker = new RecordingDocker();
     const root = await mkdtemp(join(tmpdir(), "botroost-napcat-"));
     const runtime = new NapCatRuntime({ docker, stateDirectory: root, napcatToken: "operator-token" });
+    const progress:{phase:string;percent:number;message:string}[]=[];
 
-    await runtime.apply("runtime:cmd-1", baseCommand);
+    await runtime.apply("runtime:cmd-1", baseCommand,async update=>{progress.push(update)});
 
     expect(docker.created).toHaveLength(1);
     expect(docker.created[0]).toMatchObject({
@@ -115,6 +134,8 @@ describe("NapCat runtime", () => {
     ]);
     expect(JSON.stringify(docker.created[0])).not.toContain("/var/run/docker.sock");
     expect(docker.started).toEqual(["botroost-napcat-33333333-3333-4333-8333-333333333333"]);
+    expect(progress.map(update=>update.phase)).toEqual(["inspecting-runtime","inspecting-runtime","inspecting-runtime","preparing-runtime","preparing-runtime","creating-container","starting-container","probing-provider","probing-provider"]);
+    expect(progress.map(update=>update.percent)).toEqual([20,22,25,40,45,55,70,85,95]);
   });
 
   it("observes an existing protocol container after agent restart without starting, restarting, recreating, or removing it", async () => {
@@ -339,8 +360,10 @@ describe("NapCat runtime", () => {
     const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"botroost-napcat-ws-")),napcatToken:"operator-token",fetcher:async(url,init)=>{const path=new URL(String(url)).pathname;const body=init?.body?JSON.parse(String(init.body)):undefined;calls.push({path,body});if(path==="/api/auth/login")return new Response(JSON.stringify({code:0,data:{Credential:"credential"}}));if(path==="/api/OB11Config/GetConfig")return new Response(JSON.stringify({code:0,data:{network:{httpServers:[],httpSseServers:[],httpClients:[],websocketServers:[],websocketClients:[],plugins:[]},timeout:{baseTimeout:10000,uploadSpeedKBps:256,downloadSpeedKBps:256,maxTimeout:1800000}}}));if(path==="/api/OB11Config/SetConfig")return new Response(JSON.stringify({code:0,data:null}));if(path==="/api/QQLogin/GetQQLoginQrcode")return new Response(JSON.stringify({code:0,data:{}}));if(path==="/api/QQLogin/GetQQLoginInfo")return new Response(JSON.stringify({code:0,data:{online:false}}));throw new Error(`unexpected ${path}`)}});
     await runtime.apply("runtime:update-ws",{...baseCommand,action:"update-onebot-websockets",metadata:{websocketClients:[{name:"LangBot",enable:true,url:"wss://bot.example/ws",token:"new-secret",reconnectInterval:5000,heartInterval:30000,messagePostFormat:"array",reportSelfMessage:false,debug:false}],websocketServers:[]}} as unknown as typeof baseCommand);
     const set=calls.find(call=>call.path==="/api/OB11Config/SetConfig");
+    const rawConfig=(set?.body as {config:string|Record<string,unknown>}).config;
+    const writtenConfig=(typeof rawConfig==="string"?JSON.parse(rawConfig):rawConfig) as {network:{websocketClients:{token:string}[]}};
     expect(set?.body).toMatchObject({config:expect.stringContaining("wss://bot.example/ws")});
-    expect(JSON.parse((set?.body as {config:string}).config).network.websocketClients[0].token).toBe("new-secret");
+    expect(writtenConfig.network.websocketClients[0]!.token).toBe("new-secret");
   });
 
   it("reuses one WebUI credential across continuous snapshots instead of hitting the login limiter", async () => {

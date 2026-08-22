@@ -8,6 +8,7 @@ import { FileAgentJournal } from "@botroost/agent-journal";
 import {
   AgentHeartbeatRequestSchema,
   RuntimeCommandSchema,
+  type CommandProgressRequest,
   type CommandResultRequest,
   type RuntimeCommand,
 } from "@botroost/agent-protocol";
@@ -15,6 +16,7 @@ import { NapCatTrafficAccumulator } from "./traffic.js";
 
 type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
 type JsonObject = { [key: string]: JsonValue };
+type RuntimeProgress = Pick<CommandProgressRequest, "phase" | "percent" | "message">;
 
 type OneBotReadAction = "get_status" | "get_login_info" | "get_friend_list" | "get_group_list" | "get_version_info";
 type OneBotProbe = { ok: boolean; durationMs: number; error: string | null };
@@ -210,8 +212,15 @@ export interface AgentCommandTransport {
   }[]): Promise<{ connectionEpoch: number }>;
   claim(): Promise<RuntimeCommand | null>;
   receipt(commandId: string, receipt: { operationId: string; generation: number; connectionEpoch: number }): Promise<void>;
+  progress(commandId: string, progress: Omit<CommandProgressRequest, "sessionId">): Promise<void>;
   result(result: Omit<CommandResultRequest, "sessionId"> & { commandId: string }): Promise<void>;
 }
+
+export class ControlPlaneRequestError extends Error {
+  constructor(readonly status:number){super(`control plane request failed: ${status}`);this.name="ControlPlaneRequestError"}
+}
+
+const isCommandFenceRejection=(error:unknown):error is ControlPlaneRequestError=>error instanceof ControlPlaneRequestError&&(error.status===401||error.status===403||error.status===409);
 
 export class HttpAgentTransport implements AgentCommandTransport {
   private readonly sessionId=crypto.randomUUID();
@@ -233,7 +242,7 @@ export class HttpAgentTransport implements AgentCommandTransport {
       body: JSON.stringify(payload),
       signal,
     });
-    if (!response.ok) throw new Error(`control plane request failed: ${response.status}`);
+    if (!response.ok) throw new ControlPlaneRequestError(response.status);
     return response.status === 204 ? (undefined as T) : ((await response.json()) as T);
   }
   heartbeat(runtimes: Parameters<AgentCommandTransport["heartbeat"]>[0] = []) {
@@ -250,6 +259,9 @@ export class HttpAgentTransport implements AgentCommandTransport {
   }
   async receipt(commandId: string, receipt: { operationId: string; generation: number; connectionEpoch: number }) {
     await this.request(`/api/v1/agent/commands/${encodeURIComponent(commandId)}/receipt`, { ...receipt, sessionId: this.sessionId });
+  }
+  async progress(commandId: string, progress: Omit<CommandProgressRequest, "sessionId">) {
+    await this.request(`/api/v1/agent/commands/${encodeURIComponent(commandId)}/progress`, { ...progress, sessionId: this.sessionId });
   }
   async result(result: Parameters<AgentCommandTransport["result"]>[0]) {
     const { commandId, ...body } = result;
@@ -282,7 +294,7 @@ export class FakeRuntime {
     await writeFile(temporary, `${JSON.stringify({effects:Object.fromEntries(this.effectRecords)})}\n`, {mode:0o600});
     await rename(temporary, this.statePath);
   }
-  async apply(effectOrCommand: string | RuntimeCommand, maybeCommand?: RuntimeCommand): Promise<{ state: "running" | "stopped" }> {
+  async apply(effectOrCommand: string | RuntimeCommand, maybeCommand?: RuntimeCommand, onProgress: (progress: RuntimeProgress) => Promise<void> = async()=>undefined): Promise<{ state: "running" | "stopped" }> {
     const command = typeof effectOrCommand === "string" ? maybeCommand! : effectOrCommand;
     const effectId = typeof effectOrCommand === "string" ? effectOrCommand : `runtime:${command.commandId}`;
     const existing = this.effectRecords.get(effectId);
@@ -295,8 +307,10 @@ export class FakeRuntime {
     this.endpointQueues.set(command.endpointId, previous.then(() => current));
     await previous;
     try {
+      await onProgress({phase:"inspecting-runtime",percent:25,message:"Inspecting existing runtime"});
       const replay = this.effectRecords.get(effectId);
       if (replay) return { state: replay.state };
+      await onProgress(command.action==="stop"||command.action==="delete"?{phase:command.action==="delete"?"removing-runtime":"stopping-container",percent:70,message:command.action==="delete"?"Removing runtime":"Stopping runtime"}:{phase:"starting-container",percent:70,message:"Starting runtime"});
       const list = this.effects.get(command.endpointId) ?? [];
       list.push(command.action);
       this.effects.set(command.endpointId, list);
@@ -400,20 +414,27 @@ export class NapCatRuntime {
     .replace(/("(?:token|password|secret|key|credential|session)"\s*:\s*")[^"]*(")/gi,"$1[REDACTED]$2")
   }
   private async waitForQr(base:URL,endpointId:string,credential:string){let last:Error|undefined;const attempts=this.options.qrPollAttempts??20;for(let attempt=0;attempt<attempts;attempt++){try{return await this.napcatRequest(base,"/api/QQLogin/GetQQLoginQrcode",credential,{},endpointId)}catch(error){last=error instanceof Error?error:new Error(String(error));if(!last.message.includes("QRCode Get Error"))throw last;if(attempt+1<attempts)await new Promise(resolve=>setTimeout(resolve,this.options.qrPollIntervalMs??500))}}throw new Error(`NapCat login kernel not ready: ${last?.message??"QR unavailable"}`)}
-  async apply(_effectId: string, command: RuntimeCommand): Promise<{ state: "running" | "stopped"; observations?: Parameters<AgentCommandTransport["result"]>[0]["observations"]; metadata?: JsonObject }> {
+  async apply(_effectId: string, command: RuntimeCommand, onProgress: (progress: RuntimeProgress) => Promise<void> = async () => undefined): Promise<{ state: "running" | "stopped"; observations?: Parameters<AgentCommandTransport["result"]>[0]["observations"]; metadata?: JsonObject }> {
     this.assertAllowed(command);
+    await onProgress({phase:"inspecting-runtime",percent:20,message:"Authorizing runtime command"});
     await this.loadCommands();
+    await onProgress({phase:"inspecting-runtime",percent:22,message:"Persisting runtime command"});
     this.commands.set(command.endpointId, command);
     await this.persistCommands();
     const name = this.containerName(command.endpointId);
     const docker = this.docker();
     const desiredImage = typeof command.metadata.image === "string" ? command.metadata.image : NAPCAT_IMAGE;
+    await onProgress({phase:"inspecting-runtime",percent:25,message:"Inspecting existing runtime"});
     const existing = await docker.inspect(name);
     if(command.action==="delete"){
+      await onProgress({phase:"removing-runtime",percent:55,message:"Removing container and persisted runtime data"});
       if(existing&&(existing.labels["botroost.workspace_id"]!==command.workspaceId||existing.labels["botroost.endpoint_id"]!==command.endpointId||existing.labels["botroost.provider"]!=="napcat"))throw new Error("NapCat container ownership check failed");
-      if(existing)await docker.remove(name);
+      if(existing){await onProgress({phase:"removing-runtime",percent:55,message:"Removing NapCat container"});await docker.remove(name)}
+      await onProgress({phase:"removing-runtime",percent:62,message:"Removing persisted host runtime data"});
       await docker.removeHostEndpoint(resolve(this.options.hostStateDirectory??this.options.stateDirectory),command.endpointId,desiredImage);
+      await onProgress({phase:"removing-runtime",percent:70,message:"Removing agent runtime state"});
       await rm(this.endpointRoot(command.endpointId),{recursive:true,force:true});
+      await onProgress({phase:"removing-runtime",percent:78,message:"Finalizing agent runtime deletion"});
       this.commands.delete(command.endpointId);
       this.snapshotCache.delete(command.endpointId);
       this.directoryCache.delete(command.endpointId);
@@ -422,38 +443,53 @@ export class NapCatRuntime {
       this.trafficCache.delete(command.endpointId);
       this.trafficLastSuccessAt.delete(command.endpointId);
       await this.persistCommands();
+      await onProgress({phase:"removing-runtime",percent:95,message:"Runtime deletion complete"});
       return{state:"stopped",observations:{node:"online",runtime:"stopped",provider:"unavailable",protocol:"disconnected",convergence:"converged"},metadata:{deleted:true}};
     }
     if(command.action==="read-container-logs"){
+      await onProgress({phase:"probing-provider",percent:75,message:"Reading runtime diagnostics"});
       if(!existing||existing.labels["botroost.workspace_id"]!==command.workspaceId||existing.labels["botroost.endpoint_id"]!==command.endpointId||existing.labels["botroost.provider"]!=="napcat")throw new Error("NapCat container ownership check failed");
       const tail=Number(command.metadata.logTail),sinceSeconds=Number(command.metadata.logSinceSeconds);
       if(!Number.isInteger(tail)||tail<1||tail>1000||!Number.isInteger(sinceSeconds)||sinceSeconds<60||sinceSeconds>86400)throw new Error("NapCat log bounds are invalid");
       const text=this.redactLogs(await docker.logs(name,{tail,sinceSeconds}));
+      await onProgress({phase:"probing-provider",percent:95,message:"Runtime diagnostics ready"});
       return{state:existing.state==="running"?"running":"stopped",metadata:{logs:{text,tail,sinceSeconds}}};
     }
     if(command.action==="update-onebot-websockets"){
+      await onProgress({phase:"applying-configuration",percent:60,message:"Applying OneBot WebSocket configuration"});
       if(!existing?.ipAddress||existing.state!=="running"||existing.labels["botroost.workspace_id"]!==command.workspaceId||existing.labels["botroost.endpoint_id"]!==command.endpointId||existing.labels["botroost.provider"]!=="napcat")throw new Error("NapCat container ownership check failed");
       const clients=command.metadata.websocketClients,servers=command.metadata.websocketServers;
       if(!Array.isArray(clients)||clients.length>20||!Array.isArray(servers)||servers.length>20)throw new Error("OneBot websocket configuration is invalid");
-      const base=new URL(`http://${existing.ipAddress}:6099`),credential=await this.webCredential(command.endpointId,base);
+      const base=new URL(`http://${existing.ipAddress}:6099`);
+      await onProgress({phase:"applying-configuration",percent:62,message:"Authenticating with NapCat"});
+      const credential=await this.webCredential(command.endpointId,base);
+      await onProgress({phase:"applying-configuration",percent:65,message:"Reading current OneBot configuration"});
       const current=await this.napcatRequest(base,"/api/OB11Config/GetConfig",credential,{},command.endpointId);
       const config=current.data!==null&&typeof current.data==="object"&&!Array.isArray(current.data)?current.data as Record<string,unknown>:{};
       const network=config.network!==null&&typeof config.network==="object"&&!Array.isArray(config.network)?config.network as Record<string,unknown>:{};
       const preserveTokens=(next:unknown[],previous:unknown)=>next.map(item=>{if(item===null||typeof item!=="object"||Array.isArray(item))throw new Error("OneBot websocket entry is invalid");const value=item as Record<string,unknown>;const old=Array.isArray(previous)?previous.find(entry=>entry!==null&&typeof entry==="object"&&!Array.isArray(entry)&&(entry as Record<string,unknown>).name===value.name) as Record<string,unknown>|undefined:undefined;return{...value,token:typeof value.token==="string"?value.token:typeof old?.token==="string"?old.token:""}});
       const merged={...config,network:{...network,websocketClients:preserveTokens(clients,network.websocketClients),websocketServers:preserveTokens(servers,network.websocketServers)}};
-      await this.napcatRequest(base,"/api/OB11Config/SetConfig",await this.webCredential(command.endpointId,base),{config:JSON.stringify(merged)},command.endpointId);
+      await onProgress({phase:"applying-configuration",percent:70,message:"Refreshing NapCat configuration credentials"});
+      const writeCredential=await this.webCredential(command.endpointId,base);
+      await onProgress({phase:"applying-configuration",percent:72,message:"Writing OneBot WebSocket configuration"});
+      await this.napcatRequest(base,"/api/OB11Config/SetConfig",writeCredential,{config:JSON.stringify(merged)},command.endpointId);
       this.snapshotCache.delete(command.endpointId);
+      await onProgress({phase:"probing-provider",percent:85,message:"Verifying OneBot configuration"});
       const snapshot=await this.snapshot(command);
+      await onProgress({phase:"probing-provider",percent:95,message:"OneBot configuration verified"});
       return{state:"running",observations:{node:"online",runtime:snapshot.runtime,provider:snapshot.provider,protocol:snapshot.protocol,convergence:snapshot.convergence},metadata:snapshot.metadata};
     }
     if (command.action !== "stop" && (!existing || existing.image !== desiredImage)) {
-      if (existing) await docker.remove(name);
+      if (existing){await onProgress({phase:"preparing-runtime",percent:35,message:"Replacing outdated NapCat container"});await docker.remove(name)}
+      await onProgress({phase:"preparing-runtime",percent:40,message:"Preparing runtime image and storage"});
       const qq = this.endpointDirectory(command.endpointId, "qq");
       const config = this.endpointDirectory(command.endpointId, "config");
       const hostQq = this.hostEndpointDirectory(command.endpointId, "qq");
       const hostConfig = this.hostEndpointDirectory(command.endpointId, "config");
       await mkdir(qq, { recursive: true, mode: 0o700 });
+      await onProgress({phase:"preparing-runtime",percent:45,message:"Preparing NapCat configuration storage"});
       await mkdir(config, { recursive: true, mode: 0o700 });
+      await onProgress({phase:"creating-container",percent:55,message:"Creating NapCat container"});
       await docker.create({
         name,
         image: NAPCAT_IMAGE,
@@ -472,17 +508,21 @@ export class NapCatRuntime {
         resources: command.runtimeRequest.resources,
       });
     }
-    if (command.action === "stop" && existing) await docker.stop(name);
-    else if (command.action === "restart") { this.webCredentials.delete(command.endpointId); await docker.restart(name); }
-    else if (command.action === "start") await docker.start(name);
+    if (command.action === "stop" && existing) { await onProgress({phase:"stopping-container",percent:70,message:"Stopping NapCat container"}); await docker.stop(name); }
+    else if (command.action === "restart") { await onProgress({phase:"starting-container",percent:70,message:"Restarting NapCat container"}); this.webCredentials.delete(command.endpointId); await docker.restart(name); }
+    else if (command.action === "start") { await onProgress({phase:"starting-container",percent:70,message:"Starting NapCat container"}); await docker.start(name); }
     if (command.action === "refresh-login-qr") {
       if (!existing?.ipAddress) throw new Error("NapCat container is not available for QR refresh");
       const base=new URL(`http://${existing.ipAddress}:6099`);
+      await onProgress({phase:"applying-configuration",percent:60,message:"Authenticating for QR refresh"});
       const credential=await this.webCredential(command.endpointId,base);
+      await onProgress({phase:"applying-configuration",percent:70,message:"Refreshing NapCat login QR"});
       await this.napcatRequest(base,"/api/QQLogin/RefreshQRcode",credential,{},command.endpointId);
       this.snapshotCache.delete(command.endpointId);
     }
+    await onProgress({phase:"probing-provider",percent:85,message:"Waiting for NapCat runtime readiness"});
     const snapshot = await this.snapshot(command).catch(error => ({ endpointId:command.endpointId,generation:command.generation,runtime:"unknown" as const,provider:"degraded" as const,protocol:"disconnected" as const,convergence:"reconciling" as const,metadata:{error:error instanceof Error?error.message:String(error)} }));
+    await onProgress({phase:"probing-provider",percent:95,message:"NapCat runtime observation ready"});
     const running = command.action !== "stop";
     return {
       state: running ? "running" : "stopped",
@@ -750,32 +790,77 @@ export class DurableFakeAgent {
     const existing = this.journal.get(command.commandId);
     if (!existing?.receipt) await this.journal.recordReceipt(command.commandId, receipt);
     await this.transport.receipt(command.commandId, receipt);
+    let sequence=0;
+    let latest:RuntimeProgress={phase:"agent-acknowledged",percent:15,message:"Agent acknowledged command"};
+    let reporting=Promise.resolve();
+    let fenceError:ControlPlaneRequestError|undefined;
+    const report=(progress:RuntimeProgress)=>{
+      if(fenceError)return Promise.reject(fenceError);
+      latest=progress;
+      const payload={...receipt,endpointId:command.endpointId,attempt:command.attempt??1,sequence:++sequence,...progress};
+      const submitted=reporting.then(async()=>{
+        try{await this.transport.progress(command.commandId,payload)}
+        catch(error){if(isCommandFenceRejection(error)){fenceError=error;throw error}}
+      });
+      reporting=submitted.catch(()=>undefined);
+      return submitted;
+    };
+    await report(latest);
+    let keepaliveRunning=false;
+    let keepaliveTask=Promise.resolve();
+    const keepalive=setInterval(()=>{
+      if(keepaliveRunning)return;
+      keepaliveRunning=true;
+      keepaliveTask=(async()=>{
+        try{
+          await this.transport.heartbeat([]);
+          await report(latest);
+        }catch(error){
+          if(isCommandFenceRejection(error))fenceError=error;
+        }finally{keepaliveRunning=false}
+      })();
+    },10_000);
     let result = this.journal.get(command.commandId)?.result;
-    if (!result) {
-      const effectId=`runtime:${command.commandId}`;
-      let applied = this.journal.get(command.commandId)?.effects[effectId] as Awaited<ReturnType<NapCatRuntime["apply"]>> | undefined;
-      if (!applied)
-        applied = await this.runtime.apply(effectId,command);
-      if (applied) await this.journal.recordEffect(command.commandId, effectId, applied);
-      result = {
-        operationId: command.operationId,
-        endpointId: command.endpointId,
-        generation: command.generation,
-        connectionEpoch: command.connectionEpoch,
-        outcome: "succeeded",
-        observations: applied?.observations ?? {
-          node: "online",
-          runtime: command.action === "stop" || command.action === "delete" ? "stopped" : "ready",
-          provider: "available",
-          protocol: "connected",
-          convergence: "converged",
-        },
-        ...(applied?.metadata ? { metadata: applied.metadata } : {}),
-      };
-      await this.journal.recordResult(command.commandId, result);
+    try {
+      if (!result) {
+        const effectId=`runtime:${command.commandId}`;
+        let applied = this.journal.get(command.commandId)?.effects[effectId] as Awaited<ReturnType<NapCatRuntime["apply"]>> | undefined;
+        if (!applied)
+          applied = await this.runtime.apply(effectId,command,report);
+        if(fenceError)throw fenceError;
+        if (applied) await this.journal.recordEffect(command.commandId, effectId, applied);
+        if(fenceError)throw fenceError;
+        result = {
+          operationId: command.operationId,
+          endpointId: command.endpointId,
+          generation: command.generation,
+          connectionEpoch: command.connectionEpoch,
+          attempt: command.attempt ?? 1,
+          outcome: "succeeded",
+          observations: applied?.observations ?? {
+            node: "online",
+            runtime: command.action === "stop" || command.action === "delete" ? "stopped" : "ready",
+            provider: "available",
+            protocol: "connected",
+            convergence: "converged",
+          },
+          ...(applied?.metadata ? { metadata: applied.metadata } : {}),
+        };
+        await this.journal.recordResult(command.commandId, result);
+      }
+    } catch(error) {
+      if(fenceError||isCommandFenceRejection(error))throw fenceError??error;
+      await report({phase:"retrying",percent:Math.min(latest.percent,95),message:"Runtime attempt failed; waiting for automatic retry"});
+      throw error;
+    } finally {
+      clearInterval(keepalive);
+      await keepaliveTask;
+      await reporting;
     }
+    if(fenceError)throw fenceError;
     const storedResult = {
       ...(result as Partial<Parameters<AgentCommandTransport["result"]>[0]>),
+      attempt: command.attempt ?? 1,
     };
     delete storedResult.commandId;
     await this.transport.result({

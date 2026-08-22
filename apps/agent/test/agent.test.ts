@@ -1,9 +1,10 @@
 import { lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   DurableFakeAgent,
+  ControlPlaneRequestError,
   FakeRuntime,
   HttpAgentTransport,
   NodeCredentialStore,
@@ -11,10 +12,17 @@ import {
 } from "../src/index.js";
 
 class MemoryTransport implements AgentCommandTransport {
+  heartbeats = 0;
+  heartbeatFailure?:{at:number;error:Error};
   receipts: string[] = [];
+  progresses: unknown[] = [];
+  progressFailure?:{at:number;error:Error};
+  resultFailure?:Error;
   results: unknown[] = [];
   constructor(public command: Awaited<ReturnType<AgentCommandTransport["claim"]>>) {}
   async heartbeat() {
+    this.heartbeats++;
+    if(this.heartbeatFailure?.at===this.heartbeats)throw this.heartbeatFailure.error;
     return { connectionEpoch: 1 };
   }
   async claim() {
@@ -25,8 +33,13 @@ class MemoryTransport implements AgentCommandTransport {
   async receipt(commandId: string) {
     this.receipts.push(commandId);
   }
+  async progress(_commandId: string, progress: unknown) {
+    this.progresses.push(progress);
+    if(this.progressFailure?.at===this.progresses.length)throw this.progressFailure.error;
+  }
   async result(result: unknown) {
     this.results.push(result);
+    if(this.resultFailure)throw this.resultFailure;
   }
 }
 
@@ -138,6 +151,24 @@ describe("durable fake agent", () => {
     expect(secondTransport.results).toHaveLength(1);
   });
 
+  it("rebinds a journaled result to the newly claimed attempt without repeating the effect", async () => {
+    const dir=await mkdtemp(join(tmpdir(),"botroost-agent-"));
+    const journalPath=join(dir,"agent-journal.jsonl");
+    const runtime=new FakeRuntime();
+    const firstTransport=new MemoryTransport({...command,attempt:1});
+    firstTransport.resultFailure=new Error("delivery failed");
+    const first=await DurableFakeAgent.open({journalPath,runtime,transport:firstTransport});
+    await expect(first.pollOnce()).rejects.toThrow("delivery failed");
+    await first.close();
+    const secondTransport=new MemoryTransport({...command,attempt:2});
+    const second=await DurableFakeAgent.open({journalPath,runtime,transport:secondTransport});
+    await second.pollOnce();
+    await second.close();
+    expect(runtime.effectsFor("endpoint-1")).toEqual(["start"]);
+    expect((firstTransport.results[0] as {attempt:number}).attempt).toBe(1);
+    expect((secondTransport.results[0] as {attempt:number}).attempt).toBe(2);
+  });
+
   it("deduplicates a stable runtime effect after apply succeeds before the agent journal records it", async () => {
     const dir = await mkdtemp(join(tmpdir(), "botroost-agent-"));
     const runtimeState = join(dir, "runtime-effects.json");
@@ -154,6 +185,45 @@ describe("durable fake agent", () => {
     expect(JSON.parse(await readFile(runtimeState, "utf8"))).toMatchObject({
       effects: { [effectId]: { status: "applied", endpointId: "endpoint-1" } },
     });
+  });
+
+  it("keeps old control planes alive when progress reporting is unsupported", async () => {
+    vi.useFakeTimers();
+    try {
+      const dir=await mkdtemp(join(tmpdir(),"botroost-agent-"));
+      const transport=new MemoryTransport(command);
+      transport.progress=async()=>{throw new ControlPlaneRequestError(404)};
+      let markStarted!:()=>void;const started=new Promise<void>(resolve=>{markStarted=resolve});
+      const runtime={apply:async()=>{markStarted();await new Promise(resolve=>setTimeout(resolve,20_000));return {}}} as unknown as FakeRuntime;
+      const agent=await DurableFakeAgent.open({journalPath:join(dir,"journal"),runtime,transport});
+      const pending=agent.pollOnce();
+      await started;
+      vi.advanceTimersByTime(10_000);await Promise.resolve();await Promise.resolve();
+      vi.advanceTimersByTime(10_000);await Promise.resolve();await Promise.resolve();
+      await pending;
+      expect(transport.heartbeats).toBeGreaterThanOrEqual(2);
+      expect(transport.results).toHaveLength(1);
+      await agent.close();
+    } finally {vi.useRealTimers()}
+  });
+
+  it("does not publish a result after the keepalive loses its session fence", async () => {
+    vi.useFakeTimers();
+    try {
+      const dir=await mkdtemp(join(tmpdir(),"botroost-agent-"));
+      const transport=new MemoryTransport(command);
+      transport.heartbeatFailure={at:2,error:new ControlPlaneRequestError(409)};
+      let markStarted!:()=>void;const started=new Promise<void>(resolve=>{markStarted=resolve});
+      const runtime={apply:async()=>{markStarted();await new Promise(resolve=>setTimeout(resolve,20_000));return {}}} as unknown as FakeRuntime;
+      const agent=await DurableFakeAgent.open({journalPath:join(dir,"journal"),runtime,transport});
+      const pending=agent.pollOnce();
+      await started;
+      vi.advanceTimersByTime(10_000);await Promise.resolve();await Promise.resolve();
+      vi.advanceTimersByTime(10_000);await Promise.resolve();await Promise.resolve();
+      await expect(pending).rejects.toMatchObject({status:409});
+      expect(transport.results).toHaveLength(0);
+      await agent.close();
+    } finally {vi.useRealTimers()}
   });
 
   it("replays a durable receipt after disconnect without repeating the effect", async () => {
@@ -183,5 +253,41 @@ describe("durable fake agent", () => {
 
     expect(runtime.effectsFor("same")).toEqual(["start", "restart"]);
     expect(runtime.effectsFor("other")).toEqual(["stop"]);
+  });
+
+  it("stops before the next runtime side effect when progress loses the command fence", async () => {
+    const dir=await mkdtemp(join(tmpdir(),"botroost-agent-"));
+    const runtime=new FakeRuntime();
+    const transport=new MemoryTransport(command);
+    transport.progressFailure={at:2,error:new ControlPlaneRequestError(409)};
+    const agent=await DurableFakeAgent.open({journalPath:join(dir,"journal"),runtime,transport});
+    await expect(agent.pollOnce()).rejects.toThrow("control plane request failed: 409");
+    expect(runtime.effectsFor("endpoint-1")).toEqual([]);
+    expect(transport.results).toHaveLength(0);
+    await agent.close();
+  });
+
+  it("keeps rolling compatibility when progress reporting is unavailable", async () => {
+    const dir=await mkdtemp(join(tmpdir(),"botroost-agent-"));
+    const runtime=new FakeRuntime();
+    const transport=new MemoryTransport(command);
+    transport.progressFailure={at:2,error:new ControlPlaneRequestError(404)};
+    const agent=await DurableFakeAgent.open({journalPath:join(dir,"journal"),runtime,transport});
+    await agent.pollOnce();
+    expect(runtime.effectsFor("endpoint-1")).toEqual(["start"]);
+    expect(transport.results).toHaveLength(1);
+    await agent.close();
+  });
+
+  it("reports a retrying phase when a runtime attempt fails", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "botroost-agent-"));
+    const runtime = new FakeRuntime();
+    runtime.apply = async () => { throw new Error("fixture runtime failure"); };
+    const transport = new MemoryTransport(command);
+    const agent = await DurableFakeAgent.open({journalPath:join(dir,"agent-journal.jsonl"),runtime,transport});
+    await expect(agent.pollOnce()).rejects.toThrow("fixture runtime failure");
+    expect(transport.progresses.at(-1)).toMatchObject({phase:"retrying",message:"Runtime attempt failed; waiting for automatic retry"});
+    expect(transport.results).toHaveLength(0);
+    await agent.close();
   });
 });

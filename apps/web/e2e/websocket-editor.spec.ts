@@ -1,16 +1,17 @@
 import {mkdir} from 'node:fs/promises';
 import {test,expect,type Page} from '@playwright/test';
 
-const endpoint={id:'fixture-endpoint',name:'Campux production',providerId:'napcat',node:{id:'fixture-node',name:'jp09-napcat-reenroll',provider:'napcat'},generation:4,desired:{state:'running'},status:{node:'online',runtime:'ready',provider:'available',protocol:'connected',convergence:'converged'},activeOperationId:null,metadata:{qq:{uin:'960164003',online:true}}};
+const endpoint={id:'fixture-endpoint',name:'Campux production',providerId:'napcat',node:{id:'fixture-node',name:'jp09-napcat-reenroll',provider:'napcat'},generation:4,desired:{state:'running'},status:{node:'online',runtime:'ready',provider:'available',protocol:'connected',convergence:'converged'},activeOperationId:null,activeOperation:null,metadata:{qq:{uin:'960164003',online:true}}};
 const session={user:{id:'fixture-user',email:'ops@example.test',name:'Rock'},workspace:{id:'fixture-workspace',name:'Production'},role:'owner',permissions:['workspace:read','endpoint:read','endpoint:create','endpoint:delete','endpoint:start','endpoint:stop','endpoint:restart','node:read','node:create','provider:read','operation:read','audit:read','member:read','settings:read'],capabilities:{operations:['create','delete','start','stop','restart'],providers:{napcat:{enabled:true}}}};
 
-async function mockProduct(page:Page,{failSave=false,failDelete=false,loggedIn=true,directorySize=1}:{failSave?:boolean;failDelete?:boolean;loggedIn?:boolean;directorySize?:number}={}){
+async function mockProduct(page:Page,{failSave=false,failDelete=false,loggedIn=true,directorySize=1,startupProgress=false}:{failSave?:boolean;failDelete?:boolean;loggedIn?:boolean;directorySize?:number;startupProgress?:boolean}={}){
   const friends=Array.from({length:directorySize},(_,index)=>({user_id:index+7,nickname:directorySize===1?'Friend':`Friend ${index+1}`}));
   let statusRequests=0;
   let endpointRequests=0;
   let deleteRequests=0;
   let deletePayload:unknown;
   let endpointDeleted=false;
+  let startupStartedAt:number|undefined;
   let failStatus=false;
   await page.route('**/api/v1/**',async route=>{const path=new URL(route.request().url()).pathname;let body:unknown={},status=200;
     if(path.endsWith('/auth/session'))body=session;
@@ -24,7 +25,7 @@ async function mockProduct(page:Page,{failSave=false,failDelete=false,loggedIn=t
       else{const sampledAt=new Date().toISOString();body={qq:loggedIn?{uin:'960164003',online:true}:null,onebot:{...(loggedIn?{loginInfo:{user_id:960164003},status:{online:true},version:{app_name:'NapCat.OneBot11',app_version:'4.18.19'},probes:{get_status:{ok:true,durationMs:5,error:null},get_login_info:{ok:true,durationMs:6,error:null},get_version_info:{ok:true,durationMs:7,error:null},get_friend_list:{ok:true,durationMs:841,error:null},get_group_list:{ok:true,durationMs:18,error:null}},directory:{observedAt:'2026-08-21T09:00:00.000Z',friends:{count:directorySize,truncated:false,observedAt:'2026-08-21T09:00:00.000Z',items:friends,probe:{ok:true,durationMs:841,error:null}},groups:{count:1,truncated:false,observedAt:'2026-08-21T09:00:00.000Z',items:[{group_id:8,group_name:'Group'}],probe:{ok:true,durationMs:18,error:null}}}}:{}),config:{websocketClients:[{name:'Campux bridge',enable:true,url:'wss://app.campux.top/onebot/v11/ws',messagePostFormat:'array',reportSelfMessage:false,debug:false,heartInterval:30000,reconnectInterval:5000,tokenConfigured:true}],websocketServers:[]}},traffic:{status:'ok',source:'napcat.container_logs',privacy:'aggregate_only',observedAt:sampledAt,sampleIntervalSeconds:5,oneMinute:{inbound:1,outbound:1,total:2,bytes:196},fiveMinutes:{inbound:4,outbound:2,total:6,bytes:588},buckets:[{startedAt:'2026-08-21T08:59:10.000Z',inbound:0,outbound:0,total:0},{startedAt:'2026-08-21T08:59:20.000Z',inbound:1,outbound:0,total:1},{startedAt:'2026-08-21T08:59:30.000Z',inbound:0,outbound:1,total:1},{startedAt:'2026-08-21T08:59:40.000Z',inbound:2,outbound:0,total:2},{startedAt:'2026-08-21T08:59:50.000Z',inbound:0,outbound:0,total:0},{startedAt:'2026-08-21T09:00:00.000Z',inbound:1,outbound:1,total:2}],recent:[{at:'2026-08-21T09:00:04.000Z',direction:'inbound',scope:'group',bytes:120},{at:'2026-08-21T09:00:01.000Z',direction:'outbound',scope:'private',bytes:76}],recentConnections:[{at:'2026-08-21T09:00:03.000Z',transport:'websocket-client',status:'reconnecting'}]},freshness:{fresh:true,observationAt:sampledAt,nodeHeartbeatAt:sampledAt,checkedAt:sampledAt,staleAfterSeconds:15}};}
     }
     else if(path.endsWith('/endpoints/fixture-endpoint/napcat/login-qrcode'))body={qrcode:'https://example.test/qq-login'};
-    else if(path.endsWith('/endpoints/fixture-endpoint')){if(endpointDeleted){status=404;body={error:{message:'Unavailable'}}}else body=endpoint;}
+    else if(path.endsWith('/endpoints/fixture-endpoint')){if(endpointDeleted){status=404;body={error:{message:'Unavailable'}}}else if(startupProgress){startupStartedAt??=Date.now();const stageIndex=Math.floor((Date.now()-startupStartedAt)/1500),stages=[{phase:'inspecting-runtime',percent:25,message:'Inspecting existing runtime'},{phase:'creating-container',percent:55,message:'Creating NapCat container'},{phase:'probing-provider',percent:85,message:'Waiting for NapCat runtime readiness'}];if(stageIndex<stages.length){const progress={...stages[stageIndex]!,sequence:stageIndex+1,updatedAt:new Date().toISOString()};body={...endpoint,activeOperationId:'start-operation',activeOperation:{id:'start-operation',action:'start',status:'running',progress,createdAt:new Date(startupStartedAt).toISOString(),updatedAt:new Date().toISOString()}}}else body=endpoint;}else body=endpoint;}
     else if(path.endsWith('/nodes/enrollment-tokens')&&route.request().method()==='POST')body={token:'fixture-enrollment-token'};
     else if(path.endsWith('/workspaces/current/settings/alerts'))body={graceSeconds:180,targets:[],defaults:{offlineTargetIds:[],recoveryTargetIds:[]},endpoints:[{id:endpoint.id,name:endpoint.name,providerId:endpoint.providerId,offlineTargetIds:[],recoveryTargetIds:[]}]};
     else if(path.endsWith('/nodes'))body={items:[endpoint.node],page:1,pageSize:25,total:1};
@@ -106,6 +107,22 @@ test('endpoint lifecycle actions live in the title row instead of Settings',asyn
   await expect(settings.getByRole('button',{name:'Start'})).toHaveCount(0);
   await expect(settings.getByRole('button',{name:'Stop'})).toHaveCount(0);
   await expect(settings.getByRole('button',{name:'Restart'})).toHaveCount(0);
+});
+
+test('shows live endpoint startup phases and clears the activity after completion',async({page},testInfo)=>{
+  await page.setViewportSize({width:320,height:844});
+  await mockProduct(page,{startupProgress:true});
+  await page.goto('/endpoints/fixture-endpoint');
+  const activity=page.getByRole('status',{name:'Starting endpoint'});
+  await expect(activity.getByText('Inspecting existing runtime')).toBeVisible();
+  await expect(activity.getByRole('progressbar',{name:'Operation progress'})).toHaveJSProperty('value',25);
+  await expect(activity.getByText('Creating NapCat container')).toBeVisible({timeout:2500});
+  await expect(activity.getByRole('progressbar',{name:'Operation progress'})).toHaveJSProperty('value',55);
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth===document.documentElement.clientWidth)).toBe(true);
+  const detailLinkBox=await activity.getByRole('link',{name:'View operation details'}).boundingBox(),tabbarBox=await page.locator('.mobile-tabbar').boundingBox();
+  expect(detailLinkBox).not.toBeNull();expect(tabbarBox).not.toBeNull();expect(detailLinkBox!.y+detailLinkBox!.height).toBeLessThanOrEqual(tabbarBox!.y);
+  await page.screenshot({path:testInfo.outputPath('endpoint-startup-progress-320.png'),fullPage:true});
+  await expect(activity).toBeHidden({timeout:5000});
 });
 
 test('create endpoint draft survives sidebar status polling',async({page},testInfo)=>{

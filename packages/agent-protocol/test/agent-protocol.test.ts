@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   AgentHeartbeatRequestSchema,
+  CommandProgressRequestSchema,
   RuntimeCommandSchema,
   redactTransportSecrets,
 } from "../src/index.js";
@@ -72,6 +73,13 @@ describe("agent protocol", () => {
         runtimeRequest: { ...command.runtimeRequest, command: ["sh"] },
       }),
     ).toThrow();
+  });
+
+  it("strictly bounds command progress reports", () => {
+    const progress={sessionId:"session-1",operationId:"op-1",endpointId:"ep-1",generation:2,connectionEpoch:4,attempt:2,sequence:3,phase:"creating-container",percent:55,message:"Creating NapCat container"} as const;
+    expect(CommandProgressRequestSchema.parse(progress)).toEqual(progress);
+    expect(()=>CommandProgressRequestSchema.parse({...progress,percent:101})).toThrow();
+    expect(()=>CommandProgressRequestSchema.parse({...progress,secret:"must-not-be-accepted"})).toThrow();
   });
 
   it("redacts bearer, enrollment token, and URL credentials from logs", () => {

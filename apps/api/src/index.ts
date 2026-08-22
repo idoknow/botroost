@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { z, ZodError } from "zod";
 import { AuthService, can, requireSameOriginAndCsrf } from "@botroost/auth";
 import { DatabaseError, digest, PostgresDatabase } from "@botroost/database";
-import { AgentEnrollmentRequestSchema, AgentHeartbeatRequestSchema, ClaimCommandRequestSchema, CommandReceiptRequestSchema, CommandResultRequestSchema } from "@botroost/agent-protocol";
+import { AgentEnrollmentRequestSchema, AgentHeartbeatRequestSchema, ClaimCommandRequestSchema, CommandProgressRequestSchema, CommandReceiptRequestSchema, CommandResultRequestSchema } from "@botroost/agent-protocol";
 import { LoginAttemptLimiter } from "./security-policy.js";
 
 const credentials = z.object({ email: z.string().trim().email(), password: z.string().min(12).max(4096) });
@@ -122,6 +122,7 @@ export function buildApi(options: ApiOptions = {}): FastifyInstance {
   api.post("/api/v1/agent/heartbeat", async request => { const node = await agentNode(request); const body = AgentHeartbeatRequestSchema.parse(request.body); return db.heartbeat(node.id, body); });
   api.post("/api/v1/agent/commands/claim", async request => { const node = await agentNode(request); ClaimCommandRequestSchema.parse(request.body ?? { limit: 1 }); return { command: await db.claimAgentCommand(node.id, z.string().min(1).max(200).parse(request.headers["x-agent-session-id"])) }; });
   api.post("/api/v1/agent/commands/:id/receipt", async (request, reply) => { const node = await agentNode(request); await db.recordAgentReceipt(node.id, idParams.parse(request.params).id, CommandReceiptRequestSchema.parse(request.body)); return reply.code(202).send({ accepted: true }); });
+  api.post("/api/v1/agent/commands/:id/progress", async (request, reply) => { const node = await agentNode(request); await db.recordAgentProgress(node.id, idParams.parse(request.params).id, CommandProgressRequestSchema.parse(request.body)); return reply.code(202).send({ accepted: true }); });
   api.post("/api/v1/agent/commands/:id/result", async (request, reply) => { const node = await agentNode(request); await db.recordAgentResult(node.id, idParams.parse(request.params).id, CommandResultRequestSchema.parse(request.body)); return reply.code(202).send({ accepted: true }); });
   api.get("/api/v1/endpoints", async request => page(await db.endpoints((await principal(request)).workspaceId)));
   api.post("/api/v1/endpoints", async (request, reply) => { const current = await authorize(request, "operate"); const body = endpointInput.parse(request.body); if (!["fake","napcat"].includes(body.providerId)) throw fail("provider unavailable", 409); if(body.providerId==="napcat"&&!body.nodeId)throw fail("NapCat endpoints require an outbound node",409); return reply.code(201).send(await db.createEndpoint(current.workspaceId, body.name, body.providerId, body.nodeId)); });

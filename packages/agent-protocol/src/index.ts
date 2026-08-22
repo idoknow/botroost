@@ -72,8 +72,29 @@ export const CommandReceiptRequestSchema = z.strictObject({
   generation: z.number().int().nonnegative(),
   connectionEpoch: z.number().int().nonnegative(),
 });
+export const CommandProgressPhaseSchema = z.enum([
+  "agent-acknowledged",
+  "inspecting-runtime",
+  "preparing-runtime",
+  "creating-container",
+  "starting-container",
+  "stopping-container",
+  "removing-runtime",
+  "applying-configuration",
+  "retrying",
+  "probing-provider",
+]);
+export const CommandProgressRequestSchema = CommandReceiptRequestSchema.extend({
+  endpointId: id,
+  attempt: z.number().int().positive(),
+  sequence: z.number().int().positive(),
+  phase: CommandProgressPhaseSchema,
+  percent: z.number().int().min(1).max(99),
+  message: z.string().min(1).max(200),
+}).strict();
 export const CommandResultRequestSchema = CommandReceiptRequestSchema.extend({
   endpointId: id,
+  attempt: z.number().int().positive().optional(),
   outcome: z.enum(["succeeded", "failed", "unknown"]),
   error: z.string().min(1).max(2000).optional(),
   observations: layered,
@@ -113,4 +134,5 @@ export function redactTransportSecrets(value: unknown): unknown {
 export type AgentEnrollmentRequest = z.infer<typeof AgentEnrollmentRequestSchema>;
 export type AgentHeartbeatRequest = z.infer<typeof AgentHeartbeatRequestSchema>;
 export type RuntimeCommand = z.infer<typeof RuntimeCommandSchema>;
+export type CommandProgressRequest = z.infer<typeof CommandProgressRequestSchema>;
 export type CommandResultRequest = z.infer<typeof CommandResultRequestSchema>;
