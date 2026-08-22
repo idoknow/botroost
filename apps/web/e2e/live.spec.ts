@@ -115,8 +115,9 @@ test.describe('live operator journey',()=>{
       await expect(page).toHaveURL(operationUrl);
       await expect(page.getByText('succeeded',{exact:true})).toBeVisible();
 
-      await page.getByRole('link',{name:'Activity'}).click();
-      await page.getByRole('tab',{name:/Audit log/}).click();
+      await page.getByRole('link',{name:/^(Activity|Audit)$/}).click();
+      const auditTab=page.getByRole('tab',{name:/Audit log/});
+      if(await auditTab.count())await auditTab.click();
       await expect(page.getByRole('heading',{name:'Audit events'})).toBeVisible();
       const queuedAudit=await page.evaluate(async operationId=>{
         const response=await fetch('/api/v1/audit');
