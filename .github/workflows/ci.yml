@@ -52,6 +52,8 @@ jobs:
           BOTROOST_PUBLIC_ORIGIN: https://console.example.test
           BOOTSTRAP_EMAIL: owner@example.test
           DOCKER_GID: "999"
+          RESEND_API_KEY: "test-compose-validation-only"
+          ALERT_EMAIL_FROM: "Botroost CI <ci@example.test>"
         run: |
           mkdir -p deploy/secrets
           touch deploy/secrets/postgres_password deploy/secrets/credential_master_key deploy/secrets/bootstrap_password deploy/secrets/enrollment_token
