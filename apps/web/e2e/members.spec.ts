@@ -24,10 +24,16 @@ async function mockWorkspace(page:Page,role:Role='owner'){
 }
 
 test('owner completes the workspace member lifecycle',async({page},testInfo)=>{
+ await page.setViewportSize({width:320,height:760});
  const{mutations}=await mockWorkspace(page);
  await page.goto('/workspace');
  await expect(page.getByRole('link',{name:'Members'})).toHaveAttribute('data-state','active');
  await page.getByRole('button',{name:'Add member'}).click();
+ const addDialog=page.getByRole('dialog',{name:'Add member'});
+ await expect(addDialog.getByText('Create a workspace account and choose its initial role.')).toBeVisible();
+ await expect(addDialog.locator('[data-slot="dialog-header"]')).toBeVisible();
+ await expect(addDialog.locator('.modal-body')).toBeVisible();
+ await expect(addDialog.locator('[data-slot="dialog-footer"]')).toBeVisible();
  await page.getByLabel('Email').fill('new@example.com');
  await page.getByLabel('Initial password').fill('initial member password');
  await page.getByLabel('Role').selectOption('operator');
@@ -37,6 +43,9 @@ test('owner completes the workspace member lifecycle',async({page},testInfo)=>{
 
  const row=page.getByRole('row',{name:/new@example.com operator/});
  await row.getByRole('button',{name:'Edit'}).click();
+ const editDialog=page.getByRole('dialog',{name:'Edit member'});
+ await expect(editDialog.getByText('Update this member’s email and workspace role.')).toBeVisible();
+ await expect(editDialog.locator('[data-slot="dialog-footer"]')).toBeVisible();
  await page.getByLabel('Email').fill('renamed@example.com');
  await page.getByLabel('Role').selectOption('admin');
  await page.getByRole('button',{name:'Save changes'}).click();
@@ -44,11 +53,17 @@ test('owner completes the workspace member lifecycle',async({page},testInfo)=>{
  expect(mutations[1]).toMatchObject({method:'PATCH',body:{email:'renamed@example.com',role:'admin'}});
 
  await page.getByRole('row',{name:/renamed@example.com admin/}).getByRole('button',{name:'Delete'}).click();
- await expect(page.getByRole('dialog',{name:'Delete member'})).toContainText('renamed@example.com');
- await page.getByRole('button',{name:'Delete member',exact:true}).click();
+ const deleteDialog=page.getByRole('dialog',{name:'Delete member'});
+ await expect(deleteDialog).toContainText('renamed@example.com');
+ await expect(deleteDialog.getByText('Revoke this member’s access to the workspace.')).toBeVisible();
+ await expect(deleteDialog.locator('[data-slot="dialog-footer"]')).toBeVisible();
+ await expect(deleteDialog.getByRole('button',{name:'Delete member',exact:true})).toHaveAttribute('data-variant','destructive');
+ await deleteDialog.getByRole('button',{name:'Delete member',exact:true}).click();
  await expect(page.getByRole('dialog',{name:'Delete member'})).toBeHidden();
  await expect(page.getByText('renamed@example.com')).toHaveCount(0);
  expect(mutations[2]).toMatchObject({method:'DELETE',path:'/workspaces/current/members/member-id'});
+ const overflow=await page.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);
+ expect(overflow).toBeLessThanOrEqual(0);
  await page.screenshot({path:testInfo.outputPath('workspace-members.png'),fullPage:true});
 });
 

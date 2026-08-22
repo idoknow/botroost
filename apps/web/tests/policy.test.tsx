@@ -8,6 +8,8 @@ describe('console policies',()=>{
   expect(actionAvailability('start',{permissions:[],capabilities:{operations:['start']},activeOperationId:null}).visible).toBe(false);
   expect(actionAvailability('start',{permissions:['endpoint:start'],capabilities:{operations:[]},activeOperationId:null}).visible).toBe(false);
   expect(actionAvailability('start',{permissions:['endpoint:start'],capabilities:{operations:['start']},activeOperationId:'op'}).disabled).toBe(true);
+  expect(actionAvailability('delete',{permissions:['endpoint:delete'],capabilities:{operations:['delete']},activeOperationId:null})).toEqual({visible:true,disabled:false});
+  expect(actionAvailability('delete',{permissions:[],capabilities:{operations:['delete']},activeOperationId:null}).visible).toBe(false);
  });
  it('license-gates NapCat and enables fake provider',()=>{
   expect(actionAvailability('create',{permissions:['endpoint:create'],capabilities:{operations:['create'],providers:{napcat:{enabled:false,reason:'License required'}}},activeOperationId:null},'napcat')).toEqual({visible:true,disabled:true,reason:'License required'});

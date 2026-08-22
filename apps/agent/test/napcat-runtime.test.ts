@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { access, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -33,6 +33,8 @@ class RecordingDocker implements DockerClient {
   restarted: string[] = [];
   execs: { container: string; args: string[] }[] = [];
   removes: string[] = [];
+  hostStateRemovals: { root: string; endpointId: string; image: string }[] = [];
+  hostStateRemovalFailures = 0;
   inspected: string[] = [];
   async inspect(name: string): Promise<DockerInspectResult | null> {
     this.inspected.push(name);
@@ -43,6 +45,10 @@ class RecordingDocker implements DockerClient {
     return { id: "container-id" };
   }
   async remove(name: string) { this.removes.push(name); }
+  async removeHostEndpoint(root: string, endpointId: string, image: string) {
+    this.hostStateRemovals.push({root,endpointId,image});
+    if(this.hostStateRemovalFailures-->0)throw new Error("host state cleanup failed");
+  }
   async start(name: string) {
     this.started.push(name);
   }
@@ -109,6 +115,79 @@ describe("NapCat runtime", () => {
     ]);
     expect(JSON.stringify(docker.created[0])).not.toContain("/var/run/docker.sock");
     expect(docker.started).toEqual(["botroost-napcat-33333333-3333-4333-8333-333333333333"]);
+  });
+
+  it("observes an existing protocol container after agent restart without starting, restarting, recreating, or removing it", async () => {
+    const docker = new RecordingDocker();
+    const root = await mkdtemp(join(tmpdir(), "botroost-napcat-reopen-"));
+    await new NapCatRuntime({ docker, stateDirectory: root, napcatToken: "operator-token" }).apply("runtime:initial", baseCommand);
+    docker.created.length = 0;
+    docker.started.length = 0;
+    docker.restarted.length = 0;
+    docker.removes.length = 0;
+    docker.inspect = async name => ({ id: "container-id", name, image: NAPCAT_IMAGE, state: "running", ipAddress: "172.18.0.10", labels: { "botroost.workspace_id": baseCommand.workspaceId, "botroost.endpoint_id": baseCommand.endpointId, "botroost.provider": "napcat" } });
+    const reopened = new NapCatRuntime({
+      docker,
+      stateDirectory: root,
+      napcatToken: "operator-token",
+      fetcher: async url => {
+        const path = new URL(String(url)).pathname;
+        if (path === "/api/auth/login") return new Response(JSON.stringify({ code: 0, data: { Credential: "credential" } }));
+        if (path === "/api/QQLogin/GetQQLoginInfo") return new Response(JSON.stringify({ code: 0, data: { online: false } }));
+        if (path === "/api/QQLogin/GetQQLoginQrcode") return new Response(JSON.stringify({ code: 0, data: { qrcode: "qr" } }));
+        throw new Error(`unexpected request ${path}`);
+      },
+    });
+
+    await reopened.observations();
+
+    expect(docker.created).toEqual([]);
+    expect(docker.started).toEqual([]);
+    expect(docker.restarted).toEqual([]);
+    expect(docker.removes).toEqual([]);
+  });
+
+  it("deletes only an owned endpoint container, forgets its command, and removes its persisted state", async () => {
+    const docker = new RecordingDocker();
+    const root = await mkdtemp(join(tmpdir(), "botroost-napcat-delete-"));
+    const hostRoot = "/var/lib/botroost/agent/napcat";
+    const runtime = new NapCatRuntime({ docker, stateDirectory: root, hostStateDirectory: hostRoot, napcatToken: "operator-token" });
+    await runtime.apply("runtime:initial", baseCommand);
+    const marker = join(root, baseCommand.endpointId, "qq", "marker");
+    await writeFile(marker, "state");
+    docker.inspect = async name => ({ id: "container-id", name, image: NAPCAT_IMAGE, state: "running", ipAddress: "172.18.0.10", labels: { "botroost.workspace_id": baseCommand.workspaceId, "botroost.endpoint_id": baseCommand.endpointId, "botroost.provider": "napcat" } });
+    const deleting = { ...baseCommand, commandId: "cmd-delete", operationId: "op-delete", generation: 2, action: "delete" } as unknown as RuntimeCommand;
+
+    const result = await runtime.apply("runtime:delete", deleting);
+
+    expect(docker.removes).toEqual([`botroost-napcat-${baseCommand.endpointId}`]);
+    expect(docker.hostStateRemovals).toEqual([{root:hostRoot,endpointId:baseCommand.endpointId,image:NAPCAT_IMAGE}]);
+    await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(result.observations).toMatchObject({ runtime: "stopped", protocol: "disconnected", convergence: "converged" });
+    expect(await runtime.observations()).toEqual([]);
+    expect(await new NapCatRuntime({ docker, stateDirectory: root, napcatToken: "operator-token" }).observations()).toEqual([]);
+  });
+
+  it("retries host-state cleanup after the protocol container was already removed", async () => {
+    const docker = new RecordingDocker();
+    docker.hostStateRemovalFailures=1;
+    const root=await mkdtemp(join(tmpdir(),"botroost-napcat-delete-retry-"));
+    const hostRoot="/var/lib/botroost/agent/napcat";
+    const runtime=new NapCatRuntime({docker,stateDirectory:root,hostStateDirectory:hostRoot,napcatToken:"operator-token"});
+    await runtime.apply("runtime:initial",baseCommand);
+    let present=true;
+    docker.inspect=async name=>present?{id:"container-id",name,image:NAPCAT_IMAGE,state:"running",ipAddress:"172.18.0.10",labels:{"botroost.workspace_id":baseCommand.workspaceId,"botroost.endpoint_id":baseCommand.endpointId,"botroost.provider":"napcat"}}:null;
+    docker.remove=async name=>{docker.removes.push(name);present=false};
+    const deleting={...baseCommand,commandId:"cmd-delete-retry",operationId:"op-delete-retry",generation:2,action:"delete"} as unknown as RuntimeCommand;
+
+    await expect(runtime.apply("runtime:delete-first",deleting)).rejects.toThrow("host state cleanup failed");
+    expect(docker.removes).toEqual([`botroost-napcat-${baseCommand.endpointId}`]);
+    expect((await runtime.observations()).map(item=>item.endpointId)).toEqual([baseCommand.endpointId]);
+
+    await expect(runtime.apply("runtime:delete-retry",deleting)).resolves.toMatchObject({state:"stopped",metadata:{deleted:true}});
+    expect(docker.removes).toHaveLength(1);
+    expect(docker.hostStateRemovals).toHaveLength(2);
+    expect(await runtime.observations()).toEqual([]);
   });
 
   it("uses daemon-visible host paths for child-container persistence", async () => {

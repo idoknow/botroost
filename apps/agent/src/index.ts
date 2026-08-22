@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { FileAgentJournal } from "@botroost/agent-journal";
@@ -66,6 +66,7 @@ export interface DockerClient {
   inspect(name: string): Promise<DockerInspectResult | null>;
   create(input: DockerCreateInput): Promise<{ id: string }>;
   remove(name: string): Promise<void>;
+  removeHostEndpoint(root: string, endpointId: string, image: string): Promise<void>;
   start(name: string): Promise<void>;
   stop(name: string): Promise<void>;
   restart(name: string): Promise<void>;
@@ -121,6 +122,18 @@ export class DockerCliClient implements DockerClient {
     return { id: stdout.trim() };
   }
   async remove(name: string) { await this.docker(["rm", "-f", name]); }
+  async removeHostEndpoint(root: string, endpointId: string, image: string) {
+    const source=resolve(root);
+    if(source===sep||!source.startsWith(sep)||/[\0,\r\n]/.test(source))throw new Error("host state root is invalid");
+    if(!endpointIdPattern.test(endpointId))throw new Error("endpoint identifier is invalid");
+    if(image!==NAPCAT_IMAGE)throw new Error("cleanup image is not allowlisted");
+    await this.docker([
+      "run","--rm","--network","none","--read-only","--security-opt","no-new-privileges",
+      "--cap-drop","ALL","--cap-add","DAC_OVERRIDE","--pids-limit","32","--memory","64m","--cpus","0.25",
+      "--mount",`type=bind,src=${source},dst=/state`,"--entrypoint","/bin/rm",image,
+      "-rf","--",`/state/${endpointId}`,
+    ]);
+  }
   async start(name: string) { await this.docker(["start", name]); }
   async stop(name: string) { await this.docker(["stop", "--time", "20", name]); }
   async restart(name: string) { await this.docker(["restart", "--time", "20", name]); }
@@ -287,7 +300,7 @@ export class FakeRuntime {
       const list = this.effects.get(command.endpointId) ?? [];
       list.push(command.action);
       this.effects.set(command.endpointId, list);
-      const state = command.action === "stop" ? "stopped" : "running";
+      const state = command.action === "stop" || command.action === "delete" ? "stopped" : "running";
       this.states.set(command.endpointId, state);
       this.effectRecords.set(effectId,{status:"applied",endpointId:command.endpointId,action:command.action,state});
       await this.persist();
@@ -352,11 +365,16 @@ export class NapCatRuntime {
     await writeFile(temporary, `${JSON.stringify([...this.commands.values()])}\n`, { mode: 0o600 });
     await rename(temporary, this.commandStatePath());
   }
-  private endpointDirectory(endpointId: string, child: "qq" | "config") {
+  private endpointRoot(endpointId: string) {
     if (!endpointIdPattern.test(endpointId)) throw new Error("endpoint identifier is invalid");
     const root = resolve(this.options.stateDirectory);
-    const path = resolve(root, endpointId, child);
+    const path = resolve(root, endpointId);
     if (!path.startsWith(`${root}${sep}`)) throw new Error("endpoint storage path is invalid");
+    return path;
+  }
+  private endpointDirectory(endpointId: string, child: "qq" | "config") {
+    const path = resolve(this.endpointRoot(endpointId), child);
+    if (!path.startsWith(`${this.endpointRoot(endpointId)}${sep}`)) throw new Error("endpoint storage path is invalid");
     return path;
   }
   private hostEndpointDirectory(endpointId: string, child: "qq" | "config") {
@@ -391,6 +409,21 @@ export class NapCatRuntime {
     const docker = this.docker();
     const desiredImage = typeof command.metadata.image === "string" ? command.metadata.image : NAPCAT_IMAGE;
     const existing = await docker.inspect(name);
+    if(command.action==="delete"){
+      if(existing&&(existing.labels["botroost.workspace_id"]!==command.workspaceId||existing.labels["botroost.endpoint_id"]!==command.endpointId||existing.labels["botroost.provider"]!=="napcat"))throw new Error("NapCat container ownership check failed");
+      if(existing)await docker.remove(name);
+      await docker.removeHostEndpoint(resolve(this.options.hostStateDirectory??this.options.stateDirectory),command.endpointId,desiredImage);
+      await rm(this.endpointRoot(command.endpointId),{recursive:true,force:true});
+      this.commands.delete(command.endpointId);
+      this.snapshotCache.delete(command.endpointId);
+      this.directoryCache.delete(command.endpointId);
+      this.webCredentials.delete(command.endpointId);
+      this.trafficAccumulators.delete(command.endpointId);
+      this.trafficCache.delete(command.endpointId);
+      this.trafficLastSuccessAt.delete(command.endpointId);
+      await this.persistCommands();
+      return{state:"stopped",observations:{node:"online",runtime:"stopped",provider:"unavailable",protocol:"disconnected",convergence:"converged"},metadata:{deleted:true}};
+    }
     if(command.action==="read-container-logs"){
       if(!existing||existing.labels["botroost.workspace_id"]!==command.workspaceId||existing.labels["botroost.endpoint_id"]!==command.endpointId||existing.labels["botroost.provider"]!=="napcat")throw new Error("NapCat container ownership check failed");
       const tail=Number(command.metadata.logTail),sinceSeconds=Number(command.metadata.logSinceSeconds);
@@ -732,7 +765,7 @@ export class DurableFakeAgent {
         outcome: "succeeded",
         observations: applied?.observations ?? {
           node: "online",
-          runtime: command.action === "stop" ? "stopped" : "ready",
+          runtime: command.action === "stop" || command.action === "delete" ? "stopped" : "ready",
           provider: "available",
           protocol: "connected",
           convergence: "converged",

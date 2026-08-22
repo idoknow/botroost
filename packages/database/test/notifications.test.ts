@@ -12,8 +12,10 @@ describe("notification durability schema",()=>{
   it("does not lock endpoint rows while reconciling notification state",()=>{
     expect(PostgresDatabase.prototype.reconcileNapcatNotifications.toString()).not.toContain("FOR UPDATE OF e");
   });
-  it("ships a migration that permits OneBot websocket update operations",()=>{
+  it("ships migrations that permit OneBot websocket updates and durable endpoint deletion",()=>{
     expect(migrationSql).toContain("0008_onebot_websocket_management");
     expect(migrationSql).toContain("update-onebot-websockets");
+    expect(migrationSql).toContain("0010_endpoint_deletion");
+    expect(migrationSql).toContain("'delete'");
   });
 });

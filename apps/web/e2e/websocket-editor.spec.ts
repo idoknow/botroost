@@ -1,16 +1,22 @@
-import {expect,test,type Page} from '@playwright/test';
+import {mkdir} from 'node:fs/promises';
+import {test,expect,type Page} from '@playwright/test';
 
-const endpoint={id:'fixture-endpoint',name:'Campux production',providerId:'napcat',node:{id:'fixture-node',name:'jp09-napcat-reenroll'},generation:4,desired:{state:'running'},status:{node:'online',runtime:'ready',provider:'available',protocol:'connected',convergence:'converged'},activeOperationId:null,metadata:{qq:{uin:'960164003',online:true}}};
-const session={user:{id:'fixture-user',email:'ops@example.test',name:'Rock'},workspace:{id:'fixture-workspace',name:'Production'},role:'owner',permissions:['workspace:read','endpoint:read','endpoint:create','endpoint:start','endpoint:stop','endpoint:restart','node:read','node:create','provider:read','operation:read','audit:read','member:read','credential:read','settings:read'],capabilities:{operations:['create','start','stop','restart'],providers:{napcat:{enabled:true}}}};
+const endpoint={id:'fixture-endpoint',name:'Campux production',providerId:'napcat',node:{id:'fixture-node',name:'jp09-napcat-reenroll',provider:'napcat'},generation:4,desired:{state:'running'},status:{node:'online',runtime:'ready',provider:'available',protocol:'connected',convergence:'converged'},activeOperationId:null,metadata:{qq:{uin:'960164003',online:true}}};
+const session={user:{id:'fixture-user',email:'ops@example.test',name:'Rock'},workspace:{id:'fixture-workspace',name:'Production'},role:'owner',permissions:['workspace:read','endpoint:read','endpoint:create','endpoint:delete','endpoint:start','endpoint:stop','endpoint:restart','node:read','node:create','provider:read','operation:read','audit:read','member:read','credential:read','settings:read'],capabilities:{operations:['create','delete','start','stop','restart'],providers:{napcat:{enabled:true}}}};
 
-async function mockProduct(page:Page,{failSave=false,loggedIn=true,directorySize=1}:{failSave?:boolean;loggedIn?:boolean;directorySize?:number}={}){
+async function mockProduct(page:Page,{failSave=false,failDelete=false,loggedIn=true,directorySize=1}:{failSave?:boolean;failDelete?:boolean;loggedIn?:boolean;directorySize?:number}={}){
   const friends=Array.from({length:directorySize},(_,index)=>({user_id:index+7,nickname:directorySize===1?'Friend':`Friend ${index+1}`}));
   let statusRequests=0;
   let endpointRequests=0;
+  let deleteRequests=0;
+  let deletePayload:unknown;
+  let endpointDeleted=false;
   let failStatus=false;
   await page.route('**/api/v1/**',async route=>{const path=new URL(route.request().url()).pathname;let body:unknown={},status=200;
     if(path.endsWith('/auth/session'))body=session;
     else if(path.endsWith('/auth/csrf'))body={csrfToken:'fixture-csrf'};
+    else if(route.request().method()==='DELETE'&&path.endsWith('/endpoints/fixture-endpoint')){deleteRequests+=1;deletePayload=route.request().postDataJSON();if(failDelete){status=500;body={error:{message:'Fixture delete failed'}};}else{status=202;body={id:'delete-operation',endpointId:endpoint.id,action:'delete',status:'queued',generation:5};}}
+    else if(path.endsWith('/operations/delete-operation')){endpointDeleted=true;body={id:'delete-operation',endpointId:endpoint.id,action:'delete',status:'succeeded',generation:5};}
     else if(failSave&&route.request().method()==='PUT'&&path.endsWith('/napcat/onebot/websockets')){status=500;body={error:{message:'Fixture save failed'}};}
     else if(path.endsWith('/endpoints/fixture-endpoint/napcat/status')){
       statusRequests+=1;
@@ -18,13 +24,17 @@ async function mockProduct(page:Page,{failSave=false,loggedIn=true,directorySize
       else{const sampledAt=new Date().toISOString();body={qq:loggedIn?{uin:'960164003',online:true}:null,onebot:{...(loggedIn?{loginInfo:{user_id:960164003},status:{online:true},version:{app_name:'NapCat.OneBot11',app_version:'4.18.19'},probes:{get_status:{ok:true,durationMs:5,error:null},get_login_info:{ok:true,durationMs:6,error:null},get_version_info:{ok:true,durationMs:7,error:null},get_friend_list:{ok:true,durationMs:841,error:null},get_group_list:{ok:true,durationMs:18,error:null}},directory:{observedAt:'2026-08-21T09:00:00.000Z',friends:{count:directorySize,truncated:false,observedAt:'2026-08-21T09:00:00.000Z',items:friends,probe:{ok:true,durationMs:841,error:null}},groups:{count:1,truncated:false,observedAt:'2026-08-21T09:00:00.000Z',items:[{group_id:8,group_name:'Group'}],probe:{ok:true,durationMs:18,error:null}}}}:{}),config:{websocketClients:[{name:'Campux bridge',enable:true,url:'wss://app.campux.top/onebot/v11/ws',messagePostFormat:'array',reportSelfMessage:false,debug:false,heartInterval:30000,reconnectInterval:5000,tokenConfigured:true}],websocketServers:[]}},traffic:{status:'ok',source:'napcat.container_logs',privacy:'aggregate_only',observedAt:sampledAt,sampleIntervalSeconds:5,oneMinute:{inbound:1,outbound:1,total:2,bytes:196},fiveMinutes:{inbound:4,outbound:2,total:6,bytes:588},buckets:[{startedAt:'2026-08-21T08:59:10.000Z',inbound:0,outbound:0,total:0},{startedAt:'2026-08-21T08:59:20.000Z',inbound:1,outbound:0,total:1},{startedAt:'2026-08-21T08:59:30.000Z',inbound:0,outbound:1,total:1},{startedAt:'2026-08-21T08:59:40.000Z',inbound:2,outbound:0,total:2},{startedAt:'2026-08-21T08:59:50.000Z',inbound:0,outbound:0,total:0},{startedAt:'2026-08-21T09:00:00.000Z',inbound:1,outbound:1,total:2}],recent:[{at:'2026-08-21T09:00:04.000Z',direction:'inbound',scope:'group',bytes:120},{at:'2026-08-21T09:00:01.000Z',direction:'outbound',scope:'private',bytes:76}],recentConnections:[{at:'2026-08-21T09:00:03.000Z',transport:'websocket-client',status:'reconnecting'}]},freshness:{fresh:true,observationAt:sampledAt,nodeHeartbeatAt:sampledAt,checkedAt:sampledAt,staleAfterSeconds:15}};}
     }
     else if(path.endsWith('/endpoints/fixture-endpoint/napcat/login-qrcode'))body={qrcode:'https://example.test/qq-login'};
-    else if(path.endsWith('/endpoints/fixture-endpoint'))body=endpoint;
-    else if(path.endsWith('/endpoints')){endpointRequests+=1;body={items:[endpoint,{...endpoint,id:'fixture-needs-login',name:'Needs QQ login',metadata:{qq:{online:false},login:{qrcode:'https://example.test/qq-login'}}},{...endpoint,id:'fixture-unreachable',name:'Unreachable endpoint',status:{...endpoint.status,node:'offline'},metadata:{qq:{uin:'10000',online:true}}},{...endpoint,id:'fixture-unknown',name:'Unknown QQ status',metadata:{qq:{uin:'22222'}}}],page:1,pageSize:25,total:4};}
+    else if(path.endsWith('/endpoints/fixture-endpoint')){if(endpointDeleted){status=404;body={error:{message:'Unavailable'}}}else body=endpoint;}
+    else if(path.endsWith('/nodes/enrollment-tokens')&&route.request().method()==='POST')body={token:'fixture-enrollment-token'};
+    else if(path.endsWith('/nodes'))body={items:[endpoint.node],page:1,pageSize:25,total:1};
+    else if(path.endsWith('/endpoints')){endpointRequests+=1;const items=endpointDeleted?[]:[endpoint,{...endpoint,id:'fixture-needs-login',name:'Needs QQ login',metadata:{qq:{online:false},login:{qrcode:'https://example.test/qq-login'}}},{...endpoint,id:'fixture-unreachable',name:'Unreachable endpoint',status:{...endpoint.status,node:'offline'},metadata:{qq:{uin:'10000',online:true}}},{...endpoint,id:'fixture-unknown',name:'Unknown QQ status',metadata:{qq:{uin:'22222'}}}];body={items,page:1,pageSize:25,total:items.length};}
     else body={items:[],page:1,pageSize:25,total:0};
     await route.fulfill({status,contentType:'application/json',body:JSON.stringify(body)});
   });
-  return {statusRequests:()=>statusRequests,endpointRequests:()=>endpointRequests,failStatus:()=>{failStatus=true}};
+  return {statusRequests:()=>statusRequests,endpointRequests:()=>endpointRequests,deleteRequests:()=>deleteRequests,deletePayload:()=>deletePayload,failStatus:()=>{failStatus=true}};
 }
+
+test.beforeEach(async()=>{await mkdir('test-results/ui-evidence',{recursive:true})});
 
 test('inbound server draft survives background status polling',async({page})=>{
   const {statusRequests}=await mockProduct(page);
@@ -52,7 +62,7 @@ test('inbound server draft survives background status polling',async({page})=>{
   expect(new Set(boxes.map(box=>Math.round(box!.y))).size).toBe(1);
   expect(Math.max(...boxes.map(box=>box!.width))-Math.min(...boxes.map(box=>box!.width))).toBeLessThan(1);
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=document.documentElement.clientWidth)).toBe(true);
-  await page.screenshot({path:'/tmp/botroost-ui-evidence/websocket-server-draft-desktop.png',fullPage:true});
+  await page.screenshot({path:'test-results/ui-evidence/websocket-server-draft-desktop.png',fullPage:true});
   await page.getByRole('button',{name:'Discard changes'}).click();
   await expect(page.getByLabel('Server host')).toHaveCount(0);
 });
@@ -67,7 +77,7 @@ test('inbound server editor stays within a 390px viewport',async({page})=>{
   await page.getByRole('button',{name:'Add server'}).click();
   await expect(page.getByLabel('Server port')).toBeVisible();
   expect(await page.evaluate(()=>({scrollWidth:document.documentElement.scrollWidth,clientWidth:document.documentElement.clientWidth}))).toEqual({scrollWidth:390,clientWidth:390});
-  await page.screenshot({path:'/tmp/botroost-ui-evidence/websocket-server-draft-mobile.png',fullPage:true});
+  await page.screenshot({path:'test-results/ui-evidence/websocket-server-draft-mobile.png',fullPage:true});
 });
 
 test('failed save keeps the local server draft open',async({page})=>{
@@ -95,6 +105,80 @@ test('endpoint lifecycle actions live in the title row instead of Settings',asyn
   await expect(settings.getByRole('button',{name:'Start'})).toHaveCount(0);
   await expect(settings.getByRole('button',{name:'Stop'})).toHaveCount(0);
   await expect(settings.getByRole('button',{name:'Restart'})).toHaveCount(0);
+});
+
+test('create endpoint draft survives sidebar status polling',async({page},testInfo)=>{
+  await page.setViewportSize({width:320,height:760});
+  const fixture=await mockProduct(page);
+  await page.goto('/endpoints');
+  await page.getByRole('button',{name:'Create endpoint'}).click();
+  const chooser=page.getByRole('dialog',{name:'Create endpoint'});
+  await expect(chooser.getByText('Choose the runtime integration that will host this OneBot endpoint.')).toBeVisible();
+  await expect(chooser.locator('[data-slot="dialog-header"]')).toBeVisible();
+  await expect(chooser.locator('[data-slot="dialog-footer"]')).toBeVisible();
+  await chooser.getByRole('button',{name:'NapCat'}).click();
+  const dialog=page.getByRole('dialog',{name:'Configure endpoint'});
+  await dialog.getByLabel('Node').selectOption('fixture-node');
+  await dialog.getByLabel('Name').fill('Persistent endpoint draft');
+  const requestsBefore=fixture.endpointRequests();
+  await expect.poll(fixture.endpointRequests,{timeout:5000}).toBeGreaterThan(requestsBefore);
+  await expect(dialog.getByLabel('Name')).toHaveValue('Persistent endpoint draft');
+  await expect(dialog.getByLabel('Node')).toHaveValue('fixture-node');
+  await expect(dialog.locator('.modal-body')).toBeVisible();
+  const geometry=await dialog.evaluate(element=>{const rect=element.getBoundingClientRect(),body=element.querySelector('.modal-body')!;return{left:rect.left,right:rect.right,viewport:innerWidth,bodyPadding:getComputedStyle(body).paddingLeft,scrollWidth:document.documentElement.scrollWidth}});
+  expect(geometry.left).toBeGreaterThanOrEqual(0);
+  expect(geometry.right).toBeLessThanOrEqual(geometry.viewport);
+  expect(geometry.bodyPadding).toBe('20px');
+  expect(geometry.scrollWidth).toBe(geometry.viewport);
+  await page.screenshot({path:testInfo.outputPath('create-endpoint-dialog-320.png'),fullPage:true});
+});
+
+test('agent enrollment token uses the shared Campux dialog structure',async({page})=>{
+  await mockProduct(page);
+  await page.goto('/nodes');
+  await page.getByRole('button',{name:'Generate enrollment token'}).click();
+  const dialog=page.getByRole('dialog',{name:'One-time enrollment token'});
+  await expect(dialog.getByText('Copy this token now. It will not be shown again.')).toBeVisible();
+  await expect(dialog.locator('.enrollment-token')).toHaveText('fixture-enrollment-token');
+  await expect(dialog.locator('[data-slot="dialog-header"]')).toBeVisible();
+  await expect(dialog.locator('.modal-body')).toBeVisible();
+  await expect(dialog.locator('[data-slot="dialog-footer"]')).toBeVisible();
+  await dialog.getByRole('button',{name:'Done'}).click();
+  await expect(dialog).toBeHidden();
+});
+
+test('deletes an endpoint only after explicit destructive confirmation and convergence',async({page})=>{
+  const fixture=await mockProduct(page);
+  await page.goto('/endpoints/fixture-endpoint');
+  await page.getByRole('tab',{name:'Settings'}).click();
+  await page.getByRole('button',{name:'Delete endpoint'}).click();
+  const dialog=page.getByRole('dialog',{name:'Delete endpoint'});
+  await expect(dialog.getByText('Campux production')).toBeVisible();
+  await expect(dialog.getByText(/container and stored endpoint data/i)).toBeVisible();
+  await expect(dialog.getByText('Remove the managed runtime and its persisted endpoint data.')).toBeVisible();
+  await expect(dialog.locator('[data-slot="dialog-footer"]')).toBeVisible();
+  await expect(dialog.getByRole('button',{name:'Delete endpoint'})).toHaveAttribute('data-variant','destructive');
+  await dialog.getByRole('button',{name:'Delete endpoint'}).click();
+  await expect(page).toHaveURL(/\/endpoints$/);
+  expect(fixture.deleteRequests()).toBe(1);
+  expect(fixture.deletePayload()).toEqual({expectedGeneration:4});
+  await expect(page.getByRole('link',{name:'Campux production'})).toHaveCount(0);
+});
+
+test('keeps endpoint deletion failures inside the recoverable accessible confirmation dialog',async({page})=>{
+  await mockProduct(page,{failDelete:true});
+  await page.goto('/endpoints/fixture-endpoint');
+  await page.getByRole('tab',{name:'Settings'}).click();
+  await page.getByRole('button',{name:'Delete endpoint'}).click();
+  const dialog=page.getByRole('dialog',{name:'Delete endpoint'});
+  await dialog.getByRole('button',{name:'Delete endpoint'}).click();
+  const alert=dialog.getByRole('alert');
+  await expect(alert).toContainText('Endpoint deletion failed');
+  await expect(alert).toContainText('Fixture delete failed');
+  await expect(alert).toBeFocused();
+  await expect(dialog.getByRole('button',{name:'Delete endpoint'})).toBeEnabled();
+  await dialog.getByRole('button',{name:'Cancel'}).click();
+  await expect(dialog).toBeHidden();
 });
 
 for(const width of [390,320]){
@@ -168,14 +252,14 @@ test('paginates large QQ directories with compact Campux controls',async({page})
   await expect(page.getByText('1–25 of 105',{exact:true})).toBeVisible();
   await expect(page.getByRole('cell',{name:'Friend 1',exact:true})).toBeVisible();
   await expect(page.getByRole('cell',{name:'Friend 26',exact:true})).toHaveCount(0);
-  await page.screenshot({path:'/tmp/botroost-ui-evidence/qq-directory-pagination-desktop.png',fullPage:true});
+  await page.screenshot({path:'test-results/ui-evidence/qq-directory-pagination-desktop.png',fullPage:true});
   await page.setViewportSize({width:320,height:844});
   await page.getByRole('button',{name:'Next page'}).click();
   await expect(page.getByText('26–50 of 105',{exact:true})).toBeVisible();
   await expect(page.getByRole('cell',{name:'Friend 1',exact:true})).toHaveCount(0);
   await expect(page.getByRole('cell',{name:'Friend 26',exact:true})).toBeVisible();
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=document.documentElement.clientWidth)).toBe(true);
-  await page.screenshot({path:'/tmp/botroost-ui-evidence/qq-directory-pagination-320.png',fullPage:true});
+  await page.screenshot({path:'test-results/ui-evidence/qq-directory-pagination-320.png',fullPage:true});
 });
 
 test('shows lightweight aggregate traffic separately from connections and protocol actions',async({page})=>{
@@ -251,5 +335,5 @@ test('workspace pill tabs do not overflow a 320px viewport',async({page})=>{
   expect(geometry.left).toBeGreaterThanOrEqual(0);
   expect(geometry.right).toBeLessThanOrEqual(geometry.viewport);
   expect(geometry.scrollWidth).toBe(geometry.clientWidth);
-  await page.screenshot({path:'/tmp/botroost-ui-evidence/workspace-tabs-320.png',fullPage:true});
+  await page.screenshot({path:'test-results/ui-evidence/workspace-tabs-320.png',fullPage:true});
 });

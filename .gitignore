@@ -6,3 +6,4 @@ coverage/
 .env.local
 *.log
 *.tmp
+test-results/

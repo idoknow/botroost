@@ -62,7 +62,7 @@ export const RuntimeCommandSchema = z.strictObject({
   generation: z.number().int().nonnegative(),
   connectionEpoch: z.number().int().nonnegative(),
   attempt: z.number().int().positive().optional(),
-  action: z.enum(["start", "stop", "restart", "refresh-login-qr", "read-container-logs", "update-onebot-websockets"]),
+  action: z.enum(["start", "stop", "restart", "delete", "refresh-login-qr", "read-container-logs", "update-onebot-websockets"]),
   runtimeRequest: RuntimeRequestSchema,
   metadata: jsonObject,
 });

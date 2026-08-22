@@ -26,15 +26,15 @@ for(const colorScheme of ['light','dark'] as const){
     test(`visual fixture ${colorScheme} ${viewport.name}`,async({page})=>{
       await page.addInitScript(scheme=>localStorage.setItem('botroost-theme',scheme),colorScheme);await page.setViewportSize({width:viewport.width,height:viewport.height});await mockProduct(page);await page.goto('/endpoints/fixture-endpoint');await expect(page.getByRole('heading',{name:'Campux production'})).toBeVisible();await expect(page.locator('html')).toHaveAttribute('data-theme',colorScheme);
       await expect(page.getByText('Identity and login state')).toBeVisible();await expect(page.getByText('Protocol action support')).toHaveCount(0);
-      fs.mkdirSync('/tmp/botroost-ui-evidence',{recursive:true});
-      await page.screenshot({path:`/tmp/botroost-ui-evidence/endpoint-overview-${colorScheme}-${viewport.name}.png`,fullPage:true});
-      await page.getByRole('tab',{name:'Traffic'}).click();await expect(page.getByText('Real-time message traffic')).toBeVisible();expect(await page.evaluate(()=>({scrollWidth:document.documentElement.scrollWidth,clientWidth:document.documentElement.clientWidth}))).toEqual({scrollWidth:viewport.width,clientWidth:viewport.width});await page.screenshot({path:`/tmp/botroost-ui-evidence/endpoint-traffic-${colorScheme}-${viewport.name}.png`,fullPage:true});
-      await page.getByRole('tab',{name:'QQ data'}).click();await expect(page.getByRole('tab',{name:'Friends (1)'})).toBeVisible();await page.screenshot({path:`/tmp/botroost-ui-evidence/endpoint-qq-data-${colorScheme}-${viewport.name}.png`,fullPage:true});
-      await page.getByRole('tab',{name:'OneBot'}).click();await expect(page.getByText('Protocol action support')).toBeVisible();await expect(page.getByText('NapCat OneBot implementation')).toHaveCount(0);await expect(page.getByText('API available')).toHaveCount(0);await expect(page.getByText('OneBot connecting')).toHaveCount(0);await page.screenshot({path:`/tmp/botroost-ui-evidence/endpoint-onebot-${colorScheme}-${viewport.name}.png`,fullPage:true});
+      fs.mkdirSync('test-results/ui-evidence',{recursive:true});
+      await page.screenshot({path:`test-results/ui-evidence/endpoint-overview-${colorScheme}-${viewport.name}.png`,fullPage:true});
+      await page.getByRole('tab',{name:'Traffic'}).click();await expect(page.getByText('Real-time message traffic')).toBeVisible();expect(await page.evaluate(()=>({scrollWidth:document.documentElement.scrollWidth,clientWidth:document.documentElement.clientWidth}))).toEqual({scrollWidth:viewport.width,clientWidth:viewport.width});await page.screenshot({path:`test-results/ui-evidence/endpoint-traffic-${colorScheme}-${viewport.name}.png`,fullPage:true});
+      await page.getByRole('tab',{name:'QQ data'}).click();await expect(page.getByRole('tab',{name:'Friends (1)'})).toBeVisible();await page.screenshot({path:`test-results/ui-evidence/endpoint-qq-data-${colorScheme}-${viewport.name}.png`,fullPage:true});
+      await page.getByRole('tab',{name:'OneBot'}).click();await expect(page.getByText('Protocol action support')).toBeVisible();await expect(page.getByText('NapCat OneBot implementation')).toHaveCount(0);await expect(page.getByText('API available')).toHaveCount(0);await expect(page.getByText('OneBot connecting')).toHaveCount(0);await page.screenshot({path:`test-results/ui-evidence/endpoint-onebot-${colorScheme}-${viewport.name}.png`,fullPage:true});
       await page.getByRole('tab',{name:'Connections'}).click();
       await expect(page.locator('input[value="wss://app.campux.top/onebot/v11/ws?key=fixture"]')).toBeVisible();
       expect(await page.evaluate(()=>({scrollWidth:document.documentElement.scrollWidth,clientWidth:document.documentElement.clientWidth}))).toEqual({scrollWidth:viewport.width,clientWidth:viewport.width});
-      await page.screenshot({path:`/tmp/botroost-ui-evidence/endpoint-${colorScheme}-${viewport.name}.png`,fullPage:true});
+      await page.screenshot({path:`test-results/ui-evidence/endpoint-${colorScheme}-${viewport.name}.png`,fullPage:true});
     });
   }
 }
@@ -44,6 +44,6 @@ for(const viewport of viewports){
     await page.setViewportSize({width:viewport.width,height:viewport.height});await mockProduct(page,{loggedIn:false});await page.goto('/endpoints/fixture-endpoint');
     const qr=page.getByRole('img',{name:'NapCat QR code'});await expect(qr).toBeVisible();expect((await qr.boundingBox())!.width).toBeGreaterThanOrEqual(160);
     expect(await page.evaluate(()=>({scrollWidth:document.documentElement.scrollWidth,clientWidth:document.documentElement.clientWidth}))).toEqual({scrollWidth:viewport.width,clientWidth:viewport.width});
-    fs.mkdirSync('/tmp/botroost-ui-evidence',{recursive:true});await page.screenshot({path:`/tmp/botroost-ui-evidence/endpoint-qr-${viewport.name}.png`,fullPage:true});
+    fs.mkdirSync('test-results/ui-evidence',{recursive:true});await page.screenshot({path:`test-results/ui-evidence/endpoint-qr-${viewport.name}.png`,fullPage:true});
   });
 }
