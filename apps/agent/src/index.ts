@@ -221,6 +221,7 @@ export class ControlPlaneRequestError extends Error {
 }
 
 const isCommandFenceRejection=(error:unknown):error is ControlPlaneRequestError=>error instanceof ControlPlaneRequestError&&(error.status===401||error.status===403||error.status===409);
+const isLegacyProgressUnsupported=(error:unknown)=>error instanceof ControlPlaneRequestError&&error.status===404;
 
 export class HttpAgentTransport implements AgentCommandTransport {
   private readonly sessionId=crypto.randomUUID();
@@ -793,14 +794,19 @@ export class DurableFakeAgent {
     let sequence=0;
     let latest:RuntimeProgress={phase:"agent-acknowledged",percent:15,message:"Agent acknowledged command"};
     let reporting=Promise.resolve();
-    let fenceError:ControlPlaneRequestError|undefined;
+    let fenceError:Error|undefined;
     const report=(progress:RuntimeProgress)=>{
       if(fenceError)return Promise.reject(fenceError);
       latest=progress;
       const payload={...receipt,endpointId:command.endpointId,attempt:command.attempt??1,sequence:++sequence,...progress};
       const submitted=reporting.then(async()=>{
+        if(fenceError)throw fenceError;
         try{await this.transport.progress(command.commandId,payload)}
-        catch(error){if(isCommandFenceRejection(error)){fenceError=error;throw error}}
+        catch(error){
+          if(isLegacyProgressUnsupported(error))return;
+          fenceError=error instanceof Error?error:new Error("command lease refresh failed");
+          throw fenceError;
+        }
       });
       reporting=submitted.catch(()=>undefined);
       return submitted;
@@ -812,11 +818,11 @@ export class DurableFakeAgent {
       if(keepaliveRunning)return;
       keepaliveRunning=true;
       keepaliveTask=(async()=>{
-        try{
-          await this.transport.heartbeat([]);
-          await report(latest);
-        }catch(error){
+        try{await this.transport.heartbeat([])}catch(error){
           if(isCommandFenceRejection(error))fenceError=error;
+        }
+        try{if(!fenceError)await report(latest)}catch(error){
+          if(!isLegacyProgressUnsupported(error))fenceError=error instanceof Error?error:new Error("command lease refresh failed");
         }finally{keepaliveRunning=false}
       })();
     },10_000);

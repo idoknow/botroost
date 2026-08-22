@@ -267,6 +267,75 @@ describe("durable fake agent", () => {
     await agent.close();
   });
 
+  it("stops before the next runtime side effect when progress lease refresh fails", async () => {
+    const dir=await mkdtemp(join(tmpdir(),"botroost-agent-"));
+    const runtime=new FakeRuntime();
+    const transport=new MemoryTransport(command);
+    transport.progressFailure={at:2,error:new Error("progress unavailable")};
+    const agent=await DurableFakeAgent.open({journalPath:join(dir,"journal"),runtime,transport});
+    await expect(agent.pollOnce()).rejects.toThrow("progress unavailable");
+    expect(runtime.effectsFor("endpoint-1")).toEqual([]);
+    expect(transport.results).toHaveLength(0);
+    await agent.close();
+  });
+
+  it("does not let a queued runtime-boundary report bypass a failed keepalive refresh", async () => {
+    vi.useFakeTimers();
+    try {
+      const dir=await mkdtemp(join(tmpdir(),"botroost-agent-"));
+      const transport=new MemoryTransport(command);
+      let progressCalls=0;
+      let markKeepaliveStarted!:()=>void;const keepaliveStarted=new Promise<void>(resolve=>{markKeepaliveStarted=resolve});
+      let releaseKeepalive!:()=>void;const keepaliveGate=new Promise<void>(resolve=>{releaseKeepalive=resolve});
+      transport.progress=async()=>{
+        progressCalls++;
+        if(progressCalls===2){markKeepaliveStarted();await keepaliveGate;throw new Error("keepalive progress failed")}
+      };
+      let markRuntimeStarted!:()=>void;const runtimeStarted=new Promise<void>(resolve=>{markRuntimeStarted=resolve});
+      let releaseBoundary!:()=>void;const boundaryGate=new Promise<void>(resolve=>{releaseBoundary=resolve});
+      const effects:string[]=[];
+      const runtime={apply:async(_effectId: string,_command: typeof command,onProgress?: (progress:{phase:string;percent:number;message:string})=>Promise<void>)=>{
+        markRuntimeStarted();
+        await boundaryGate;
+        await onProgress?.({phase:"creating-container",percent:50,message:"Creating container"});
+        effects.push("irreversible-side-effect");
+        return {};
+      }} as unknown as FakeRuntime;
+      const agent=await DurableFakeAgent.open({journalPath:join(dir,"journal"),runtime,transport});
+      const pending=agent.pollOnce();
+      await runtimeStarted;
+      vi.advanceTimersByTime(10_000);await Promise.resolve();await Promise.resolve();
+      await keepaliveStarted;
+      releaseBoundary();await Promise.resolve();
+      releaseKeepalive();await Promise.resolve();await Promise.resolve();
+      await expect(pending).rejects.toThrow("keepalive progress failed");
+      expect(progressCalls).toBe(2);
+      expect(effects).toEqual([]);
+      expect(transport.results).toHaveLength(0);
+      await agent.close();
+    } finally {vi.useRealTimers()}
+  });
+
+  it("refreshes the command lease even when the node heartbeat transiently fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const dir=await mkdtemp(join(tmpdir(),"botroost-agent-"));
+      const transport=new MemoryTransport(command);
+      transport.heartbeatFailure={at:2,error:new Error("heartbeat unavailable")};
+      let markStarted!:()=>void;const started=new Promise<void>(resolve=>{markStarted=resolve});
+      const runtime={apply:async()=>{markStarted();await new Promise(resolve=>setTimeout(resolve,20_000));return {}}} as unknown as FakeRuntime;
+      const agent=await DurableFakeAgent.open({journalPath:join(dir,"journal"),runtime,transport});
+      const pending=agent.pollOnce();
+      await started;
+      vi.advanceTimersByTime(10_000);await Promise.resolve();await Promise.resolve();
+      vi.advanceTimersByTime(10_000);await Promise.resolve();await Promise.resolve();
+      await pending;
+      expect(transport.progresses.length).toBeGreaterThanOrEqual(2);
+      expect(transport.results).toHaveLength(1);
+      await agent.close();
+    } finally {vi.useRealTimers()}
+  });
+
   it("keeps rolling compatibility when progress reporting is unavailable", async () => {
     const dir=await mkdtemp(join(tmpdir(),"botroost-agent-"));
     const runtime=new FakeRuntime();
