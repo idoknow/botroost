@@ -55,6 +55,35 @@ test('endpoint tab content scrolls without moving the page chrome',async({page})
   expect(after).toEqual({pageScrollY:0,headingTop:before.headingTop,tabsTop:before.tabsTop});
 });
 
+test('every endpoint tab keeps scrolling inside its active content panel',async({page})=>{
+  await page.setViewportSize({width:1440,height:680});
+  await mockProduct(page);
+  await page.goto('/endpoints/fixture-endpoint');
+  const tabNames=['Overview','Traffic','Connections','QQ data','OneBot','Logs','Settings'];
+  for(const name of tabNames){
+    await page.getByRole('tab',{name,exact:true}).click();
+    const panel=page.locator('.endpoint-tab-panel[data-state="active"]');
+    await expect(panel).toHaveCount(1);
+    expect(await panel.evaluate(element=>getComputedStyle(element).overflowY)).toBe('auto');
+    expect(await page.evaluate(()=>document.documentElement.scrollHeight)).toBe(await page.evaluate(()=>document.documentElement.clientHeight));
+    if(await panel.evaluate(element=>element.scrollHeight>element.clientHeight)){
+      await panel.hover();
+      await page.mouse.wheel(0,800);
+      await expect.poll(()=>panel.evaluate(element=>element.scrollTop)).toBeGreaterThan(0);
+      await panel.evaluate(element=>element.scrollTop=0);
+    }
+  }
+
+  await page.getByRole('tab',{name:'Logs',exact:true}).click();
+  await page.getByRole('button',{name:'Load container logs'}).click();
+  await expect(page.getByText('fixture container log 120')).toBeAttached();
+  const logs=page.locator('.endpoint-tab-panel[data-state="active"]');
+  expect(await logs.evaluate(element=>element.scrollHeight>element.clientHeight)).toBe(true);
+  await logs.hover();
+  await page.mouse.wheel(0,800);
+  await expect.poll(()=>logs.evaluate(element=>element.scrollTop)).toBeGreaterThan(0);
+});
+
 const viewports=[{name:'desktop',width:1440,height:1000},{name:'mobile',width:390,height:844},{name:'narrow',width:320,height:780}] as const;
 for(const colorScheme of ['light','dark'] as const){
   for(const viewport of viewports){
