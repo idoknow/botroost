@@ -1,14 +1,15 @@
 import type {AnchorHTMLAttributes,InputHTMLAttributes,ReactNode,SelectHTMLAttributes} from 'react';
+import {useI18n} from './i18n';
 import {cn} from './lib/utils';
 import {Button as PrimitiveButton} from './components/button';
 import {Input as PrimitiveInput} from './components/input';
 import {Badge as PrimitiveBadge} from './components/badge';
 import {Dialog,DialogContent,DialogDescription,DialogFooter,DialogHeader,DialogTitle} from './components/dialog';
-export function BrandMark({compact=false}:{compact?:boolean}){return <div className="brand-lockup"><div className="brand-mark" aria-hidden><span/><span/><span/></div>{!compact&&<div><strong>Botroost</strong><small>OneBot Cluster</small></div>}</div>}
+export function BrandMark({compact=false}:{compact?:boolean}){const{t}=useI18n();return <div className="brand-lockup"><div className="brand-mark" aria-hidden><span/><span/><span/></div>{!compact&&<div><strong>{t('brand.name')}</strong><small>{t('brand.tagline')}</small></div>}</div>}
 export const PageContainer=({children}:{children:ReactNode})=><div className="page-container">{children}</div>;
 export const Stack=({children,className}:{children:ReactNode;className?:string})=><div className={cn('stack',className)}>{children}</div>;
 export const Card=({children,className}:{children:ReactNode;className?:string})=><section className={cn('card',className)}>{children}</section>;
-export function Button({className,busy,...props}:React.ComponentProps<typeof PrimitiveButton>&{busy?:boolean}){return <PrimitiveButton className={className} disabled={busy||props.disabled} {...props}>{busy?'Working…':props.children}</PrimitiveButton>}
+export function Button({className,busy,...props}:React.ComponentProps<typeof PrimitiveButton>&{busy?:boolean}){const{t}=useI18n();return <PrimitiveButton className={className} disabled={busy||props.disabled} {...props}>{busy?t('common.working'):props.children}</PrimitiveButton>}
 export function Input({label,description,...props}:InputHTMLAttributes<HTMLInputElement>&{label:string;description?:string}){return <label className="field"><span>{label}</span><PrimitiveInput {...props}/>{description&&<small>{description}</small>}</label>}
 export function Select({label,children,...props}:SelectHTMLAttributes<HTMLSelectElement>&{label:string;children:ReactNode}){return <label className="field"><span>{label}</span><select {...props}>{children}</select></label>}
 export const Badge=({children,good=false}:{children:ReactNode;good?:boolean})=><PrimitiveBadge variant="secondary" className={good?'status-good':undefined}>{children}</PrimitiveBadge>;
