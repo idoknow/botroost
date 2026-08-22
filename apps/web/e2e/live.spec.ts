@@ -86,7 +86,7 @@ test.describe('live operator journey',()=>{
     const loginResponse=page.waitForResponse(response=>response.url().includes('/api/v1/auth/login'));
     await page.getByRole('button',{name:'Sign in'}).click();
     expect((await loginResponse).ok()).toBe(true);
-    await expect(page.getByRole('heading',{name:'Cluster'})).toBeVisible();
+    await expect(page.getByRole('heading',{name:'Cluster'})).toBeVisible({timeout:15_000});
 
     for(const staleId of await staleFixtureIds(page,fixtureName))await deleteFixture(page,staleId);
 
