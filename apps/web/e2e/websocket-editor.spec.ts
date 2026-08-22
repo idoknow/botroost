@@ -157,8 +157,15 @@ test('deletes an endpoint only after explicit destructive confirmation and conve
   await expect(dialog.getByText(/container and stored endpoint data/i)).toBeVisible();
   await expect(dialog.getByText('Remove the managed runtime and its persisted endpoint data.')).toBeVisible();
   await expect(dialog.locator('[data-slot="dialog-footer"]')).toBeVisible();
-  await expect(dialog.getByRole('button',{name:'Delete endpoint'})).toHaveAttribute('data-variant','destructive');
-  await dialog.getByRole('button',{name:'Delete endpoint'}).click();
+  const confirmation=dialog.getByLabel('Type endpoint name to confirm');
+  const remove=dialog.getByRole('button',{name:'Delete endpoint'});
+  await expect(remove).toHaveAttribute('data-variant','destructive');
+  await expect(remove).toBeDisabled();
+  await confirmation.fill('wrong endpoint');
+  await expect(remove).toBeDisabled();
+  await confirmation.fill('Campux production');
+  await expect(remove).toBeEnabled();
+  await remove.click();
   await expect(page).toHaveURL(/\/endpoints$/);
   expect(fixture.deleteRequests()).toBe(1);
   expect(fixture.deletePayload()).toEqual({expectedGeneration:4});
@@ -171,6 +178,7 @@ test('keeps endpoint deletion failures inside the recoverable accessible confirm
   await page.getByRole('tab',{name:'Settings'}).click();
   await page.getByRole('button',{name:'Delete endpoint'}).click();
   const dialog=page.getByRole('dialog',{name:'Delete endpoint'});
+  await dialog.getByLabel('Type endpoint name to confirm').fill('Campux production');
   await dialog.getByRole('button',{name:'Delete endpoint'}).click();
   const alert=dialog.getByRole('alert');
   await expect(alert).toContainText('Endpoint deletion failed');
