@@ -69,11 +69,16 @@ async function deleteFixture(page:Page,endpointId:string){
 
 test.describe('live operator journey',()=>{
   test.skip(!live,'Set LIVE_E2E=1 to run live E2E');
+  let cleanupEndpointId:string|undefined;
+  test.afterEach(async({page},testInfo)=>{
+    testInfo.setTimeout(70_000);
+    if(cleanupEndpointId)await deleteFixture(page,cleanupEndpointId);
+    cleanupEndpointId=undefined;
+  });
   test('mutates, starts, persists, audits, and deletes an isolated endpoint',async({page})=>{
     test.setTimeout(120_000);
     const apiErrors:string[]=[];
     let collectApiErrors=true;
-    let endpointId:string|undefined;
     page.on('response',response=>{if(collectApiErrors&&response.url().includes('/api/')&&response.status()>=400&&!(response.status()===404&&response.url().endsWith('/api/v1/disabled')))apiErrors.push(`${response.status()} ${response.url()}`)});
     await page.goto('/login');
     await page.getByLabel('Email').fill(email!);
@@ -87,9 +92,9 @@ test.describe('live operator journey',()=>{
 
     const runFixtureName=`${fixtureName}-${Date.now()}`;
     const mutatedName=`${fixtureName}-active-${Date.now()}`;
-    try{
-      const fixture=await createFixture(page,runFixtureName);
-      endpointId=fixture.id;
+    const fixture=await createFixture(page,runFixtureName);
+    const endpointId=fixture.id;
+    cleanupEndpointId=endpointId;
       await page.goto(`/endpoints/${endpointId}`);
       await page.getByLabel('Name').fill(mutatedName);
       const renameResponse=page.waitForResponse(response=>response.url().endsWith(`/api/v1/endpoints/${endpointId}`)&&response.request().method()==='PATCH');
@@ -121,10 +126,6 @@ test.describe('live operator journey',()=>{
       },operation.id);
       expect(queuedAudit).not.toBeNull();
       expect(apiErrors).toEqual([]);
-    }finally{
-      if(endpointId)await deleteFixture(page,endpointId);
-    }
-
     collectApiErrors=false;
     await page.getByRole('button',{name:'Log out'}).click();
     await expect(page.getByRole('heading',{name:'Sign in'})).toBeVisible();
