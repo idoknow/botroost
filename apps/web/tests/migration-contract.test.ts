@@ -11,6 +11,7 @@ const allDependencies = { ...packageJson.dependencies, ...packageJson.devDepende
 const source = ["app.tsx", "pages.tsx", "main.tsx"]
   .map((file) => readFileSync(join(webRoot, "src", file), "utf8"))
   .join("\n");
+const enCatalog = readFileSync(join(webRoot, "src", "locales", "en.ts"), "utf8");
 
 const forbidden = [
   "@mantine/core",
@@ -53,11 +54,11 @@ describe("Campux web stack migration contract", () => {
     expect(source).toContain("data-sidebar-section=\"operations\"");
     expect(source).toMatch(/endpoints\.map\s*\(/);
     expect(source).toContain("`/endpoints/${endpoint.id}`");
-    expect(source).toContain("Cluster");
-    expect(source).toContain("Agent nodes");
-    expect(source).toContain("Runtime drivers");
-    expect(source).toContain("Changes");
-    expect(source).toContain("Audit");
-    expect(source).toContain("Workspace");
+    expect(enCatalog).toContain("'nav.cluster':'Cluster'");
+    expect(enCatalog).toContain("'nav.agentNodes':'Agent nodes'");
+    expect(enCatalog).toContain("'nav.runtimeDrivers':'Runtime drivers'");
+    expect(enCatalog).toContain("'activity.changes':'Changes'");
+    expect(enCatalog).toContain("'activity.auditLog':'Audit log'");
+    expect(enCatalog).toContain("'nav.workspace':'Workspace'");
   });
 });
