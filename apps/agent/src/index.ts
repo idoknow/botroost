@@ -364,6 +364,7 @@ export class NapCatRuntime {
     networkMode?: string;
     napcatToken?: string;
     fetcher?: typeof fetch;
+    signal?: AbortSignal;
     qrPollIntervalMs?: number;
     qrPollAttempts?: number;
     directoryRefreshMs?: number;
@@ -376,6 +377,10 @@ export class NapCatRuntime {
     this.fetcher = options.fetcher ?? globalThis.fetch;
   }
   private docker() { return this.options.docker ?? new DockerCliClient(); }
+  private requestSignal(timeoutMs:number){
+    const timeout=AbortSignal.timeout(timeoutMs);
+    return this.options.signal?AbortSignal.any([this.options.signal,timeout]):timeout;
+  }
   private commandStatePath() { return join(this.options.stateDirectory, "runtime-commands.json"); }
   private async loadCommands() {
     if (this.commandsLoaded) return;
@@ -558,10 +563,11 @@ export class NapCatRuntime {
     };
   }
   private async napcatRequest(base: URL, path: string, webToken: string, body?: unknown, endpointId?: string, timeoutMs = 10_000) {
+    const signal=this.requestSignal(timeoutMs);
     const request = (token: string) => this.fetcher(new URL(path, base), {
       method: body === undefined ? "GET" : "POST",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      signal: AbortSignal.timeout(timeoutMs),
+      signal,
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     let response = await request(webToken);
@@ -600,7 +606,7 @@ export class NapCatRuntime {
     if(cached)return cached;
     const loginToken=(this.options.napcatToken??process.env.NAPCAT_TOKEN??"").trim();
     const hashed=createHash("sha256").update(`${loginToken}.napcat`).digest("hex");
-    const auth=await this.fetcher(new URL("/api/auth/login",base),{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({hash:hashed}),signal:AbortSignal.timeout(10_000)});
+    const auth=await this.fetcher(new URL("/api/auth/login",base),{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({hash:hashed}),signal:this.requestSignal(10_000)});
     if(!auth.ok)throw new Error(`NapCat auth failed: ${auth.status}`);
     const authBody=await auth.json() as JsonObject;
     if(typeof authBody.code==="number"&&authBody.code!==0)throw new Error(`NapCat auth rejected: ${String(authBody.message??authBody.code)}`);
@@ -938,6 +944,7 @@ export async function startAgentFromEnv(signal?:AbortSignal): Promise<DurableFak
       ? new NapCatRuntime({
           stateDirectory: join(nodeStateDir, "napcat"),
           hostStateDirectory: join(process.env.NAPCAT_HOST_STATE_DIR ?? nodeStateDir, "napcat"),
+          ...(signal === undefined ? {} : { signal }),
           ...(process.env.NAPCAT_TOKEN === undefined ? {} : { napcatToken: process.env.NAPCAT_TOKEN }),
         })
       : await FakeRuntime.open(join(nodeStateDir,"runtime-effects.json")),

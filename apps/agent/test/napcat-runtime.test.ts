@@ -138,6 +138,26 @@ describe("NapCat runtime", () => {
     expect(docker.logRequests).toHaveLength(0);
     expect(fetcher).toHaveBeenCalledTimes(calls);
   });
+  it("aborts an in-flight NapCat request when the agent shuts down",async()=>{
+    const docker=new RecordingDocker();
+    docker.inspect=async()=>({id:"managed",name:"botroost-napcat-33333333-3333-4333-8333-333333333333",image:NAPCAT_IMAGE,state:"running" as const,ipAddress:"172.18.0.10",labels:{"botroost.workspace_id":baseCommand.workspaceId,"botroost.endpoint_id":baseCommand.endpointId,"botroost.provider":"napcat"}});
+    const controller=new AbortController();
+    let requestStarted!:()=>void;
+    let requestSignal:AbortSignal|undefined;
+    const started=new Promise<void>(resolve=>{requestStarted=resolve});
+    const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"botroost-napcat-abort-")),napcatToken:"operator-token",signal:controller.signal,fetcher:vi.fn(async(_url,init)=>{
+      requestSignal=init?.signal??undefined;
+      requestStarted();
+      return await new Promise<Response>((_resolve,reject)=>init?.signal?.addEventListener("abort",()=>reject(init.signal?.reason),{once:true}));
+    }) as unknown as typeof fetch});
+    const applying=runtime.apply("runtime:abort",{...baseCommand,action:"start"},async()=>undefined);
+    await started;
+    controller.abort(new Error("agent shutdown"));
+    const outcome=await Promise.race([applying.then(()=>"resolved",()=>"rejected"),new Promise<string>(resolve=>setTimeout(()=>resolve("timed-out"),250))]);
+    expect(outcome).not.toBe("timed-out");
+    expect(requestSignal?.aborted).toBe(true);
+  });
+
   it("accepts Docker and OrbStack missing-object error casing", () => {
     expect(isDockerObjectMissingError({ stderr: "Error: No such object: missing" })).toBe(true);
     expect(isDockerObjectMissingError({ stderr: "error: no such object: missing" })).toBe(true);

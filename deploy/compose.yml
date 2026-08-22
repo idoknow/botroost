@@ -130,6 +130,7 @@ services:
   agent:
     <<: *node-hardening
     profiles: [bootstrap-agent]
+    stop_grace_period: 30s
     build: {context: .., target: agent}
     environment:
       CONTROL_PLANE_URL: http://api:3000
