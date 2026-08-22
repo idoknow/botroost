@@ -74,11 +74,10 @@ services:
     build: {context: .., target: worker}
     environment:
       <<: *database-env
-      CREDENTIAL_MASTER_KEY_FILE: /run/secrets/credential_master_key
+      RESEND_API_KEY: "${RESEND_API_KEY:?set RESEND_API_KEY}"
+      ALERT_EMAIL_FROM: "${ALERT_EMAIL_FROM:?set ALERT_EMAIL_FROM}"
     secrets:
       - source: postgres_password
-        mode: 0400
-      - source: credential_master_key
         mode: 0400
     networks: [backend, egress]
     depends_on:

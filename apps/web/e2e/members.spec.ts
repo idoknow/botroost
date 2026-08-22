@@ -9,7 +9,7 @@ async function mockWorkspace(page:Page,role:Role='owner'){
  await page.route('**/api/v1/**',async route=>{
   const request=route.request(),url=new URL(request.url()),path=url.pathname.replace('/api/v1',''),method=request.method();
   const json=(body:unknown,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(body)});
-  if(path==='/auth/session')return json({user:{id:role==='owner'?'owner-id':'viewer-id',email:`${role}@example.com`,name:`${role}@example.com`},workspace:{id:'workspace-id',name:'Primary'},role,permissions:role==='owner'?['workspace:read','member:read','member:manage','credential:read','credential:manage','settings:read','settings:manage']:['workspace:read'],capabilities:{operations:[],providers:{},configurationSchemas:{}}});
+  if(path==='/auth/session')return json({user:{id:role==='owner'?'owner-id':'viewer-id',email:`${role}@example.com`,name:`${role}@example.com`},workspace:{id:'workspace-id',name:'Primary'},role,permissions:role==='owner'?['workspace:read','member:read','member:manage','settings:read','settings:manage']:['workspace:read'],capabilities:{operations:[],providers:{},configurationSchemas:{}}});
   if(path==='/auth/csrf')return json({csrfToken:'csrf'});
   if(path==='/endpoints')return json({items:[],page:1,pageSize:25,total:0});
   if(path==='/workspaces/current/members'&&method==='GET')return json({items:members,page:1,pageSize:25,total:members.length});

@@ -10,7 +10,7 @@ Botroost is not a generic container dashboard and OneBot is not a runtime. The p
 
 ```text
 Workspace
-├── Members / roles / credentials / alert settings
+├── Members / roles / per-endpoint alert subscriptions
 ├── Agent nodes
 │   └── Protocol endpoints
 │       ├── Runtime driver (for example, NapCat)
@@ -19,14 +19,14 @@ Workspace
 │       ├── OneBot 11 protocol service
 │       ├── WebSocket clients and servers
 │       └── Operations and audit events
-└── Audit log
+└── Unified activity history (changes + audit)
 ```
 
 ### Entities
 
 | Entity | Meaning |
 | --- | --- |
-| **Workspace** | Tenant and RBAC boundary. Owns nodes, endpoints, members, credentials, alert settings, operations, and audit events. |
+| **Workspace** | Tenant and RBAC boundary. Owns nodes, endpoints, members, notification targets, alert subscriptions, operations, and audit events. |
 | **Agent node** | A machine running the Botroost agent. It maintains an authenticated control connection and hosts endpoint workloads. |
 | **Protocol endpoint** | The primary managed resource: one desired OneBot service assigned to one agent node and one runtime driver. |
 | **Runtime driver** | Provider-specific integration that turns endpoint desired state into a workload. `napcat` manages a pinned NapCat container; it is not the OneBot protocol itself. |
@@ -61,7 +61,7 @@ WebSocket client and server configuration is shown separately because transport 
 - Forward WebSocket client and listening WebSocket server management
 - Write-only token handling: configured tokens are never returned to the browser
 - Bounded, redacted container log retrieval
-- Audited operations, workspace credentials, and Resend offline/recovery alerts
+- Audited operations and per-endpoint offline/recovery alert subscriptions with multi-recipient targets
 - Campux-aligned responsive UI with light, dark, and system appearance modes
 
 ## Architecture
@@ -93,7 +93,7 @@ openssl rand -base64 32
 openssl rand -hex 32
 ```
 
-Paste the generated values into `CREDENTIAL_MASTER_KEY` and `NAPCAT_TOKEN` in `.env`, and replace the two Agent state paths with the same writable absolute directory. Bun loads this file automatically for the development commands below.
+Paste the generated values into `CREDENTIAL_MASTER_KEY` and `NAPCAT_TOKEN` in `.env`, and replace the two Agent state paths with the same writable absolute directory. To deliver email alerts locally, also set both `RESEND_API_KEY` and `ALERT_EMAIL_FROM`; leaving both blank keeps delivery disabled. Bun loads this file automatically for the development commands below.
 
 Start PostgreSQL the first time, then build the workspace packages and apply migrations:
 
@@ -161,7 +161,7 @@ Open the web console through the configured public origin. Do not expose Postgre
 4. If no QQ account is signed in, scan the QR code in the endpoint's **QQ account** section.
 5. After login, inspect the separate **OneBot 11 service** section and query friends/groups.
 6. Configure outbound WebSocket clients or listening WebSocket servers under **WebSocket connections**.
-7. Use **Changes** and **Audit** to trace desired-state and administrative actions.
+7. Use **Activity** to review desired-state changes and the administrative audit trail together.
 
 NapCat images must be referenced by digest. Mutable tags and credential values are rejected or redacted at the relevant boundaries.
 
@@ -172,7 +172,7 @@ NapCat images must be referenced by digest. Mutable tags and credential values a
 - One-time enrollment credentials and hashed long-lived agent credentials
 - Connection-session fencing to reject stale agents
 - Optimistic endpoint generation checks
-- Encrypted credential storage with write-only API responses
+- Internal encrypted storage for legacy node credentials; no generic workspace credential API
 - WebSocket token presence only (`tokenConfigured`), never plaintext readback
 - Strict OneBot action allowlist
 - Bounded logs with credential redaction

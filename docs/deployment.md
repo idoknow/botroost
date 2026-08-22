@@ -20,6 +20,8 @@ chmod 600 secrets/*
 
 Set `BOTROOST_PUBLIC_ORIGIN` to the exact browser origin (scheme and host, no path). Add the `deploy/Caddyfile` snippet to Caddy. Build and start the empty database; migration is a one-shot dependency and must succeed before API/worker:
 
+Set `RESEND_API_KEY` and `ALERT_EMAIL_FROM` in `deploy/.env`. These worker-only environment variables control email delivery and sender identity; the web console stores only notification targets and per-endpoint subscriptions.
+
 ```sh
 docker compose build
 docker compose up -d postgres api worker web
@@ -49,4 +51,4 @@ docker compose logs migrate api worker web
 
 Stop without deleting data using `docker compose down`. Back up the `postgres-data` volume before upgrades. Apply upgrades with `docker compose build --pull && docker compose up -d`; the advisory-locked ledger validates checksums and applies pending migrations once. Do not use `down -v` unless permanent deletion is intended.
 
-`DATABASE_PASSWORD_FILE`, `CREDENTIAL_MASTER_KEY_FILE`, `BOOTSTRAP_PASSWORD_FILE`, and `ENROLLMENT_TOKEN_FILE` are consumed by the entrypoint. The Compose defaults mount file-backed secrets; plaintext credentials are not embedded in the image or Compose model.
+`DATABASE_PASSWORD_FILE`, `CREDENTIAL_MASTER_KEY_FILE`, `BOOTSTRAP_PASSWORD_FILE`, and `ENROLLMENT_TOKEN_FILE` are consumed by the entrypoint. The Compose defaults mount those file-backed secrets. Email delivery uses the worker-only `RESEND_API_KEY` and `ALERT_EMAIL_FROM` environment variables configured in `deploy/.env`; neither value is editable or returned by the web/API settings surface.

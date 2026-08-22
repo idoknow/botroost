@@ -18,7 +18,7 @@ Workspace
 │       ├── QQ account identity
 │       ├── OneBot 11 protocol service
 │       └── WebSocket transport configuration
-└── Changes, audit, members, credentials, and settings
+└── Unified activity, members, and per-endpoint alert subscriptions
 ```
 
 - **Protocol endpoint** is the primary managed resource.
@@ -112,7 +112,8 @@ Workspace
 - Low-frequency actions use quiet secondary styling.
 - Hover, active, badge, and loading changes must not shift layout.
 - Empty, loading, unavailable, error, and saved states are plain, actionable, and consistent.
-- Credentials are write-only; configured secrets show only a configured indicator.
+- Delivery-provider credentials and sender identity come from worker environment variables and are never exposed in the console.
+- Named notification targets can be selected independently for offline and recovery alerts on each endpoint; workspace defaults are copied to new endpoints.
 
 ## Components
 
@@ -126,7 +127,7 @@ Workspace
 
 - Desktop remains the primary working layout.
 - Narrow screens collapse the same hierarchy into one column.
-- Primary mobile navigation contains Cluster, Endpoints, Nodes, Changes, and More.
+- Primary mobile navigation contains Cluster, Endpoints, Nodes, Activity, and More.
 - Dense controls may scroll horizontally only where comparison genuinely requires it.
 - Text wraps, truncates, or intentionally reduces density; it never overlaps controls.
 - Fixed-format controls keep stable dimensions.

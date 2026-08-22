@@ -2,7 +2,7 @@ import {mkdir} from 'node:fs/promises';
 import {test,expect,type Page} from '@playwright/test';
 
 const endpoint={id:'fixture-endpoint',name:'Campux production',providerId:'napcat',node:{id:'fixture-node',name:'jp09-napcat-reenroll',provider:'napcat'},generation:4,desired:{state:'running'},status:{node:'online',runtime:'ready',provider:'available',protocol:'connected',convergence:'converged'},activeOperationId:null,metadata:{qq:{uin:'960164003',online:true}}};
-const session={user:{id:'fixture-user',email:'ops@example.test',name:'Rock'},workspace:{id:'fixture-workspace',name:'Production'},role:'owner',permissions:['workspace:read','endpoint:read','endpoint:create','endpoint:delete','endpoint:start','endpoint:stop','endpoint:restart','node:read','node:create','provider:read','operation:read','audit:read','member:read','credential:read','settings:read'],capabilities:{operations:['create','delete','start','stop','restart'],providers:{napcat:{enabled:true}}}};
+const session={user:{id:'fixture-user',email:'ops@example.test',name:'Rock'},workspace:{id:'fixture-workspace',name:'Production'},role:'owner',permissions:['workspace:read','endpoint:read','endpoint:create','endpoint:delete','endpoint:start','endpoint:stop','endpoint:restart','node:read','node:create','provider:read','operation:read','audit:read','member:read','settings:read'],capabilities:{operations:['create','delete','start','stop','restart'],providers:{napcat:{enabled:true}}}};
 
 async function mockProduct(page:Page,{failSave=false,failDelete=false,loggedIn=true,directorySize=1}:{failSave?:boolean;failDelete?:boolean;loggedIn?:boolean;directorySize?:number}={}){
   const friends=Array.from({length:directorySize},(_,index)=>({user_id:index+7,nickname:directorySize===1?'Friend':`Friend ${index+1}`}));
@@ -26,6 +26,7 @@ async function mockProduct(page:Page,{failSave=false,failDelete=false,loggedIn=t
     else if(path.endsWith('/endpoints/fixture-endpoint/napcat/login-qrcode'))body={qrcode:'https://example.test/qq-login'};
     else if(path.endsWith('/endpoints/fixture-endpoint')){if(endpointDeleted){status=404;body={error:{message:'Unavailable'}}}else body=endpoint;}
     else if(path.endsWith('/nodes/enrollment-tokens')&&route.request().method()==='POST')body={token:'fixture-enrollment-token'};
+    else if(path.endsWith('/workspaces/current/settings/alerts'))body={graceSeconds:180,targets:[],defaults:{offlineTargetIds:[],recoveryTargetIds:[]},endpoints:[{id:endpoint.id,name:endpoint.name,providerId:endpoint.providerId,offlineTargetIds:[],recoveryTargetIds:[]}]};
     else if(path.endsWith('/nodes'))body={items:[endpoint.node],page:1,pageSize:25,total:1};
     else if(path.endsWith('/endpoints')){endpointRequests+=1;const items=endpointDeleted?[]:[endpoint,{...endpoint,id:'fixture-needs-login',name:'Needs QQ login',metadata:{qq:{online:false},login:{qrcode:'https://example.test/qq-login'}}},{...endpoint,id:'fixture-unreachable',name:'Unreachable endpoint',status:{...endpoint.status,node:'offline'},metadata:{qq:{uin:'10000',online:true}}},{...endpoint,id:'fixture-unknown',name:'Unknown QQ status',metadata:{qq:{uin:'22222'}}}];body={items,page:1,pageSize:25,total:items.length};}
     else body={items:[],page:1,pageSize:25,total:0};
@@ -327,9 +328,9 @@ test('workspace navigation uses the shared Campux pill tab styling',async({page}
   expect(activeStyle.borderRadius).toBeGreaterThanOrEqual(activeStyle.height/2-1);
   expect(activeStyle.background).toBe('rgb(219, 234, 254)');
   expect(activeStyle.color).toBe('rgb(29, 78, 216)');
-  await tabs.getByRole('link',{name:'Credentials'}).click();
-  await expect(page).toHaveURL(/\/workspace\/credentials$/);
-  await expect(tabs.getByRole('link',{name:'Credentials'})).toHaveAttribute('data-state','active');
+  await tabs.getByRole('link',{name:'Alerts'}).click();
+  await expect(page).toHaveURL(/\/workspace\/settings$/);
+  await expect(tabs.getByRole('link',{name:'Alerts'})).toHaveAttribute('data-state','active');
   await expect(tabs.getByRole('link',{name:'Members'})).toHaveAttribute('data-state','inactive');
 });
 
@@ -338,7 +339,7 @@ test('workspace pill tabs do not overflow a 320px viewport',async({page})=>{
   await mockProduct(page);
   await page.goto('/workspace/settings');
   const tabs=page.getByRole('navigation',{name:'Workspace sections'});
-  await expect(tabs.getByRole('link',{name:'Settings'})).toHaveAttribute('aria-current','page');
+  await expect(tabs.getByRole('link',{name:'Alerts'})).toHaveAttribute('aria-current','page');
   const geometry=await tabs.evaluate(element=>{const box=element.getBoundingClientRect();return{left:box.left,right:box.right,viewport:innerWidth,scrollWidth:document.documentElement.scrollWidth,clientWidth:document.documentElement.clientWidth}});
   expect(geometry.left).toBeGreaterThanOrEqual(0);
   expect(geometry.right).toBeLessThanOrEqual(geometry.viewport);
