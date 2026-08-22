@@ -127,6 +127,8 @@ test.describe('live operator journey',()=>{
       },operation.id);
       expect(queuedAudit).not.toBeNull();
       expect(apiErrors).toEqual([]);
+    await deleteFixture(page,endpointId);
+    cleanupEndpointId=undefined;
     collectApiErrors=false;
     await page.getByRole('button',{name:'Log out'}).click();
     await expect(page.getByRole('heading',{name:'Sign in'})).toBeVisible();
