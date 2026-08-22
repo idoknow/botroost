@@ -70,6 +70,7 @@ async function deleteFixture(page:Page,endpointId:string){
 test.describe('live operator journey',()=>{
   test.skip(!live,'Set LIVE_E2E=1 to run live E2E');
   test('mutates, starts, persists, audits, and deletes an isolated endpoint',async({page})=>{
+    test.setTimeout(120_000);
     const apiErrors:string[]=[];
     let collectApiErrors=true;
     let endpointId:string|undefined;
