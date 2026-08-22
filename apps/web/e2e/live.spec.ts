@@ -118,7 +118,7 @@ test.describe('live operator journey',()=>{
       await page.getByRole('link',{name:/^(Activity|Audit)$/}).click();
       const auditTab=page.getByRole('tab',{name:/Audit log/});
       if(await auditTab.count())await auditTab.click();
-      await expect(page.getByRole('heading',{name:'Audit events'})).toBeVisible();
+      await expect(page.getByRole('heading',{name:/^(Audit log|Audit events)$/})).toBeVisible();
       const queuedAudit=await page.evaluate(async operationId=>{
         const response=await fetch('/api/v1/audit');
         if(!response.ok)throw new Error(`audit lookup failed: ${response.status}`);
