@@ -1,5 +1,15 @@
 import {describe,expect,it,vi} from "vitest";
 import {evaluateNapcatAlertTransition,ResendClient} from "../src/notifications.js";
+import {emailConfigFromEnvironment} from "../src/index.js";
+
+describe("worker mail configuration",()=>{
+  it("fails closed when Resend delivery is not fully configured",()=>{
+    expect(()=>emailConfigFromEnvironment({})).toThrow("must be configured");
+    expect(()=>emailConfigFromEnvironment({RESEND_API_KEY:"key"})).toThrow("must be configured");
+    expect(()=>emailConfigFromEnvironment({ALERT_EMAIL_FROM:"Campux <noreply@campux.top>"})).toThrow("must be configured");
+  });
+  it("accepts a complete Resend configuration",()=>expect(emailConfigFromEnvironment({RESEND_API_KEY:" key ",ALERT_EMAIL_FROM:" Campux <noreply@campux.top> "})).toEqual({apiKey:"key",from:"Campux <noreply@campux.top>"}));
+});
 
 describe("NapCat alert policy",()=>{
   const at=(seconds:number)=>new Date(seconds*1000);
@@ -23,11 +33,11 @@ describe("ResendClient",()=>{
       expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer re_test");
       return new Response(JSON.stringify({id:"msg_123"}),{status:200,headers:{"content-type":"application/json"}});
     });
-    const client=new ResendClient({fetcher:fetcher as typeof fetch,timeoutMs:100});
+    const client=new ResendClient({fetcher:fetcher as unknown as typeof fetch,timeoutMs:100});
     await expect(client.send({apiKey:"re_test",from:"Botroost <alerts@example.com>",to:"ops@example.com",subject:"offline",html:"<p>offline</p>"})).resolves.toEqual({providerMessageId:"msg_123"});
   });
   it("rejects unsuccessful or malformed provider responses",async()=>{
-    const failed=new ResendClient({fetcher:vi.fn(async()=>new Response("no",{status:429})) as typeof fetch,timeoutMs:100});
+    const failed=new ResendClient({fetcher:vi.fn(async()=>new Response("no",{status:429})) as unknown as typeof fetch,timeoutMs:100});
     await expect(failed.send({apiKey:"key",from:"a@example.com",to:"b@example.com",subject:"x",html:"x"})).rejects.toThrow("Resend request failed (429)");
   });
 });

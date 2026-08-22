@@ -54,7 +54,7 @@ export interface DockerCreateInput {
   environment?: Record<string, string>;
   mounts: { type: "bind"; source: string; target: string }[];
   hostConfig: { networkMode: string; portBindings: Record<string, never> };
-  resources: { cpuMillis: number; memoryMiB: number };
+  resources: { cpuMillis: number; memoryMiB: number; memorySwapMiB: number };
 }
 export interface DockerInspectResult {
   id: string;
@@ -63,6 +63,7 @@ export interface DockerInspectResult {
   state: "created" | "running" | "exited" | "unknown";
   ipAddress: string | null;
   labels: Record<string, string>;
+  resources?: { cpuMillis: number; memoryMiB: number; memorySwapMiB: number };
 }
 export interface DockerClient {
   inspect(name: string): Promise<DockerInspectResult | null>;
@@ -81,6 +82,20 @@ export function isDockerObjectMissingError(error: unknown): boolean {
   return /no such object/i.test(String(stderr ?? ""));
 }
 
+export function napcatResourceLimits(requested:{cpuMillis:number;memoryMiB:number}):DockerCreateInput["resources"]{
+  const cpuMillis=Math.max(1000,requested.cpuMillis),memoryMiB=Math.max(1024,requested.memoryMiB);
+  return{cpuMillis,memoryMiB,memorySwapMiB:memoryMiB+512};
+}
+
+export function dockerCreateArguments(input:DockerCreateInput):string[]{
+  const args=["create","--name",input.name,"--network",input.hostConfig.networkMode,"--memory",`${input.resources.memoryMiB}m`,"--memory-swap",`${input.resources.memorySwapMiB}m`,"--cpu-quota",String(input.resources.cpuMillis*100)];
+  for(const [key,value] of Object.entries(input.labels))args.push("--label",`${key}=${value}`);
+  for(const [key,value] of Object.entries(input.environment??{}))args.push("--env",`${key}=${value}`);
+  for(const mount of input.mounts)args.push("--mount",`type=bind,src=${mount.source},dst=${mount.target}`);
+  args.push(input.image);
+  return args;
+}
+
 export class DockerCliClient implements DockerClient {
   private async docker(args: string[], maxBuffer = 1024 * 1024) {
     const { stdout, stderr } = await execFileAsync("docker", args, { timeout: 30_000, maxBuffer });
@@ -93,6 +108,7 @@ export class DockerCliClient implements DockerClient {
       if (!item) return null;
       const state = item.State as Record<string, unknown> | undefined;
       const settings = item.NetworkSettings as Record<string, unknown> | undefined;
+      const hostConfig = item.HostConfig as Record<string, unknown> | undefined;
       const networks = settings?.Networks as Record<string, { IPAddress?: string }> | undefined;
       const ipAddress = Object.values(networks ?? {})[0]?.IPAddress ?? null;
       return {
@@ -102,6 +118,11 @@ export class DockerCliClient implements DockerClient {
         state: state?.Running ? "running" : "exited",
         ipAddress,
         labels: ((item.Config as Record<string, unknown> | undefined)?.Labels as Record<string, string> | undefined) ?? {},
+        resources: {
+          cpuMillis: Number(hostConfig?.CpuQuota) > 0 ? Math.round(Number(hostConfig?.CpuQuota) / Number(hostConfig?.CpuPeriod || 100000) * 1000) : 0,
+          memoryMiB: Math.round(Number(hostConfig?.Memory || 0) / 1048576),
+          memorySwapMiB: Math.round(Number(hostConfig?.MemorySwap || 0) / 1048576),
+        },
       };
     } catch (error) {
       if (isDockerObjectMissingError(error)) return null;
@@ -109,17 +130,7 @@ export class DockerCliClient implements DockerClient {
     }
   }
   async create(input: DockerCreateInput) {
-    const args = [
-      "create",
-      "--name", input.name,
-      "--network", input.hostConfig.networkMode,
-      "--memory", `${input.resources.memoryMiB}m`,
-      "--cpu-quota", String(input.resources.cpuMillis * 100),
-    ];
-    for (const [key, value] of Object.entries(input.labels)) args.push("--label", `${key}=${value}`);
-    for (const [key, value] of Object.entries(input.environment ?? {})) args.push("--env", `${key}=${value}`);
-    for (const mount of input.mounts) args.push("--mount", `type=bind,src=${mount.source},dst=${mount.target}`);
-    args.push(input.image);
+    const args = dockerCreateArguments(input);
     const { stdout } = await this.docker(args);
     return { id: stdout.trim() };
   }
@@ -403,6 +414,7 @@ export class NapCatRuntime {
     if (!endpointIdPattern.test(endpointId)) throw new Error("endpoint identifier is invalid");
     return `${this.containerPrefix}-${endpointId}`;
   }
+  private ownsContainer(container:Pick<DockerInspectResult,"labels">,command:RuntimeCommand){return container.labels["botroost.workspace_id"]===command.workspaceId&&container.labels["botroost.endpoint_id"]===command.endpointId&&container.labels["botroost.provider"]==="napcat"}
   private assertAllowed(command: RuntimeCommand) {
     const image = typeof command.metadata.image === "string" ? command.metadata.image : NAPCAT_IMAGE;
     if (image !== NAPCAT_IMAGE || command.runtimeRequest.approvedArtifactId !== NAPCAT_ARTIFACT)
@@ -419,14 +431,12 @@ export class NapCatRuntime {
     this.assertAllowed(command);
     await onProgress({phase:"inspecting-runtime",percent:20,message:"Authorizing runtime command"});
     await this.loadCommands();
-    await onProgress({phase:"inspecting-runtime",percent:22,message:"Persisting runtime command"});
-    this.commands.set(command.endpointId, command);
-    await this.persistCommands();
     const name = this.containerName(command.endpointId);
     const docker = this.docker();
     const desiredImage = typeof command.metadata.image === "string" ? command.metadata.image : NAPCAT_IMAGE;
-    await onProgress({phase:"inspecting-runtime",percent:25,message:"Inspecting existing runtime"});
+    await onProgress({phase:"inspecting-runtime",percent:22,message:"Inspecting container ownership"});
     const existing = await docker.inspect(name);
+    if(existing&&!this.ownsContainer(existing,command))throw new Error("NapCat container is not owned by this endpoint");
     if(command.action==="delete"){
       await onProgress({phase:"removing-runtime",percent:55,message:"Removing container and persisted runtime data"});
       if(existing&&(existing.labels["botroost.workspace_id"]!==command.workspaceId||existing.labels["botroost.endpoint_id"]!==command.endpointId||existing.labels["botroost.provider"]!=="napcat"))throw new Error("NapCat container ownership check failed");
@@ -447,6 +457,9 @@ export class NapCatRuntime {
       await onProgress({phase:"removing-runtime",percent:95,message:"Runtime deletion complete"});
       return{state:"stopped",observations:{node:"online",runtime:"stopped",provider:"unavailable",protocol:"disconnected",convergence:"converged"},metadata:{deleted:true}};
     }
+    await onProgress({phase:"inspecting-runtime",percent:25,message:"Persisting authorized runtime command"});
+    this.commands.set(command.endpointId,command);
+    await this.persistCommands();
     if(command.action==="read-container-logs"){
       await onProgress({phase:"probing-provider",percent:75,message:"Reading runtime diagnostics"});
       if(!existing||existing.labels["botroost.workspace_id"]!==command.workspaceId||existing.labels["botroost.endpoint_id"]!==command.endpointId||existing.labels["botroost.provider"]!=="napcat")throw new Error("NapCat container ownership check failed");
@@ -480,7 +493,11 @@ export class NapCatRuntime {
       await onProgress({phase:"probing-provider",percent:95,message:"OneBot configuration verified"});
       return{state:"running",observations:{node:"online",runtime:snapshot.runtime,provider:snapshot.provider,protocol:snapshot.protocol,convergence:snapshot.convergence},metadata:snapshot.metadata};
     }
-    if (command.action !== "stop" && (!existing || existing.image !== desiredImage)) {
+    if(existing&&!this.ownsContainer(existing,command))throw new Error("NapCat container is not owned by this endpoint");
+    const desiredResources=napcatResourceLimits(command.runtimeRequest.resources);
+    const resourceDrift=existing?.resources&&(existing.resources.cpuMillis!==desiredResources.cpuMillis||existing.resources.memoryMiB!==desiredResources.memoryMiB||existing.resources.memorySwapMiB!==desiredResources.memorySwapMiB);
+    let created=false;
+    if (command.action !== "stop" && (!existing || existing.image !== desiredImage || resourceDrift)) {
       if (existing){await onProgress({phase:"preparing-runtime",percent:35,message:"Replacing outdated NapCat container"});await docker.remove(name)}
       await onProgress({phase:"preparing-runtime",percent:40,message:"Preparing runtime image and storage"});
       const qq = this.endpointDirectory(command.endpointId, "qq");
@@ -506,15 +523,19 @@ export class NapCatRuntime {
           { type: "bind", source: hostConfig, target: "/app/napcat/config" },
         ],
         hostConfig: { networkMode: this.networkMode, portBindings: {} },
-        resources: command.runtimeRequest.resources,
+        resources: desiredResources,
       });
+      created=true;
     }
     if (command.action === "stop" && existing) { await onProgress({phase:"stopping-container",percent:70,message:"Stopping NapCat container"}); await docker.stop(name); }
     else if (command.action === "restart") { await onProgress({phase:"starting-container",percent:70,message:"Restarting NapCat container"}); this.webCredentials.delete(command.endpointId); await docker.restart(name); }
     else if (command.action === "start") { await onProgress({phase:"starting-container",percent:70,message:"Starting NapCat container"}); await docker.start(name); }
     if (command.action === "refresh-login-qr") {
-      if (!existing?.ipAddress) throw new Error("NapCat container is not available for QR refresh");
-      const base=new URL(`http://${existing.ipAddress}:6099`);
+      if(created){await onProgress({phase:"starting-container",percent:55,message:"Starting replacement NapCat container"});await docker.start(name)}
+      const current=created?await docker.inspect(name):existing;
+      if(current&&!this.ownsContainer(current,command))throw new Error("NapCat container is not owned by this endpoint");
+      if (!current?.ipAddress||current.state!=="running") throw new Error("NapCat container is not available for QR refresh");
+      const base=new URL(`http://${current.ipAddress}:6099`);
       await onProgress({phase:"applying-configuration",percent:60,message:"Authenticating for QR refresh"});
       const credential=await this.webCredential(command.endpointId,base);
       await onProgress({phase:"applying-configuration",percent:70,message:"Refreshing NapCat login QR"});
@@ -638,6 +659,7 @@ export class NapCatRuntime {
   }> {
     this.assertAllowed(command);
     const inspected = await this.docker().inspect(this.containerName(command.endpointId));
+    if(inspected&&!this.ownsContainer(inspected,command))throw new Error("NapCat container is not owned by this endpoint");
     if (!inspected || inspected.state !== "running" || !inspected.ipAddress) {
       return { endpointId: command.endpointId, generation: command.generation, runtime: "stopped", provider: "unknown", protocol: "disconnected", convergence: "reconciling", metadata: {} };
     }
@@ -746,10 +768,13 @@ export class NapCatRuntime {
     return Promise.all([...this.commands.values()].map(async command => {
       const cached = this.snapshotCache.get(command.endpointId);
       if (cached && Date.now() - cached.at < 15_000) {
-        const metadata = cached.value.runtime === "ready"
-          ? { ...cached.value.metadata, traffic: await this.protocolTraffic(command.endpointId) }
-          : cached.value.metadata;
-        return { endpointId:cached.value.endpointId,generation:cached.value.generation,runtime:cached.value.runtime,provider:cached.value.provider,protocol:cached.value.protocol,convergence:cached.value.convergence,metadata };
+        const inspected=await this.docker().inspect(this.containerName(command.endpointId));
+        if(inspected&&inspected.state==="running"&&inspected.ipAddress&&this.ownsContainer(inspected,command)){
+          const metadata = cached.value.runtime === "ready"
+            ? { ...cached.value.metadata, traffic: await this.protocolTraffic(command.endpointId) }
+            : cached.value.metadata;
+          return { endpointId:cached.value.endpointId,generation:cached.value.generation,runtime:cached.value.runtime,provider:cached.value.provider,protocol:cached.value.protocol,convergence:cached.value.convergence,metadata };
+        }
       }
       try {
         const snapshot = await this.snapshot(command);
