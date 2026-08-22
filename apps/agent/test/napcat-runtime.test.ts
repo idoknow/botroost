@@ -2,7 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { NAPCAT_IMAGE, NapCatRuntime, type DockerClient, type DockerInspectResult } from "../src/index.js";
+import { isDockerObjectMissingError, NAPCAT_IMAGE, NapCatRuntime, type DockerClient, type DockerInspectResult } from "../src/index.js";
 import type { RuntimeCommand } from "@botroost/agent-protocol";
 
 const baseCommand: RuntimeCommand = {
@@ -65,6 +65,12 @@ class RecordingDocker implements DockerClient {
 }
 
 describe("NapCat runtime", () => {
+  it("accepts Docker and OrbStack missing-object error casing", () => {
+    expect(isDockerObjectMissingError({ stderr: "Error: No such object: missing" })).toBe(true);
+    expect(isDockerObjectMissingError({ stderr: "error: no such object: missing" })).toBe(true);
+    expect(isDockerObjectMissingError({ stderr: "permission denied" })).toBe(false);
+  });
+
   it("recreates an existing managed container when the pinned NapCat image changes", async () => {
     const docker = new RecordingDocker();
     docker.inspect = async name => ({ id: "old", name, image: "mlikiowa/napcat-docker@sha256:old", state: "running", ipAddress: "172.18.0.10", labels: { "botroost.workspace_id": baseCommand.workspaceId, "botroost.endpoint_id": baseCommand.endpointId, "botroost.provider": "napcat" } });

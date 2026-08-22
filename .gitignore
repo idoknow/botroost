@@ -2,5 +2,7 @@ node_modules/
 dist/
 .turbo/
 coverage/
+.env
+.env.local
 *.log
 *.tmp

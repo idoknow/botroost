@@ -73,6 +73,11 @@ export interface DockerClient {
   logs(container: string, options: { tail: number; sinceSeconds: number; timestamps?: boolean; maxBytes?: number }): Promise<string>;
 }
 
+export function isDockerObjectMissingError(error: unknown): boolean {
+  const stderr = (error as { stderr?: unknown } | null)?.stderr;
+  return /no such object/i.test(String(stderr ?? ""));
+}
+
 export class DockerCliClient implements DockerClient {
   private async docker(args: string[], maxBuffer = 1024 * 1024) {
     const { stdout, stderr } = await execFileAsync("docker", args, { timeout: 30_000, maxBuffer });
@@ -96,8 +101,7 @@ export class DockerCliClient implements DockerClient {
         labels: ((item.Config as Record<string, unknown> | undefined)?.Labels as Record<string, string> | undefined) ?? {},
       };
     } catch (error) {
-      const stderr = (error as { stderr?: string }).stderr ?? "";
-      if (String(stderr).includes("No such object")) return null;
+      if (isDockerObjectMissingError(error)) return null;
       throw error;
     }
   }

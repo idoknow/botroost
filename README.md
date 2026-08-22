@@ -68,7 +68,7 @@ WebSocket client and server configuration is shown separately because transport 
 
 | Component | Responsibility |
 | --- | --- |
-| `apps/api` | HTTP API, sessions, RBAC, endpoint desired state, operation dispatch, audit, settings, node WebSocket control plane |
+| `apps/api` | HTTP API, sessions, RBAC, endpoint desired state, operation dispatch, audit, settings, node heartbeat and command-polling control plane |
 | `apps/agent` | Node enrollment, control session, runtime-driver execution, NapCat lifecycle and management commands |
 | `apps/worker` | Operation timeout/recovery and notification processing |
 | `apps/web` | Operator console for cluster, endpoint, node, change, audit, and workspace views |
@@ -78,28 +78,71 @@ WebSocket client and server configuration is shown separately because transport 
 | `packages/provider-napcat` | NapCat runtime driver |
 | `packages/provider-fake` | Deterministic test driver |
 
-The agent opens an outbound authenticated WebSocket to the API. The API claims operations transactionally and dispatches commands with endpoint generation and node connection-session fencing. The agent reports results and observed endpoint state; PostgreSQL remains the source of truth.
+The agent makes outbound authenticated HTTP requests to heartbeat, claim commands, and report receipts, results, and observed endpoint state. The API claims operations transactionally and dispatches commands with endpoint generation and node connection-session fencing; PostgreSQL remains the source of truth.
 
-## Quick start
+## Local development
 
-Requirements: Node.js 22+, pnpm 10+, Docker, and PostgreSQL 16+.
+Requirements: Node.js 22+, Bun 1.3.14, Docker, and PostgreSQL 16+. The repository is a Bun workspace; the older pnpm lockfile is retained for compatibility, but the current `packageManager` and canonical local commands use Bun.
+
+Install dependencies, create the local environment file, and generate a 32-byte credential key:
 
 ```bash
-pnpm install
+bun install --frozen-lockfile
 cp .env.example .env
-pnpm db:migrate
-pnpm db:seed
-pnpm dev
+openssl rand -base64 32
+openssl rand -hex 32
 ```
+
+Paste the generated values into `CREDENTIAL_MASTER_KEY` and `NAPCAT_TOKEN` in `.env`, and replace the two Agent state paths with the same writable absolute directory. Bun loads this file automatically for the development commands below.
+
+Start PostgreSQL the first time, then build the workspace packages and apply migrations:
+
+```bash
+docker run -d --name botroost-dev-postgres \
+  -e POSTGRES_USER=botroost \
+  -e POSTGRES_PASSWORD=botroost_dev \
+  -e POSTGRES_DB=botroost \
+  -p 127.0.0.1:5432:5432 \
+  postgres:16-alpine
+
+bun run build
+bun --env-file=.env --filter @botroost/api migrate
+```
+
+On later runs, use `docker start botroost-dev-postgres`. Bootstrap the first owner once; the command reads the password from standard input, so enter it and press Ctrl-D when finished:
+
+```bash
+bun apps/api/dist/cli.js bootstrap \
+  --email owner@example.com \
+  --workspace Local
+```
+
+Run the API, worker, and web app in separate terminals:
+
+```bash
+bun --watch apps/api/src/server.ts
+bun --watch apps/worker/src/cli.ts
+bun --filter @botroost/web dev --host 127.0.0.1 --port 5173
+```
+
+Open `http://localhost:5173`. Vite proxies `/api` to the API on port 3000. Sign in, open **Agent nodes**, and generate a one-time enrollment token. Start the real NapCat Agent in a fourth terminal:
+
+```bash
+ENROLLMENT_TOKEN='paste-the-one-time-token' bun apps/agent/src/cli.ts
+```
+
+The Agent exchanges the token for a persistent node credential in `NODE_STATE_DIR`. Later restarts use that credential, so run `bun apps/agent/src/cli.ts` without the enrollment token. Do not use watch mode for the Agent: its durable journal intentionally allows only one process, and rapid hot reloads are rejected by the journal lock and control-session fencing. The source Agent currently supports `napcat` and the test-only `fake` provider; `.env.example` selects `napcat`. On macOS, a host-run NapCat Agent requires a Docker runtime that makes bridge-network container addresses reachable from the host, such as OrbStack. Otherwise, run the Agent in a container attached to `NAPCAT_DOCKER_NETWORK`, as in the production Compose stack.
+
+When editing a shared workspace package, rerun `bun run build` so its `dist` output is refreshed.
 
 Package scripts:
 
 ```bash
-pnpm typecheck
-pnpm lint
-pnpm test
-pnpm build
-pnpm --filter @botroost/web e2e
+bun run typecheck
+bun run lint
+bun run test
+bun run build
+bun --filter @botroost/web e2e
 ```
 
 For a production-shaped local stack:
@@ -145,7 +188,7 @@ Production images are built from a single Git SHA and published for API, worker,
 - endpoint health-layer convergence;
 - authenticated web behavior in both light and dark modes.
 
-See [`deploy/compose.yml`](deploy/compose.yml), [`docs/deployment-runbook.md`](docs/deployment-runbook.md), and [`docs/agent-installation.md`](docs/agent-installation.md).
+See [`deploy/compose.yml`](deploy/compose.yml), [`docs/deployment.md`](docs/deployment.md), and [`docs/threat-model.md`](docs/threat-model.md).
 
 ## License
 
