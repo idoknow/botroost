@@ -531,16 +531,23 @@ describe("NapCat runtime", () => {
     expect(authCalls).toBe(2);
   });
 
-  it("marks login-required QR state offline when login info omits online", async () => {
+  it("marks login-required QR state offline when login info is rejected", async () => {
     const docker = new RecordingDocker();
     docker.inspect = async () => ({ id:"container-id",name:"botroost-napcat-33333333-3333-4333-8333-333333333333",image:NAPCAT_IMAGE,state:"running" as const,ipAddress:"172.18.0.10",labels:{"botroost.workspace_id":baseCommand.workspaceId,"botroost.endpoint_id":baseCommand.endpointId,"botroost.provider":"napcat"} });
     const paths:string[]=[];
-    const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"botroost-napcat-login-required-")),napcatToken:"operator-token",fetcher:async url=>{const path=new URL(String(url)).pathname;paths.push(path);if(path==="/api/auth/login")return new Response(JSON.stringify({code:0,data:{Credential:"credential"}}));if(path==="/api/QQLogin/GetQQLoginInfo")return new Response(JSON.stringify({code:0,data:{uid:"known-account"}}));if(path==="/api/QQLogin/CheckLoginStatus")return new Response(JSON.stringify({code:0,data:{isLogin:false,isOffline:false,qrcodeurl:"data:image/png;base64,qr",loginError:""}}));if(path==="/api/QQLogin/GetQQLoginQrcode")return new Response(JSON.stringify({code:0,data:{qrcode:"qr-current"}}));throw new Error(`unexpected probe ${path}`)}});
+    const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"botroost-napcat-login-required-")),napcatToken:"operator-token",fetcher:async url=>{const path=new URL(String(url)).pathname;paths.push(path);if(path==="/api/auth/login")return new Response(JSON.stringify({code:0,data:{Credential:"credential"}}));if(path==="/api/QQLogin/GetQQLoginInfo")return new Response(JSON.stringify({code:-1,message:"Login required"}));if(path==="/api/QQLogin/CheckLoginStatus")return new Response(JSON.stringify({code:0,data:{isLogin:false,isOffline:false,qrcodeurl:"data:image/png;base64,qr",loginError:"Login required"}}));if(path==="/api/QQLogin/GetQQLoginQrcode")return new Response(JSON.stringify({code:0,data:{qrcode:"qr-current"}}));throw new Error(`unexpected probe ${path}`)}});
     const snapshot=await runtime.snapshot(baseCommand);
-    expect(snapshot.metadata.qq).toEqual({uid:"known-account",online:false});
+    expect(snapshot.metadata.qq).toEqual({online:false});
     expect(snapshot.metadata.login).toEqual({qrcode:"qr-current"});
     expect(paths).toContain("/api/QQLogin/CheckLoginStatus");
     expect(paths).not.toContain("/api/Debug/create");
+  });
+
+  it("fails closed when rejected login info has no explicit fallback state", async () => {
+    const docker = new RecordingDocker();
+    docker.inspect = async () => ({ id:"container-id",name:"botroost-napcat-33333333-3333-4333-8333-333333333333",image:NAPCAT_IMAGE,state:"running" as const,ipAddress:"172.18.0.10",labels:{"botroost.workspace_id":baseCommand.workspaceId,"botroost.endpoint_id":baseCommand.endpointId,"botroost.provider":"napcat"} });
+    const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"botroost-napcat-ambiguous-fallback-")),napcatToken:"operator-token",fetcher:async url=>{const path=new URL(String(url)).pathname;if(path==="/api/auth/login")return new Response(JSON.stringify({code:0,data:{Credential:"credential"}}));if(path==="/api/QQLogin/GetQQLoginInfo")return new Response(JSON.stringify({code:-1,message:"database corrupt"}));if(path==="/api/QQLogin/CheckLoginStatus")return new Response(JSON.stringify({code:0,data:{isLogin:false,isOffline:false,qrcodeurl:"",loginError:""}}));throw new Error(`unexpected probe ${path}`)}});
+    await expect(runtime.snapshot(baseCommand)).rejects.toThrow("database corrupt");
   });
 
   it("keeps a fresh QR available while QQ is not logged in and skips unavailable OneBot probes", async () => {

@@ -682,16 +682,26 @@ export class NapCatRuntime {
     const base = new URL(`http://${inspected.ipAddress}:6099`);
     const traffic = await this.protocolTraffic(command.endpointId);
     const webToken=await this.webCredential(command.endpointId,base);
-    const loginInfo = await this.napcatRequest(base, "/api/QQLogin/GetQQLoginInfo", await this.webCredential(command.endpointId,base), {}, command.endpointId);
     const objectData = (value: JsonObject): JsonObject => {
       const data = value.data;
       return data !== null && typeof data === "object" && !Array.isArray(data) ? data : value;
     };
-    const rawQq=objectData(loginInfo);
+    let rawQq:JsonObject={};
+    let loginInfoError:unknown;
+    try {
+      rawQq=objectData(await this.napcatRequest(base,"/api/QQLogin/GetQQLoginInfo",webToken,{},command.endpointId));
+    } catch(error) {
+      loginInfoError=error;
+    }
     let online=typeof rawQq.online==="boolean"?rawQq.online:null;
     if(online===null){
-      const loginStatus=objectData(await this.napcatRequest(base,"/api/QQLogin/CheckLoginStatus",webToken,{},command.endpointId));
-      online=qqLoginOnline(loginStatus);
+      try {
+        const loginStatus=objectData(await this.napcatRequest(base,"/api/QQLogin/CheckLoginStatus",webToken,{},command.endpointId));
+        online=qqLoginOnline(loginStatus);
+        if(online===null&&loginInfoError)throw loginInfoError;
+      } catch(error) {
+        throw loginInfoError??error;
+      }
     }
     const qq:JsonObject={...rawQq,online};
     if(online!==true){
