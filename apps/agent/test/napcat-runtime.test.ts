@@ -2,7 +2,7 @@ import { access, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { dockerCreateArguments, isDockerObjectMissingError, NAPCAT_IMAGE, NapCatRuntime, type DockerClient, type DockerInspectResult } from "../src/index.js";
+import { dockerCreateArguments, isDockerObjectMissingError, NAPCAT_IMAGE, NapCatRuntime, qqLoginOnline, type DockerClient, type DockerInspectResult } from "../src/index.js";
 import type { RuntimeCommand } from "@botroost/agent-protocol";
 
 const baseCommand: RuntimeCommand = {
@@ -71,6 +71,16 @@ class RecordingDocker implements DockerClient {
 }
 
 describe("NapCat runtime", () => {
+  it("maps only explicit NapCat login states to an online boolean", () => {
+    expect(qqLoginOnline({ isLogin: true, isOffline: false })).toBe(true);
+    expect(qqLoginOnline({ isLogin: false, isOffline: true })).toBe(false);
+    expect(qqLoginOnline({ isLogin: false, isOffline: false, qrcodeurl: "data:image/png;base64,qr" })).toBe(false);
+    expect(qqLoginOnline({ isLogin: false, isOffline: false, loginError: "login required" })).toBe(false);
+    expect(qqLoginOnline({ isLogin: false, isOffline: false })).toBeNull();
+    expect(qqLoginOnline({ isLogin: true, isOffline: true })).toBeNull();
+    expect(qqLoginOnline({})).toBeNull();
+  });
+
   it("translates the recommended limits into exact Docker CPU, RAM, and swap flags", () => {
     const args=dockerCreateArguments({name:"napcat",image:NAPCAT_IMAGE,labels:{},mounts:[],hostConfig:{networkMode:"bridge",portBindings:{}},resources:{cpuMillis:1000,memoryMiB:1024,memorySwapMiB:1536}});
     expect(args).toEqual(expect.arrayContaining(["--memory","1024m","--memory-swap","1536m","--cpu-quota","100000"]));
@@ -345,7 +355,8 @@ describe("NapCat runtime", () => {
         calls.push({ url: String(url), ...(init === undefined ? {} : { init }) });
         if (String(url).endsWith("/api/auth/login")) return new Response(JSON.stringify({ code: 0, data: { Credential: "web-token" } }), { status: 200 });
         if (String(url).endsWith("/api/QQLogin/GetQQLoginQrcode")) return new Response(JSON.stringify({ data: { qrcode: "otpauth://qq-login" } }), { status: 200 });
-        if (String(url).endsWith("/api/QQLogin/GetQQLoginInfo")) return new Response(JSON.stringify({ code: 0, data: { uin: "12345", nickname: "Operator QQ", online: true } }), { status: 200 });
+        if (String(url).endsWith("/api/QQLogin/GetQQLoginInfo")) return new Response(JSON.stringify({ code: 0, data: { uin: "12345", nickname: "Operator QQ" } }), { status: 200 });
+        if (String(url).endsWith("/api/QQLogin/CheckLoginStatus")) return new Response(JSON.stringify({ code: 0, data: { isLogin: true, isOffline: false, qrcodeurl: "stale-qr", loginError: "" } }), { status: 200 });
         if (String(url).endsWith("/api/Debug/create")) return new Response(JSON.stringify({ data: { adapterName: "debug-session" } }), { status: 200 });
         if (String(url).endsWith("/api/OB11Config/GetConfig")) return new Response(JSON.stringify({ code: 0, data: { network: { websocketServers: [], websocketClients: [] } } }), { status: 200 });
         const action = JSON.parse(String(init?.body ?? "{}"))?.action;
@@ -362,6 +373,7 @@ describe("NapCat runtime", () => {
     expect(calls.map(call => new URL(call.url).pathname)).toEqual([
       "/api/auth/login",
       "/api/QQLogin/GetQQLoginInfo",
+      "/api/QQLogin/CheckLoginStatus",
       "/api/Debug/create",
       "/api/Debug/call/debug-session",
       "/api/Debug/call/debug-session",
@@ -375,7 +387,7 @@ describe("NapCat runtime", () => {
     });
     expect(calls.slice(1).every(call => (call.init?.headers as Record<string, string>).authorization === "Bearer web-token")).toBe(true);
     expect(snapshot.metadata).toMatchObject({
-      qq: { uin: "12345", nickname: "Operator QQ" },
+      qq: { uin: "12345", nickname: "Operator QQ", online: true },
       login: {},
       onebot: {
         status: { online: true },
@@ -517,6 +529,18 @@ describe("NapCat runtime", () => {
     const snapshot=await runtime.snapshot(baseCommand);
     expect(snapshot.metadata.login).toEqual({qrcode:"qr-current"});
     expect(authCalls).toBe(2);
+  });
+
+  it("marks login-required QR state offline when login info omits online", async () => {
+    const docker = new RecordingDocker();
+    docker.inspect = async () => ({ id:"container-id",name:"botroost-napcat-33333333-3333-4333-8333-333333333333",image:NAPCAT_IMAGE,state:"running" as const,ipAddress:"172.18.0.10",labels:{"botroost.workspace_id":baseCommand.workspaceId,"botroost.endpoint_id":baseCommand.endpointId,"botroost.provider":"napcat"} });
+    const paths:string[]=[];
+    const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"botroost-napcat-login-required-")),napcatToken:"operator-token",fetcher:async url=>{const path=new URL(String(url)).pathname;paths.push(path);if(path==="/api/auth/login")return new Response(JSON.stringify({code:0,data:{Credential:"credential"}}));if(path==="/api/QQLogin/GetQQLoginInfo")return new Response(JSON.stringify({code:0,data:{uid:"known-account"}}));if(path==="/api/QQLogin/CheckLoginStatus")return new Response(JSON.stringify({code:0,data:{isLogin:false,isOffline:false,qrcodeurl:"data:image/png;base64,qr",loginError:""}}));if(path==="/api/QQLogin/GetQQLoginQrcode")return new Response(JSON.stringify({code:0,data:{qrcode:"qr-current"}}));throw new Error(`unexpected probe ${path}`)}});
+    const snapshot=await runtime.snapshot(baseCommand);
+    expect(snapshot.metadata.qq).toEqual({uid:"known-account",online:false});
+    expect(snapshot.metadata.login).toEqual({qrcode:"qr-current"});
+    expect(paths).toContain("/api/QQLogin/CheckLoginStatus");
+    expect(paths).not.toContain("/api/Debug/create");
   });
 
   it("keeps a fresh QR available while QQ is not logged in and skips unavailable OneBot probes", async () => {

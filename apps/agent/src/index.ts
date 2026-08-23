@@ -39,6 +39,16 @@ function oneBotActionData(response: JsonObject): JsonValue {
   return envelope.data ?? null;
 }
 
+export function qqLoginOnline(status: JsonObject): boolean | null {
+  if (status.isLogin === true && status.isOffline === false) return true;
+  if (status.isLogin === true && status.isOffline === true) return null;
+  if (status.isOffline === true) return false;
+  const qrRequired = typeof status.qrcodeurl === "string" && status.qrcodeurl.length > 0;
+  const loginFailed = typeof status.loginError === "string" && status.loginError.length > 0;
+  if (status.isLogin === false && (qrRequired || loginFailed)) return false;
+  return null;
+}
+
 const execFileAsync = promisify(execFile);
 export const NAPCAT_IMAGE =
   "mlikiowa/napcat-docker@sha256:1336a777f9a4f1f8cb89fef42f7548deacd3645919a067a50df5b66b5e77390e";
@@ -677,8 +687,14 @@ export class NapCatRuntime {
       const data = value.data;
       return data !== null && typeof data === "object" && !Array.isArray(data) ? data : value;
     };
-    const qq=objectData(loginInfo);
-    if(qq.online!==true){
+    const rawQq=objectData(loginInfo);
+    let online=typeof rawQq.online==="boolean"?rawQq.online:null;
+    if(online===null){
+      const loginStatus=objectData(await this.napcatRequest(base,"/api/QQLogin/CheckLoginStatus",webToken,{},command.endpointId));
+      online=qqLoginOnline(loginStatus);
+    }
+    const qq:JsonObject={...rawQq,online};
+    if(online!==true){
       let qrcode:JsonObject;
       try {
         qrcode=await this.napcatRequest(base,"/api/QQLogin/GetQQLoginQrcode",webToken,{},command.endpointId);
@@ -752,7 +768,7 @@ export class NapCatRuntime {
       protocol: "connected",
       convergence: "converged",
       metadata: {
-        qq: objectData(loginInfo),
+        qq,
         login: {},
         onebot: {
           status: asObject(statusResult.data),
