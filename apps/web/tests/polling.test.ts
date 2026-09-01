@@ -1,5 +1,5 @@
 import {describe,expect,it} from 'bun:test';
-import {createRequestFlight,startCompletionPoller} from '../src/polling';
+import {createRefreshGeneration,createRequestFlight,startCompletionPoller} from '../src/polling';
 
 const flush=()=>new Promise(resolve=>setTimeout(resolve,0));
 
@@ -31,6 +31,23 @@ describe('createRequestFlight',()=>{
     void second.run();
     second.dispose();
     expect(signals[1]!.aborted).toBe(true);
+  });
+});
+
+describe('createRefreshGeneration',()=>{
+  it('lets only the latest refresh completion clear refreshing state',()=>{
+    const generation=createRefreshGeneration();
+    const first=generation.begin();
+    const second=generation.begin();
+    expect(generation.complete(first)).toBe(false);
+    expect(generation.complete(second)).toBe(true);
+  });
+
+  it('ignores refresh completion after disposal',()=>{
+    const generation=createRefreshGeneration();
+    const current=generation.begin();
+    generation.dispose();
+    expect(generation.complete(current)).toBe(false);
   });
 });
 

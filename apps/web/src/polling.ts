@@ -2,6 +2,16 @@ type Timer=ReturnType<typeof setTimeout>;
 type Schedule=(callback:()=>void,delay:number)=>Timer;
 type Cancel=(timer:Timer)=>void;
 
+export function createRefreshGeneration(){
+  let current=0;
+  let disposed=false;
+  return{
+    begin(){return++current},
+    complete(generation:number){return!disposed&&generation===current},
+    dispose(){disposed=true},
+  };
+}
+
 export function createRequestFlight(request:(signal:AbortSignal)=>Promise<void>,timeoutMs:number,schedule:Schedule=setTimeout,cancel:Cancel=clearTimeout){
   let disposed=false;
   let inFlight:Promise<void>|undefined;

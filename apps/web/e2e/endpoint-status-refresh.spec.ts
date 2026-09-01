@@ -18,7 +18,7 @@ test('endpoint status bootstraps concurrently and manual refresh keeps the curre
   let sessionFinished=false;
   let endpointRequests=0;
   let endpointStartedBeforeSessionFinished=false;
-  let failNextEndpointRequest=false;
+  let failEndpointRequests=false;
 
   await page.route('**/api/v1/**',async route=>{
     const path=new URL(route.request().url()).pathname;
@@ -32,7 +32,7 @@ test('endpoint status bootstraps concurrently and manual refresh keeps the curre
       endpointRequests+=1;
       if(!sessionFinished)endpointStartedBeforeSessionFinished=true;
       if(endpointRequests>1)await wait(500);
-      if(failNextEndpointRequest){failNextEndpointRequest=false;return json({error:{message:'temporary probe failure'}},500)}
+      if(failEndpointRequests)return json({error:{message:'temporary probe failure'}},500);
       return json({items:[endpoint],page:1,pageSize:25,total:1});
     }
     if(path.endsWith('/nodes'))return json({items:[endpoint.node],page:1,pageSize:25,total:1});
@@ -56,14 +56,17 @@ test('endpoint status bootstraps concurrently and manual refresh keeps the curre
   await expect.poll(()=>endpointRequests).toBeGreaterThan(1);
   await expect(refresh).toBeEnabled();
 
-  failNextEndpointRequest=true;
+  failEndpointRequests=true;
+  const beforeFailure=endpointRequests;
   await refresh.click();
   await expect(refresh).toBeDisabled();
   await expect(refresh).toBeEnabled();
-  await expect(tableEndpoint).toBeVisible();
+  await expect.poll(()=>endpointRequests).toBeGreaterThan(beforeFailure);
+  await expect(tableEndpoint).toBeVisible({timeout:500});
   await expect(page.getByText('temporary probe failure')).toHaveCount(0);
 
   await page.setViewportSize({width:320,height:760});
   await expect(refresh).toBeVisible();
+  await expect(refresh.getByText('Refresh',{exact:true})).toBeHidden();
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=document.documentElement.clientWidth)).toBe(true);
 });

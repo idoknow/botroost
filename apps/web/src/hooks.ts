@@ -1,6 +1,6 @@
 import {useCallback,useEffect,useRef,useState} from 'react';
 import {api} from './api';
-import {createRequestFlight,startCompletionPoller} from './polling';
+import {createRefreshGeneration,createRequestFlight,startCompletionPoller} from './polling';
 
 const POLL_TIMEOUT_MS=10_000;
 
@@ -14,18 +14,24 @@ export function useApi<T>(path:string,interval?:number|((data:T|undefined)=>numb
   const dataRef=useRef<T|undefined>(undefined);
   const intervalRef=useRef(interval);
   const flightRef=useRef<RequestFlight|undefined>(undefined);
+  const refreshGenerationRef=useRef(createRefreshGeneration());
   intervalRef.current=interval;
 
   const refresh=useCallback(async()=>{
     const flight=flightRef.current;
     if(!flight)return;
+    const generation=refreshGenerationRef.current;
+    const current=generation.begin();
     setRefreshing(true);
-    try{await flight.run()}finally{setRefreshing(false)}
+    try{await flight.run()}finally{if(generation.complete(current))setRefreshing(false)}
   },[]);
 
   useEffect(()=>{
     if(!enabled){setLoading(false);return}
     let disposed=false;
+    const refreshGeneration=createRefreshGeneration();
+    refreshGenerationRef.current=refreshGeneration;
+    setRefreshing(false);
     const flight=createRequestFlight(async signal=>{
       try{
         const next=await api.get<T>(path,{signal});
@@ -43,6 +49,7 @@ export function useApi<T>(path:string,interval?:number|((data:T|undefined)=>numb
     });
     return()=>{
       disposed=true;
+      refreshGeneration.dispose();
       stop();
       flight.dispose();
       if(flightRef.current===flight)flightRef.current=undefined;

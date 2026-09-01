@@ -7,7 +7,8 @@ const session={user:{id:'fixture-user',email:'ops@example.test',name:'Rock'},wor
 async function mockProduct(page:Page,{failSave=false,failDelete=false,loggedIn=true,directorySize=1,startupProgress=false}:{failSave?:boolean;failDelete?:boolean;loggedIn?:boolean;directorySize?:number;startupProgress?:boolean}={}){
   const friends=Array.from({length:directorySize},(_,index)=>({user_id:index+7,nickname:directorySize===1?'Friend':`Friend ${index+1}`}));
   let statusRequests=0;
-  let endpointRequests=0;
+  let endpointListRequests=0;
+  let endpointDetailRequests=0;
   let deleteRequests=0;
   let deletePayload:unknown;
   let endpointDeleted=false;
@@ -25,15 +26,15 @@ async function mockProduct(page:Page,{failSave=false,failDelete=false,loggedIn=t
       else{const sampledAt=new Date().toISOString();body={qq:loggedIn?{uin:'960164003',online:true}:null,onebot:{...(loggedIn?{loginInfo:{user_id:960164003},status:{online:true},version:{app_name:'NapCat.OneBot11',app_version:'4.18.19'},probes:{get_status:{ok:true,durationMs:5,error:null},get_login_info:{ok:true,durationMs:6,error:null},get_version_info:{ok:true,durationMs:7,error:null},get_friend_list:{ok:true,durationMs:841,error:null},get_group_list:{ok:true,durationMs:18,error:null}},directory:{observedAt:'2026-08-21T09:00:00.000Z',friends:{count:directorySize,truncated:false,observedAt:'2026-08-21T09:00:00.000Z',items:friends,probe:{ok:true,durationMs:841,error:null}},groups:{count:1,truncated:false,observedAt:'2026-08-21T09:00:00.000Z',items:[{group_id:8,group_name:'Group'}],probe:{ok:true,durationMs:18,error:null}}}}:{}),config:{websocketClients:[{name:'Campux bridge',enable:true,url:'wss://app.campux.top/onebot/v11/ws',messagePostFormat:'array',reportSelfMessage:false,debug:false,heartInterval:30000,reconnectInterval:5000,tokenConfigured:true}],websocketServers:[]}},traffic:{status:'ok',source:'napcat.container_logs',privacy:'aggregate_only',observedAt:sampledAt,sampleIntervalSeconds:5,oneMinute:{inbound:1,outbound:1,total:2,bytes:196},fiveMinutes:{inbound:4,outbound:2,total:6,bytes:588},buckets:[{startedAt:'2026-08-21T08:59:10.000Z',inbound:0,outbound:0,total:0},{startedAt:'2026-08-21T08:59:20.000Z',inbound:1,outbound:0,total:1},{startedAt:'2026-08-21T08:59:30.000Z',inbound:0,outbound:1,total:1},{startedAt:'2026-08-21T08:59:40.000Z',inbound:2,outbound:0,total:2},{startedAt:'2026-08-21T08:59:50.000Z',inbound:0,outbound:0,total:0},{startedAt:'2026-08-21T09:00:00.000Z',inbound:1,outbound:1,total:2}],recent:[{at:'2026-08-21T09:00:04.000Z',direction:'inbound',scope:'group',bytes:120},{at:'2026-08-21T09:00:01.000Z',direction:'outbound',scope:'private',bytes:76}],recentConnections:[{at:'2026-08-21T09:00:03.000Z',transport:'websocket-client',status:'reconnecting'}]},freshness:{fresh:true,observationAt:sampledAt,nodeHeartbeatAt:sampledAt,checkedAt:sampledAt,staleAfterSeconds:15}};}
     }
     else if(path.endsWith('/endpoints/fixture-endpoint/napcat/login-qrcode'))body={qrcode:'https://example.test/qq-login'};
-    else if(path.endsWith('/endpoints/fixture-endpoint')){if(endpointDeleted){status=404;body={error:{message:'Unavailable'}}}else if(startupProgress){startupStartedAt??=Date.now();const stageIndex=Math.floor((Date.now()-startupStartedAt)/1500),stages=[{phase:'inspecting-runtime',percent:25,message:'Inspecting existing runtime'},{phase:'creating-container',percent:55,message:'Creating NapCat container'},{phase:'probing-provider',percent:85,message:'Waiting for NapCat runtime readiness'}];if(stageIndex<stages.length){const progress={...stages[stageIndex]!,sequence:stageIndex+1,updatedAt:new Date().toISOString()};body={...endpoint,activeOperationId:'start-operation',activeOperation:{id:'start-operation',action:'start',status:'running',progress,createdAt:new Date(startupStartedAt).toISOString(),updatedAt:new Date().toISOString()}}}else body=endpoint;}else body=endpoint;}
+    else if(path.endsWith('/endpoints/fixture-endpoint')){endpointDetailRequests+=1;if(endpointDeleted){status=404;body={error:{message:'Unavailable'}}}else if(startupProgress){startupStartedAt??=Date.now();const stageIndex=Math.floor((Date.now()-startupStartedAt)/1500),stages=[{phase:'inspecting-runtime',percent:25,message:'Inspecting existing runtime'},{phase:'creating-container',percent:55,message:'Creating NapCat container'},{phase:'probing-provider',percent:85,message:'Waiting for NapCat runtime readiness'}];if(stageIndex<stages.length){const progress={...stages[stageIndex]!,sequence:stageIndex+1,updatedAt:new Date().toISOString()};body={...endpoint,activeOperationId:'start-operation',activeOperation:{id:'start-operation',action:'start',status:'running',progress,createdAt:new Date(startupStartedAt).toISOString(),updatedAt:new Date().toISOString()}}}else body=endpoint;}else body=endpoint;}
     else if(path.endsWith('/nodes/enrollment-tokens')&&route.request().method()==='POST')body={token:'fixture-enrollment-token'};
     else if(path.endsWith('/workspaces/current/settings/alerts'))body={graceSeconds:180,targets:[],defaults:{offlineTargetIds:[],recoveryTargetIds:[]},endpoints:[{id:endpoint.id,name:endpoint.name,providerId:endpoint.providerId,offlineTargetIds:[],recoveryTargetIds:[]}]};
     else if(path.endsWith('/nodes'))body={items:[endpoint.node],page:1,pageSize:25,total:1};
-    else if(path.endsWith('/endpoints')){endpointRequests+=1;const items=endpointDeleted?[]:[endpoint,{...endpoint,id:'fixture-needs-login',name:'Needs QQ login',metadata:{qq:{online:false},login:{qrcode:'https://example.test/qq-login'}}},{...endpoint,id:'fixture-unreachable',name:'Unreachable endpoint',status:{...endpoint.status,node:'offline'},metadata:{qq:{uin:'10000',online:true}}},{...endpoint,id:'fixture-unknown',name:'Unknown QQ status',metadata:{qq:{uin:'22222'}}}];body={items,page:1,pageSize:25,total:items.length};}
+    else if(path.endsWith('/endpoints')){endpointListRequests+=1;const items=endpointDeleted?[]:[endpoint,{...endpoint,id:'fixture-needs-login',name:'Needs QQ login',metadata:{qq:{online:false},login:{qrcode:'https://example.test/qq-login'}}},{...endpoint,id:'fixture-unreachable',name:'Unreachable endpoint',status:{...endpoint.status,node:'offline'},metadata:{qq:{uin:'10000',online:true}}},{...endpoint,id:'fixture-unknown',name:'Unknown QQ status',metadata:{qq:{uin:'22222'}}}];body={items,page:1,pageSize:25,total:items.length};}
     else body={items:[],page:1,pageSize:25,total:0};
     await route.fulfill({status,contentType:'application/json',body:JSON.stringify(body)});
   });
-  return {statusRequests:()=>statusRequests,endpointRequests:()=>endpointRequests,deleteRequests:()=>deleteRequests,deletePayload:()=>deletePayload,failStatus:()=>{failStatus=true}};
+  return {statusRequests:()=>statusRequests,endpointListRequests:()=>endpointListRequests,endpointDetailRequests:()=>endpointDetailRequests,deleteRequests:()=>deleteRequests,deletePayload:()=>deletePayload,failStatus:()=>{failStatus=true}};
 }
 
 test.beforeEach(async()=>{await mkdir('test-results/ui-evidence',{recursive:true})});
@@ -44,11 +45,21 @@ test('endpoint detail manually refreshes both endpoint and NapCat status',async(
   await page.goto('/endpoints/fixture-endpoint');
   const refresh=page.getByRole('button',{name:'Refresh this endpoint status'});
   await expect(refresh).toBeVisible();
-  const endpointBefore=fixture.endpointRequests();
+  const listBefore=fixture.endpointListRequests();
+  const detailBefore=fixture.endpointDetailRequests();
   const statusBefore=fixture.statusRequests();
   await refresh.click();
-  await expect.poll(()=>fixture.endpointRequests()).toBeGreaterThan(endpointBefore);
+  await expect.poll(()=>fixture.endpointDetailRequests()).toBeGreaterThan(detailBefore);
   await expect.poll(()=>fixture.statusRequests()).toBeGreaterThan(statusBefore);
+  expect(fixture.endpointListRequests()).toBe(listBefore);
+});
+
+test('endpoint detail uses the normal three second status interval',async({page})=>{
+  const fixture=await mockProduct(page);
+  await page.goto('/endpoints/fixture-endpoint');
+  await expect.poll(fixture.endpointDetailRequests).toBeGreaterThan(0);
+  const detailBefore=fixture.endpointDetailRequests();
+  await expect.poll(fixture.endpointDetailRequests,{timeout:4000}).toBeGreaterThan(detailBefore);
 });
 
 test('inbound server draft survives background status polling',async({page})=>{
@@ -151,8 +162,8 @@ test('create endpoint draft survives sidebar status polling',async({page},testIn
   const dialog=page.getByRole('dialog',{name:'Configure endpoint'});
   await dialog.getByLabel('Node').selectOption('fixture-node');
   await dialog.getByLabel('Name').fill('Persistent endpoint draft');
-  const requestsBefore=fixture.endpointRequests();
-  await expect.poll(fixture.endpointRequests,{timeout:5000}).toBeGreaterThan(requestsBefore);
+  const requestsBefore=fixture.endpointListRequests();
+  await expect.poll(fixture.endpointListRequests,{timeout:5000}).toBeGreaterThan(requestsBefore);
   await expect(dialog.getByLabel('Name')).toHaveValue('Persistent endpoint draft');
   await expect(dialog.getByLabel('Node')).toHaveValue('fixture-node');
   await expect(dialog.locator('.modal-body')).toBeVisible();
@@ -332,16 +343,16 @@ test('marks retained traffic unavailable when background polling fails',async({p
 });
 
 test('sidebar refreshes every endpoint and exposes QQ login state',async({page})=>{
-  const {endpointRequests}=await mockProduct(page);
+  const {endpointListRequests}=await mockProduct(page);
   await page.goto('/endpoints/fixture-endpoint');
   const sidebar=page.locator('[data-sidebar-section="endpoints"]');
   await expect(sidebar.getByText('QQ 960164003 online')).toBeVisible();
   await expect(sidebar.getByText('QQ login required')).toBeVisible();
   await expect(sidebar.getByText('Endpoint unreachable')).toBeVisible();
   await expect(sidebar.getByText('QQ status unknown')).toBeVisible();
-  const before=endpointRequests();
+  const before=endpointListRequests();
   await page.waitForTimeout(3300);
-  expect(endpointRequests()).toBeGreaterThan(before);
+  expect(endpointListRequests()).toBeGreaterThan(before);
 });
 
 test('workspace navigation uses the shared Campux pill tab styling',async({page})=>{
