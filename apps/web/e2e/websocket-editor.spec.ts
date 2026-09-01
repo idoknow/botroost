@@ -38,6 +38,19 @@ async function mockProduct(page:Page,{failSave=false,failDelete=false,loggedIn=t
 
 test.beforeEach(async()=>{await mkdir('test-results/ui-evidence',{recursive:true})});
 
+
+test('endpoint detail manually refreshes both endpoint and NapCat status',async({page})=>{
+  const fixture=await mockProduct(page);
+  await page.goto('/endpoints/fixture-endpoint');
+  const refresh=page.getByRole('button',{name:'Refresh this endpoint status'});
+  await expect(refresh).toBeVisible();
+  const endpointBefore=fixture.endpointRequests();
+  const statusBefore=fixture.statusRequests();
+  await refresh.click();
+  await expect.poll(()=>fixture.endpointRequests()).toBeGreaterThan(endpointBefore);
+  await expect.poll(()=>fixture.statusRequests()).toBeGreaterThan(statusBefore);
+});
+
 test('inbound server draft survives background status polling',async({page})=>{
   const {statusRequests}=await mockProduct(page);
   await page.goto('/endpoints/fixture-endpoint');

@@ -37,6 +37,20 @@ describe('ApiClient',()=>{
   await expect(request).rejects.toMatchObject({name:'TimeoutError'});
   expect((fetcher.mock.calls[0]?.[1] as RequestInit).signal).toBe(controller.signal);
  });
+ it('notifies the client router when a concurrent protected request redirects to login',async()=>{
+  const descriptors={location:Object.getOwnPropertyDescriptor(globalThis,'location'),history:Object.getOwnPropertyDescriptor(globalThis,'history'),dispatchEvent:Object.getOwnPropertyDescriptor(globalThis,'dispatchEvent')};
+  const dispatchEvent=mock((_event:Event)=>true);
+  try{
+   Object.defineProperty(globalThis,'location',{configurable:true,value:{pathname:'/endpoints',search:'?page=2'}});
+   Object.defineProperty(globalThis,'history',{configurable:true,value:{replaceState:mock(()=>undefined)}});
+   Object.defineProperty(globalThis,'dispatchEvent',{configurable:true,value:dispatchEvent});
+   await expect(new ApiClient(sequence(new Response('',{status:401})) as unknown as typeof fetch).get('/endpoints')).rejects.toMatchObject({status:401});
+   expect(dispatchEvent).toHaveBeenCalledTimes(1);
+   expect(dispatchEvent.mock.calls[0]?.[0]).toEqual(expect.objectContaining({type:'popstate'}));
+  }finally{
+   for(const [key,descriptor] of Object.entries(descriptors))if(descriptor)Object.defineProperty(globalThis,key,descriptor);else delete (globalThis as Record<string,unknown>)[key];
+  }
+ });
  it('represents 404 API gaps as unavailable',async()=>{
   const api=new ApiClient(mock(()=>Promise.resolve(new Response('',{status:404}))));
   await expect(api.get('/missing')).rejects.toEqual(expect.objectContaining({name:'ApiError',status:404,message:'Unavailable'}));

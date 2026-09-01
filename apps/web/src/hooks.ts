@@ -10,12 +10,18 @@ export function useApi<T>(path:string,interval?:number|((data:T|undefined)=>numb
   const[data,setData]=useState<T>();
   const[error,setError]=useState<Error>();
   const[loading,setLoading]=useState(enabled);
+  const[refreshing,setRefreshing]=useState(false);
   const dataRef=useRef<T|undefined>(undefined);
   const intervalRef=useRef(interval);
   const flightRef=useRef<RequestFlight|undefined>(undefined);
   intervalRef.current=interval;
 
-  const refresh=useCallback(()=>flightRef.current?.run()??Promise.resolve(),[]);
+  const refresh=useCallback(async()=>{
+    const flight=flightRef.current;
+    if(!flight)return;
+    setRefreshing(true);
+    try{await flight.run()}finally{setRefreshing(false)}
+  },[]);
 
   useEffect(()=>{
     if(!enabled){setLoading(false);return}
@@ -43,7 +49,7 @@ export function useApi<T>(path:string,interval?:number|((data:T|undefined)=>numb
     };
   },[path,enabled]);
 
-  return{data,error,loading,refresh,setData};
+  return{data,error,loading,refresh,refreshing,setData};
 }
 
 export function usePath(){
