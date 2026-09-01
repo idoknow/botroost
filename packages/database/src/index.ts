@@ -30,7 +30,7 @@ export function decryptSecret(e:Envelope,key:Buffer){ const d=createDecipheriv("
 export function redactCredential(c:{name:string}&Envelope){return {name:c.name,configured:Boolean(c.ciphertext)}}
 const nodeFreshMs=120_000;
 const maxCommandAttempts=5;
-const legacyMigrationChecksums:Record<string,readonly string[]>={"0001_control_plane.sql":["011b962aa6d1493033b3c42e7d68b5c905d3b2f1f83666761d74af5cf3b5bb3b"],"0002_outbound_agent.sql":["591d69d25129a5be361930030c52f602f2d85042686f5c306d279d5fb6545cfb"]};
+const legacyMigrationChecksums:Record<string,readonly string[]>={"0001_control_plane.sql":["011b962aa6d1493033b3c42e7d68b5c905d3b2f1f83666761d74af5cf3b5bb3b"],"0002_outbound_agent.sql":["591d69d25129a5be361930030c52f602f2d85042686f5c306d279d5fb6545cfb"],"0016_observations_endpoint_created_index.sql":["1bfde1884aff058846244ff6d466d46119622f07f3c986bc01cffccc721cae76"]};
 const migrationBody=(sql:string)=>sql.replace(/^\s*BEGIN;\s*/i,"").replace(/\s*COMMIT;\s*$/i,"");
 const nodeStatus=(r:Record<string,unknown>)=>{if(!r.node_id)return"unassigned";const last=r.node_last_heartbeat_at?new Date(String(r.node_last_heartbeat_at)).getTime():0;return last&&Date.now()-last<=nodeFreshMs?"online":"offline"};
 const napcatImage="mlikiowa/napcat-docker@sha256:1336a777f9a4f1f8cb89fef42f7548deacd3645919a067a50df5b66b5e77390e";
