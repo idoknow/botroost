@@ -1,6 +1,19 @@
 import { PostgresDatabase } from "@botroost/database";
 import {ResendClient} from "./notifications.js";
 export class DurableWorker{
+  private nextObservationCleanupAt=0;
+  private observationEndpointCursor:string|null=null;
+  private async maintainObservations(){
+    if(Date.now()<this.nextObservationCleanupAt)return;
+    // Reserve cadence before awaiting: concurrent ticks must not overlap maintenance.
+    this.nextObservationCleanupAt=Date.now()+60_000;
+    try{
+      const result=await this.db.pruneObservations({batchSize:200,...(this.observationEndpointCursor?{afterEndpointId:this.observationEndpointCursor}:{})});
+      this.observationEndpointCursor=result.afterEndpointId;
+      if(result.removed)console.info("observation retention",{removed:result.removed});
+    }catch(error){console.warn("observation retention failed",error)}
+    finally{this.nextObservationCleanupAt=Date.now()+60_000}
+  }
   constructor(private db:PostgresDatabase,private emailConfig?:{apiKey:string;from:string},private resend=new ResendClient()){}
   async reconcileMissingOutbox(){return this.db.repairMissingOutbox()}
   async runOnce(){
@@ -8,6 +21,7 @@ export class DurableWorker{
     await this.db.reconcileEndpointNotifications();
     const operationWorked=await this.db.processOne();
     const notificationWorked=this.emailConfig?await this.db.processConfiguredNotification(this.emailConfig,this.resend):false;
+    await this.maintainObservations();
     return operationWorked||notificationWorked;
   }
 }

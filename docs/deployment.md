@@ -49,6 +49,6 @@ curl -fsS https://console.example.com/health
 docker compose logs migrate api worker web
 ```
 
-Stop without deleting data using `docker compose down`. Back up the `postgres-data` volume before upgrades. Apply upgrades with `docker compose build --pull && docker compose up -d`; the advisory-locked ledger validates checksums and applies pending migrations once. Do not use `down -v` unless permanent deletion is intended.
+Stop without deleting data using `docker compose down`. Back up the `postgres-data` volume before upgrades unless the owner explicitly waives backups. For the observation-retention cleanup the owner has requested no backups; follow [observation storage and retention](observation-retention.md) for its bounded cleanup and metadata-only migration contract. Apply upgrades with `docker compose build --pull && docker compose up -d`; the advisory-locked ledger validates checksums and applies pending migrations once. Do not use `down -v` unless permanent deletion is intended.
 
 `DATABASE_PASSWORD_FILE`, `CREDENTIAL_MASTER_KEY_FILE`, `BOOTSTRAP_PASSWORD_FILE`, and `ENROLLMENT_TOKEN_FILE` are consumed by the entrypoint. The Compose defaults mount those file-backed secrets. Email delivery uses the worker-only `RESEND_API_KEY` and `ALERT_EMAIL_FROM` environment variables configured in `deploy/.env`; neither value is editable or returned by the web/API settings surface.
