@@ -62,6 +62,16 @@ const command = {
 };
 
 describe("durable fake agent", () => {
+  it("samples idle heartbeats at five-second cadence without delaying command claims",async()=>{
+    const clock=vi.spyOn(Date,"now").mockReturnValue(10000),transport=new MemoryTransport(null),claim=vi.spyOn(transport,"claim");
+    const agent=await DurableFakeAgent.open({journalPath:join(await mkdtemp(join(tmpdir(),"heartbeat-cadence-")),"journal"),transport});
+    try{await agent.pollOnce();clock.mockReturnValue(11000);await agent.pollOnce();clock.mockReturnValue(14999);await agent.pollOnce();expect(transport.heartbeats).toBe(1);expect(claim).toHaveBeenCalledTimes(3);clock.mockReturnValue(15000);await agent.pollOnce();expect(transport.heartbeats).toBe(2);expect(claim).toHaveBeenCalledTimes(4);clock.mockReturnValue(1000);await agent.pollOnce();expect(transport.heartbeats).toBe(3)}finally{clock.mockRestore();await agent.close()}
+  });
+  it("does not suppress retry of a failed heartbeat and refreshes after commands",async()=>{
+    const transport=new MemoryTransport(null);transport.heartbeatFailure={at:1,error:new Error("fixture failed")};
+    const agent=await DurableFakeAgent.open({journalPath:join(await mkdtemp(join(tmpdir(),"heartbeat-retry-")),"journal"),transport});
+    try{await expect(agent.pollOnce()).rejects.toThrow("fixture failed");await agent.pollOnce();expect(transport.heartbeats).toBe(2);transport.command=command;await agent.pollOnce();expect(transport.heartbeats).toBe(2);await agent.pollOnce();expect(transport.heartbeats).toBe(3)}finally{await agent.close()}
+  });
   it("passes abort signals to every HTTP request and enforces a timeout", async () => {
     const originalFetch = globalThis.fetch;
     const signals: AbortSignal[] = [];

@@ -853,6 +853,7 @@ export class NapCatRuntime {
 }
 
 export class DurableFakeAgent {
+  private lastObservationHeartbeatAt=Number.NEGATIVE_INFINITY;
   private constructor(
     private readonly journal: FileAgentJournal,
     private readonly runtime: FakeRuntime | NapCatRuntime,
@@ -870,9 +871,16 @@ export class DurableFakeAgent {
     );
   }
   async pollOnce(): Promise<boolean> {
-    await this.transport.heartbeat(this.runtime instanceof NapCatRuntime ? await this.runtime.observations() : []);
+    // Keep command polling responsive without rewriting full telemetry every tick.
+    const now=Date.now();
+    if(now-this.lastObservationHeartbeatAt>=5000||now<this.lastObservationHeartbeatAt){
+      await this.transport.heartbeat(this.runtime instanceof NapCatRuntime ? await this.runtime.observations() : []);
+      this.lastObservationHeartbeatAt=now;
+    }
     const command = await this.transport.claim();
     if (!command) return false;
+    // A command may change runtime state; refresh immediately on the next poll.
+    this.lastObservationHeartbeatAt=Number.NEGATIVE_INFINITY;
     const receipt = {
       operationId: command.operationId,
       generation: command.generation,
