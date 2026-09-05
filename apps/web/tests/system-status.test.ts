@@ -7,6 +7,7 @@ test('resources preserve real zero and expire old, offline or failed observation
  expect(resourceState(sample,'online',false,now+15001)).toBe('stale');
  expect(resourceState(sample,'offline',false,now)).toBe('stale');
  expect(resourceState(sample,'online',true,now)).toBe('stale');
+ expect(resourceState({...sample,status:'unavailable',observedAt:null,cpuPercent:null,memoryBytes:null},'online',false,now)).toBe('unavailable');
  expect(resourceState(undefined,'online',false,now)).toBe('missing');
  expect(resourceState({...sample,status:'stopped'},'online',false,now)).toBe('stopped');
  expect(resourceState({...sample,cpuPercent:null},'online',false,now)).toBe('missing');

@@ -1,4 +1,5 @@
 export const en={
+  'system.unavailable':'Sampling unavailable',
   'system.title':'System status',
   'system.resources':'Endpoint resources',
   'system.integrations':'Runtime integrations',

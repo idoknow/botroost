@@ -1,4 +1,5 @@
 export const zhTW={
+  'system.unavailable':'取樣不可用',
   'system.title':'系統狀態',
   'system.resources':'Endpoint 資源',
   'system.integrations':'執行階段整合',

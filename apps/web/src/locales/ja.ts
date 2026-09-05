@@ -1,4 +1,5 @@
 export const ja={
+  'system.unavailable':'計測できません',
   'system.title':'システム状態',
   'system.resources':'エンドポイントのリソース',
   'system.integrations':'ランタイム連携',

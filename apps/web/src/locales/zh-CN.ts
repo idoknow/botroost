@@ -1,4 +1,5 @@
 export const zhCN={
+  'system.unavailable':'采样不可用',
   'system.title':'系统状态',
   'system.resources':'Endpoint 资源',
   'system.integrations':'运行时集成',
