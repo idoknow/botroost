@@ -144,7 +144,7 @@ describe("NapCat runtime", () => {
     foreign=true;
     docker.logRequests.length=0;
     const calls=fetcher.mock.calls.length;
-    expect(await runtime.observations()).toEqual([expect.objectContaining({endpointId:baseCommand.endpointId,runtime:"failed",provider:"degraded",metadata:{error:"NapCat container is not owned by this endpoint"}})]);
+    expect(await runtime.observations()).toEqual([expect.objectContaining({endpointId:baseCommand.endpointId,runtime:"failed",provider:"degraded",metadata:{error:"NapCat container is not owned by this endpoint",resourceUsage:{source:"docker.stats",status:"unavailable",observedAt:null,cpuPercent:null,memoryBytes:null,cpuLimitMillis:null,memoryLimitBytes:null}}})]);
     expect(docker.logRequests).toHaveLength(0);
     expect(fetcher).toHaveBeenCalledTimes(calls);
   });

@@ -11,3 +11,16 @@ export class ApiClient{
  async requestSecret<T>(path:string,body?:unknown):Promise<T>{const value=await this.mutate<T>(path,body);return value}
 }
 export const api=new ApiClient();
+
+export async function getAllPages<T>(path:string,signal?:AbortSignal):Promise<{items:T[];page:number;pageSize:number;total:number}>{
+ const items:T[]=[];
+ for(let pageNumber=1;pageNumber<=1000;pageNumber++){
+  const suffix=pageNumber===1?'':`${path.includes('?')?'&':'?'}page=${pageNumber}`;
+  const result=await api.get<{items:T[];page:number;pageSize:number;total:number}>(path+suffix,{signal});
+  if(!Array.isArray(result.items)||!Number.isInteger(result.total)||result.total<0)throw new Error('Invalid collection response');
+  items.push(...result.items);
+  if(items.length>=result.total)return{items,page:1,pageSize:items.length,total:items.length};
+  if(!result.items.length||result.page!==pageNumber)throw new Error('Incomplete collection response');
+ }
+ throw new Error('Collection exceeds pagination limit');
+}
