@@ -1,12 +1,12 @@
 import {useCallback,useEffect,useRef,useState} from 'react';
-import {api} from './api';
+import {api,getAllPages} from './api';
 import {createRefreshGeneration,createRequestFlight,startCompletionPoller} from './polling';
 
 const POLL_TIMEOUT_MS=10_000;
 
 type RequestFlight=ReturnType<typeof createRequestFlight>;
 
-export function useApi<T>(path:string,interval?:number|((data:T|undefined)=>number|undefined),enabled=true){
+export function useApi<T>(path:string,interval?:number|((data:T|undefined)=>number|undefined),enabled=true,allPages=false){
   const[data,setData]=useState<T>();
   const[error,setError]=useState<Error>();
   const[loading,setLoading]=useState(enabled);
@@ -34,7 +34,7 @@ export function useApi<T>(path:string,interval?:number|((data:T|undefined)=>numb
     setRefreshing(false);
     const flight=createRequestFlight(async signal=>{
       try{
-        const next=await api.get<T>(path,{signal});
+        const next=allPages?await getAllPages(path,signal) as T:await api.get<T>(path,{signal});
         if(!disposed){dataRef.current=next;setData(next);setError(undefined)}
       }catch(cause){
         if(!disposed)setError(cause as Error);
@@ -54,7 +54,7 @@ export function useApi<T>(path:string,interval?:number|((data:T|undefined)=>numb
       flight.dispose();
       if(flightRef.current===flight)flightRef.current=undefined;
     };
-  },[path,enabled]);
+  },[path,enabled,allPages]);
 
   return{data,error,loading,refresh,refreshing,setData};
 }

@@ -76,11 +76,11 @@ Workspace
 - Icon-only controls require clear accessible labels.
 - Important recurring actions are easy to find but do not dominate the page.
 
-### Cluster Home
+### System Status
 
-- Home is a working start point, not a landing page.
-- Show the smallest useful cluster summary and direct routes to endpoints, nodes, and recent changes.
-- Do not restate the product pitch as a hero heading.
+- `/system-status` is the single operational status destination, with a compact cluster summary and tabs for endpoint resources, agent nodes, and runtime integrations.
+- Keep real CPU/memory usage separate from inspected limits; show missing, stale, stopped, and failed sampling explicitly.
+- Show node details inline and preserve permission-gated enrollment. Legacy `/`, `/nodes`, `/nodes/:id`, and `/providers` redirect here; do not restore separate pages.
 
 ### Dense Lists
 
@@ -118,7 +118,7 @@ Workspace
 ## Components
 
 - Use accessible behavior primitives for tabs, dialogs, menus, selects, tooltips, switches, accordions, and collapsible sections.
-- Botroost owns visual styling through local tokens and Mantine wrappers.
+- Botroost owns visual styling through local Tailwind tokens and shadcn/Radix primitives.
 - Repeated primitives should be wrapped as small product-styled components.
 - Product-specific compositions stay near the feature that owns them.
 - Use one consistent icon set; do not mix platform glyphs.
@@ -127,7 +127,7 @@ Workspace
 
 - Desktop remains the primary working layout.
 - Narrow screens collapse the same hierarchy into one column.
-- Primary mobile navigation contains Cluster, Endpoints, Nodes, Activity, and More.
+- Primary mobile navigation contains System status, Endpoints, Activity, and More.
 - Dense controls may scroll horizontally only where comparison genuinely requires it.
 - Text wraps, truncates, or intentionally reduces density; it never overlaps controls.
 - Fixed-format controls keep stable dimensions.

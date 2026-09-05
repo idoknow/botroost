@@ -32,7 +32,7 @@ Bootstrap is intentionally profile-gated and fails once any user exists. Remove 
 
 ## Agent enrollment
 
-As an owner/admin, generate a one-use token in the Nodes page. Put it in `secrets/enrollment_token` with mode 0600, then run:
+As an owner/admin, generate a one-use token in System status → Agent nodes. Put it in `secrets/enrollment_token` with mode 0600, then run:
 
 ```sh
 docker compose --profile bootstrap-agent up -d agent

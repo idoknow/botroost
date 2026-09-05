@@ -4,6 +4,10 @@ import { buildApi } from "../src/index.js";
 import { AuthService } from "@botroost/auth";
 import { PostgresDatabase } from "@botroost/database";
 import { DurableWorker } from "@botroost/worker";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DockerCliClient, NAPCAT_ARTIFACT, NAPCAT_IMAGE, NapCatRuntime } from "../../agent/src/index.js";
 
 const name = `botroost-napcat-api-${process.pid}-${Date.now()}`;
 let db: PostgresDatabase;
@@ -52,6 +56,65 @@ afterAll(async () => {
 }, 30_000);
 
 describe("NapCat API vertical slice", () => {
+  it("round-trips real Docker telemetry through authenticated observations, PostgreSQL and endpoint list/detail without renewing sample time", async () => {
+    const login = await api.inject({ method: "POST", url: "/api/v1/auth/login", payload: { email: "owner@example.com", password: "correct horse battery staple" } });
+    const cookie = cookies(login.headers["set-cookie"]);
+    const owner = await auth.me(/botroost_session=([^;]+)/.exec(cookie)![1]!);
+    const enrollment = (await api.inject({ method: "POST", url: "/api/v1/nodes/enrollment-tokens", headers: mutation(cookie), payload: { name: "resource-node" } })).json();
+    const enrolled = await api.inject({ method: "POST", url: "/api/v1/agent/enroll", payload: { token: enrollment.token, provider: "napcat", version: "resource-test" } });
+    expect(enrolled.statusCode).toBe(201);
+    const { nodeId, nodeSecret } = enrolled.json();
+    const endpoint = (await api.inject({ method: "POST", url: "/api/v1/endpoints", headers: mutation(cookie), payload: { name: "resource-endpoint", providerId: "napcat", nodeId } })).json();
+    const containerName = `botroost-napcat-${endpoint.id}`;
+    const root = await mkdtemp(join(tmpdir(), "botroost-resource-api-"));
+    try {
+      // Disposable owned workload: real Docker inspect/stats, no QQ credentials or external network probes.
+      execFileSync("docker", ["run", "-d", "--name", containerName, "--cpu-quota", "50000", "--memory", "64m", "--label", `botroost.workspace_id=${owner!.workspaceId}`, "--label", `botroost.endpoint_id=${endpoint.id}`, "--label", "botroost.provider=napcat", "--entrypoint", "sleep", "postgres:16-alpine", "300"]);
+      await writeFile(join(root, "runtime-commands.json"), JSON.stringify([{ commandId: "resource-cmd", operationId: "resource-op", workspaceId: owner!.workspaceId, nodeId, endpointId: endpoint.id, generation: endpoint.generation, connectionEpoch: 1, action: "start", runtimeRequest: { approvedArtifactId: NAPCAT_ARTIFACT, approvedEgressProfile: "egress:onebot", resources: { cpuMillis: 999, memoryMiB: 999 }, storage: { kind: "ephemeral", sizeMiB: 512 } }, metadata: { image: NAPCAT_IMAGE, containerPrefix: "botroost-napcat" } }]));
+      const runtime = new NapCatRuntime({ docker: new DockerCliClient(), stateDirectory: root, napcatToken: "test-only-not-a-real-credential", fetcher: async url => {
+        const path = new URL(String(url)).pathname;
+        if (path === "/api/auth/login") return Response.json({ code: 0, data: { Credential: "test-only" } });
+        if (path === "/api/QQLogin/GetQQLoginInfo") return Response.json({ code: 0, data: { online: false } });
+        if (path === "/api/QQLogin/GetQQLoginQrcode") return Response.json({ code: 0, data: { qrcode: "qr" } });
+        throw new Error(`unexpected path ${path}`);
+      } });
+      const observations = await runtime.observations();
+      const resource = observations[0]?.metadata?.resourceUsage as Record<string, unknown>;
+      expect(resource).toMatchObject({ source: "docker.stats", status: "ok", cpuLimitMillis: 500, memoryLimitBytes: 67108864, cpuPercent: expect.any(Number), memoryBytes: expect.any(Number), observedAt: expect.any(String) });
+      expect(resource.memoryBytes).toBeGreaterThan(0);
+      expect(Object.keys(resource).sort()).toEqual(["source", "status", "observedAt", "cpuLimitMillis", "memoryLimitBytes", "cpuPercent", "memoryBytes"].sort());
+      const sessionId = `resource-${nodeId}`;
+      const send = async (runtimes: typeof observations) => api.inject({ method: "POST", url: "/api/v1/agent/heartbeat", headers: { authorization: `Bearer ${nodeSecret}`, "x-agent-session-id": sessionId }, payload: JSON.parse(JSON.stringify({ status: "online", sessionId, observedAt: new Date().toISOString(), runtimes })) });
+      expect((await send(observations)).statusCode).toBe(200);
+      const assertExposed = async (expected: unknown) => {
+        const stored = (await db.pool.query("SELECT state->'metadata'->'resourceUsage' resource FROM observations WHERE endpoint_id=$1 ORDER BY created_at DESC LIMIT 1", [endpoint.id])).rows[0].resource;
+        expect(stored).toEqual(expected);
+        const detail = await api.inject({ method: "GET", url: `/api/v1/endpoints/${endpoint.id}`, headers: { cookie } });
+        expect(detail.statusCode).toBe(200); expect(detail.json().metadata.resourceUsage).toEqual(expected);
+        const list = await api.inject({ method: "GET", url: "/api/v1/endpoints?pageSize=100", headers: { cookie } });
+        expect(list.statusCode).toBe(200);
+        expect(list.json().items.find((item: { id: string }) => item.id === endpoint.id).metadata.resourceUsage).toEqual(expected);
+        return detail.json();
+      };
+      await assertExposed(resource);
+      // A newly persisted heartbeat must not rewrite a delayed sample's source timestamp.
+      const staleResource = { ...resource, observedAt: "2020-01-01T00:00:00.000Z" };
+      const delayed = observations.map(observation => ({ ...observation, metadata: { ...observation.metadata, resourceUsage: staleResource } }));
+      expect((await send(delayed)).statusCode).toBe(200);
+      await assertExposed(staleResource);
+      await db.pool.query("UPDATE nodes SET last_heartbeat_at=now()-interval '3 minutes' WHERE id=$1", [nodeId]);
+      expect((await assertExposed(staleResource)).status.node).toBe("offline");
+      execFileSync("docker", ["stop", "--time", "1", containerName], { stdio: "ignore" });
+      const stopped = await runtime.observations();
+      expect(stopped[0]?.metadata?.resourceUsage).toEqual({ source: "docker.stats", status: "stopped", observedAt: null, cpuPercent: null, memoryBytes: null, cpuLimitMillis: 500, memoryLimitBytes: 67108864 });
+      expect((await send(stopped)).statusCode).toBe(200);
+      await assertExposed(stopped[0]?.metadata?.resourceUsage);
+    } finally {
+      execFileSync("docker", ["rm", "-f", containerName], { stdio: "ignore" });
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects NapCat endpoints assigned to a non-NapCat node", async () => {
     const login = await api.inject({ method: "POST", url: "/api/v1/auth/login", payload: { email: "owner@example.com", password: "correct horse battery staple" } });
     const cookie = cookies(login.headers["set-cookie"]);

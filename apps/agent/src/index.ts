@@ -13,6 +13,7 @@ import {
   type RuntimeCommand,
 } from "@botroost/agent-protocol";
 import { NapCatTrafficAccumulator } from "./traffic.js";
+import { inspectedResourceLimits, parseDockerStats, ResourceUsageSampler, RESOURCE_SAMPLE_TIMEOUT_MS, type DockerStatsReader, type ResourceLimits } from "./resource-usage.js";
 
 type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
 type JsonObject = { [key: string]: JsonValue };
@@ -74,8 +75,10 @@ export interface DockerInspectResult {
   ipAddress: string | null;
   labels: Record<string, string>;
   resources?: { cpuMillis: number; memoryMiB: number; memorySwapMiB: number };
+  resourceLimits?: ResourceLimits;
 }
 export interface DockerClient {
+  stats?: DockerStatsReader;
   inspect(name: string): Promise<DockerInspectResult | null>;
   create(input: DockerCreateInput): Promise<{ id: string }>;
   remove(name: string): Promise<void>;
@@ -107,9 +110,15 @@ export function dockerCreateArguments(input:DockerCreateInput):string[]{
 }
 
 export class DockerCliClient implements DockerClient {
-  private async docker(args: string[], maxBuffer = 1024 * 1024) {
-    const { stdout, stderr } = await execFileAsync("docker", args, { timeout: 30_000, maxBuffer });
+  private async docker(args: string[], maxBuffer = 1024 * 1024, options: { timeout?: number; killSignal?: NodeJS.Signals; signal?: AbortSignal | undefined } = {}) {
+    const { stdout, stderr } = await execFileAsync("docker", args, { timeout: 30_000, maxBuffer, ...options });
     return { stdout: String(stdout), stderr: String(stderr) };
+  }
+  async stats(containerIds: string[], signal?: AbortSignal) {
+    const ids = [...new Set(containerIds)];
+    if (!ids.length) return new Map();
+    const { stdout } = await this.docker(["stats", "--no-stream", "--no-trunc", "--format", "{{json .}}", ...ids], 1024 * 1024, { timeout: RESOURCE_SAMPLE_TIMEOUT_MS, killSignal: "SIGKILL", signal });
+    return parseDockerStats(stdout, ids);
   }
   async inspect(name: string): Promise<DockerInspectResult | null> {
     try {
@@ -128,6 +137,7 @@ export class DockerCliClient implements DockerClient {
         state: state?.Running ? "running" : "exited",
         ipAddress,
         labels: ((item.Config as Record<string, unknown> | undefined)?.Labels as Record<string, string> | undefined) ?? {},
+        resourceLimits: inspectedResourceLimits(hostConfig),
         resources: {
           cpuMillis: Number(hostConfig?.CpuQuota) > 0 ? Math.round(Number(hostConfig?.CpuQuota) / Number(hostConfig?.CpuPeriod || 100000) * 1000) : 0,
           memoryMiB: Math.round(Number(hostConfig?.Memory || 0) / 1048576),
@@ -365,6 +375,7 @@ export class NapCatRuntime {
   private readonly trafficAccumulators = new Map<string, NapCatTrafficAccumulator>();
   private readonly trafficCache = new Map<string, { at: number; summary: JsonObject }>();
   private readonly trafficLastSuccessAt = new Map<string, number>();
+  private readonly resourceSampler: ResourceUsageSampler;
   private commandsLoaded = false;
   constructor(private readonly options: {
     docker?: DockerClient;
@@ -385,6 +396,7 @@ export class NapCatRuntime {
     if (!containerPrefixPattern.test(this.containerPrefix)) throw new Error("container prefix is invalid");
     if (!(options.napcatToken ?? process.env.NAPCAT_TOKEN)) throw new Error("NapCat token is required");
     this.fetcher = options.fetcher ?? globalThis.fetch;
+    this.resourceSampler = new ResourceUsageSampler((ids, signal) => this.docker().stats?.(ids, signal) ?? Promise.resolve(new Map()), options.signal);
   }
   private docker() { return this.options.docker ?? new DockerCliClient(); }
   private requestSignal(timeoutMs:number){
@@ -664,7 +676,11 @@ export class NapCatRuntime {
     this.trafficCache.set(endpointId, { at: now, summary });
     return summary;
   }
-  async snapshot(command: RuntimeCommand): Promise<{
+  async snapshot(command: RuntimeCommand) {
+    this.assertAllowed(command);
+    return this.snapshotWithContainer(command, await this.docker().inspect(this.containerName(command.endpointId)));
+  }
+  private async snapshotWithContainer(command: RuntimeCommand, inspected: DockerInspectResult | null): Promise<{
     endpointId: string;
     generation: number;
     runtime: "ready" | "stopped" | "failed" | "unknown";
@@ -674,7 +690,6 @@ export class NapCatRuntime {
     metadata: JsonObject;
   }> {
     this.assertAllowed(command);
-    const inspected = await this.docker().inspect(this.containerName(command.endpointId));
     if(inspected&&!this.ownsContainer(inspected,command))throw new Error("NapCat container is not owned by this endpoint");
     if (!inspected || inspected.state !== "running" || !inspected.ipAddress) {
       return { endpointId: command.endpointId, generation: command.generation, runtime: "stopped", provider: "unknown", protocol: "disconnected", convergence: "reconciling", metadata: {} };
@@ -797,25 +812,43 @@ export class NapCatRuntime {
   }
   async observations(): Promise<NonNullable<Parameters<AgentCommandTransport["heartbeat"]>[0]>> {
     await this.loadCommands();
-    return Promise.all([...this.commands.values()].map(async command => {
-      const cached = this.snapshotCache.get(command.endpointId);
-      if (cached && Date.now() - cached.at < 15_000) {
-        const inspected=await this.docker().inspect(this.containerName(command.endpointId));
-        if(inspected&&inspected.state==="running"&&inspected.ipAddress&&this.ownsContainer(inspected,command)){
+    const commands = [...this.commands.values()];
+    // Reuse the existing ownership inspection for both health and telemetry.
+    // A bad container cannot suppress observations for the other endpoints.
+    const inspections = await Promise.allSettled(commands.map(async command => {
+      this.assertAllowed(command);
+      const inspected = await this.docker().inspect(this.containerName(command.endpointId));
+      if (inspected && !this.ownsContainer(inspected, command)) throw new Error("NapCat container is not owned by this endpoint");
+      return inspected;
+    }));
+    const resources = this.resourceSampler.sample(commands.map((command, index) => {
+      const result = inspections[index]!;
+      const inspected = result.status === "fulfilled" ? result.value : null;
+      return { endpointId: command.endpointId, containerId: inspected?.id ?? null, state: inspected?.state ?? "unknown", cpuLimitMillis: inspected?.resourceLimits?.cpuLimitMillis ?? null, memoryLimitBytes: inspected?.resourceLimits?.memoryLimitBytes ?? null };
+    }));
+    const health = Promise.all(commands.map(async (command, index) => {
+      try {
+        const result = inspections[index]!;
+        if (result.status === "rejected") throw result.reason;
+        const inspected = result.value;
+        const cached = this.snapshotCache.get(command.endpointId);
+        if (cached && Date.now() - cached.at < 15_000 && inspected?.state === "running" && inspected.ipAddress) {
           const metadata = cached.value.runtime === "ready"
             ? { ...cached.value.metadata, traffic: await this.protocolTraffic(command.endpointId) }
             : cached.value.metadata;
-          return { endpointId:cached.value.endpointId,generation:cached.value.generation,runtime:cached.value.runtime,provider:cached.value.provider,protocol:cached.value.protocol,convergence:cached.value.convergence,metadata };
+          return { ...cached.value, metadata };
         }
-      }
-      try {
-        const snapshot = await this.snapshot(command);
+        const snapshot = await this.snapshotWithContainer(command, inspected);
         this.snapshotCache.set(command.endpointId, { at: Date.now(), value: snapshot });
-        return { endpointId:snapshot.endpointId,generation:snapshot.generation,runtime:snapshot.runtime,provider:snapshot.provider,protocol:snapshot.protocol,convergence:snapshot.convergence,metadata:snapshot.metadata };
+        return snapshot;
       } catch (error) {
+        this.snapshotCache.delete(command.endpointId);
         return { endpointId:command.endpointId,generation:command.generation,runtime:"failed" as const,provider:"degraded" as const,protocol:"disconnected" as const,convergence:"failed" as const,metadata:{error:error instanceof Error?error.message:String(error)} };
       }
     }));
+    // Stats run alongside health probes, with their own three-second budget.
+    const [observations, usage] = await Promise.all([health, resources]);
+    return observations.map(observation => ({ ...observation, metadata: { ...observation.metadata, resourceUsage: usage.get(observation.endpointId)! } }));
   }
 }
 
