@@ -6,7 +6,7 @@ const Info=({label,children}:{label:string;children:ReactNode})=><div className=
 type ProgressOperation=Pick<Operation,'id'|'action'|'status'|'progress'>|ActiveOperation;
 const endpointPollInterval=(data:Endpoint|undefined)=>data?.activeOperation?1000:3000;
 const operationListPollInterval=(data:Page<Operation>|undefined)=>data?.items.some(operation=>['queued','running'].includes(operation.status))?1000:5000;
-const activityTitle=(t:(key:MessageKey)=>string,operation:ProgressOperation)=>operation.status==='succeeded'?t('endpoints.completed'):operation.status==='failed'||operation.status==='stale'?t('operation.failed'):operation.action==='start'?t('operation.starting'):operation.action==='restart'?t('operation.restarting'):operation.action==='stop'?t('operation.stopping'):operation.action==='delete'?t('operation.deleting'):t('operation.applying');
+const activityTitle=(t:(key:MessageKey)=>string,operation:ProgressOperation)=>operation.status==='succeeded'?t('endpoints.completed'):operation.status==='failed'||operation.status==='stale'?t('operation.failed'):operation.action==='start'?t('operation.starting'):operation.action==='force-restart'?t('operation.forceRestarting'):operation.action==='restart'?t('operation.restarting'):operation.action==='stop'?t('operation.stopping'):operation.action==='delete'?t('operation.deleting'):t('operation.applying');
 function OperationProgressView({operation,compact=false}:{operation:ProgressOperation;compact?:boolean}){const{t,locale}=useI18n();const progress=operation.progress,active=operation.status==='queued'||operation.status==='running';const body=<div className={`operation-progress${compact?' compact':''}`} role={active?'status':undefined} aria-live={active?'polite':undefined} aria-label={activityTitle(t,operation)}><div className="operation-progress-heading"><div className="operation-progress-title">{active?<span className="activity-pulse" aria-hidden="true"/>:null}<strong>{activityTitle(t,operation)}</strong></div><Badge good={operation.status==='succeeded'}>{progress.percent}%</Badge></div><progress max="100" value={progress.percent} aria-label={t('operation.progress')}/><div className="operation-progress-copy"><span>{progress.message}</span>{compact?null:<small className="muted">{t('operation.stage',{phase:progress.phase.replaceAll('-',' '),time:new Date(progress.updatedAt).toLocaleTimeString(locale)})}</small>}</div>{compact?null:<Link to={`/operations/${operation.id}`}>{t('operation.viewDetails')}</Link>}</div>;return compact?body:<Card className="operation-progress-card">{body}</Card>}
 export function Endpoints({session,q}:{session:Session;q:ReturnType<typeof useApi<Page<Endpoint>>>}){
  const{t}=useI18n();
@@ -69,6 +69,9 @@ export function EndpointDetail({session,id}:{session:Session;id:string}){
   const wsDirtyRef=useRef(false);
   const [logs,setLogs]=useState<string>();
   const [busy,setBusy]=useState('');
+  const [confirmForceRestart,setConfirmForceRestart]=useState(false);
+  const [forceRestartError,setForceRestartError]=useState<unknown>();
+  const forceRestartPending=useRef(false);
   const [error,setError]=useState<unknown>();
   const [directory,setDirectory]=useState<'friends'|'groups'>('friends');
   const ep=q.data;
@@ -127,9 +130,20 @@ export function EndpointDetail({session,id}:{session:Session;id:string}){
     }finally{setBusy('')}
   }
 
+  const forceRestartAvailability=actionAvailability('force-restart',{permissions:session.permissions,capabilities:session.capabilities,activeOperationId:endpoint.activeOperationId,activeOperation:endpoint.activeOperation});
+  const closeForceRestart=()=>{if(forceRestartPending.current)return;setConfirmForceRestart(false);setForceRestartError(undefined)};
+  async function forceRestart(){
+    if(forceRestartPending.current||busy||!forceRestartAvailability.visible||forceRestartAvailability.disabled)return;
+    forceRestartPending.current=true;setBusy('force-restart');setForceRestartError(undefined);
+    try{
+      const operation=await api.mutate<Operation>(`/endpoints/${endpoint.id}/operations`,{action:'force-restart',expectedGeneration:endpoint.generation});
+      navigate(`/operations/${operation.id}`);
+    }catch(cause){setForceRestartError(cause)}finally{forceRestartPending.current=false;setBusy('')}
+  }
+
   const settings=<EndpointSettings endpoint={endpoint} refresh={q.refresh} canDelete={deleteAvailability.visible} deleteDisabled={deleteAvailability.disabled||Boolean(busy)} deleting={busy==='delete'} onDelete={deleteCurrentEndpoint}/>;
   const refreshStatus=async()=>{await Promise.all([q.refresh(),...(canOperate&&endpoint.providerId==='napcat'?[napcat.refresh()]:[])])};
-  const lifecycleActions=<div className="endpoint-lifecycle-actions" aria-label={t('endpoint.lifecycle')}><Button className="endpoint-refresh-action" variant="outline" aria-label={t('endpoint.refreshStatus')} disabled={q.refreshing||napcat.refreshing||Boolean(busy)} onClick={()=>void refreshStatus()}><RefreshCw className={q.refreshing||napcat.refreshing?'refresh-spin':undefined}/><span className="refresh-label">{q.refreshing||napcat.refreshing?t('common.refreshing'):t('common.refresh')}</span></Button>{['start','stop','restart'].map(action=>{const availability=actionAvailability(action,{permissions:session.permissions,capabilities:session.capabilities,activeOperationId:endpoint.activeOperationId});return availability.visible&&<Button key={action} variant={action==='start'?'default':'outline'} busy={busy===`lifecycle-${action}`} disabled={availability.disabled||Boolean(busy)} onClick={()=>run(`lifecycle-${action}`,async()=>{const operation=await api.mutate<Operation>(`/endpoints/${endpoint.id}/operations`,{action,expectedGeneration:endpoint.generation});navigate(`/operations/${operation.id}`)})}>{action==='start'?t('endpoint.start'):action==='stop'?t('endpoint.stop'):t('endpoint.restart')}</Button>})}</div>;
+  const lifecycleActions=<div className="endpoint-lifecycle-actions" aria-label={t('endpoint.lifecycle')}><Button className="endpoint-refresh-action" variant="outline" aria-label={t('endpoint.refreshStatus')} disabled={q.refreshing||napcat.refreshing||Boolean(busy)} onClick={()=>void refreshStatus()}><RefreshCw className={q.refreshing||napcat.refreshing?'refresh-spin':undefined}/><span className="refresh-label">{q.refreshing||napcat.refreshing?t('common.refreshing'):t('common.refresh')}</span></Button>{['start','stop','restart'].map(action=>{const availability=actionAvailability(action,{permissions:session.permissions,capabilities:session.capabilities,activeOperationId:endpoint.activeOperationId});return availability.visible&&<Button key={action} variant={action==='start'?'default':'outline'} busy={busy===`lifecycle-${action}`} disabled={availability.disabled||Boolean(busy)} onClick={()=>run(`lifecycle-${action}`,async()=>{const operation=await api.mutate<Operation>(`/endpoints/${endpoint.id}/operations`,{action,expectedGeneration:endpoint.generation});navigate(`/operations/${operation.id}`)})}>{action==='start'?t('endpoint.start'):action==='stop'?t('endpoint.stop'):t('endpoint.restart')}</Button>})}{forceRestartAvailability.visible?<Button variant="outline" disabled={forceRestartAvailability.disabled||Boolean(busy)} onClick={()=>{setForceRestartError(undefined);setConfirmForceRestart(true)}}>{t('endpoint.forceRestart')}</Button>:null}</div>;
   const probeCatalog=[
     ['get_status',t('endpoint.probeRuntime')],
     ['get_login_info',t('endpoint.probeIdentity')],
@@ -146,6 +160,10 @@ export function EndpointDetail({session,id}:{session:Session;id:string}){
     <PageHeading className="endpoint-heading" kicker={t('endpoint.kicker')} title={endpoint.name} description={t('endpoint.hostedBy',{node:endpoint.node?.name??t('endpoint.unassignedNode'),id:endpoint.id})} action={lifecycleActions}/>
     <div className="health-strip">{statusLayers(endpoint.status).map(layer=><Info key={layer.label} label={t(layer.id as MessageKey)}><Badge good={['connected','online','ready','available','converged'].includes(layer.value)}>{layer.value}</Badge></Info>)}</div>
     {endpoint.activeOperation?<OperationProgressView operation={endpoint.activeOperation}/>:null}
+    <Modal open={confirmForceRestart} onClose={closeForceRestart} title={t('endpoint.forceRestart')} description={t('endpoint.forceRestartDescription')} footer={<><Button variant="outline" disabled={busy==='force-restart'} onClick={closeForceRestart}>{t('common.cancel')}</Button><Button variant="destructive" busy={busy==='force-restart'} disabled={Boolean(busy)||!forceRestartAvailability.visible||forceRestartAvailability.disabled} onClick={()=>void forceRestart()}>{t('endpoint.forceRestart')}</Button></>}>
+      <p>{t('endpoint.forceRestartBody',{name:endpoint.name})}</p>
+      {forceRestartError?<Failure error={forceRestartError} focus title={t('endpoint.forceRestartFailed')}/>:null}
+    </Modal>
     {hasTabbedConsole?<Tabs defaultValue="overview" className="endpoint-tabs">
       <TabsList className="endpoint-tabs-list product-tabs-list">
         <TabsTrigger className="product-tabs-trigger after:hidden" value="overview">{t('endpoint.tabOverview')}</TabsTrigger>
