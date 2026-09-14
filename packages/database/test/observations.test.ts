@@ -1,3 +1,4 @@
+import {waitForPostgres} from "./postgres.js";
 import {afterAll,beforeAll,beforeEach,describe,expect,it} from "vitest";
 import {execFileSync} from "node:child_process";
 import {randomUUID} from "node:crypto";
@@ -8,11 +9,11 @@ const container=`botroost-observations-${process.pid}-${Date.now()}`;
 let db:PostgresDatabase;
 beforeAll(async()=>{
   execFileSync("docker",["run","-d","--name",container,"-e","POSTGRES_PASSWORD=postgres","-e","POSTGRES_DB=botroost","-p","127.0.0.1::5432","postgres:16-alpine"]);
-  for(let i=0;i<60;i++){try{execFileSync("docker",["exec",container,"pg_isready","-U","postgres"],{stdio:"ignore"});break}catch{await new Promise(resolve=>setTimeout(resolve,250))}}
+  await waitForPostgres(container);
   const port=/:(\d+)$/.exec(execFileSync("docker",["port",container,"5432/tcp"]).toString().trim())?.[1];
   if(!port)throw new Error("PostgreSQL test port unavailable");
   db=new PostgresDatabase(`postgresql://postgres:postgres@127.0.0.1:${port}/botroost`);
-  for(let i=0;i<60;i++){try{await db.ping();break}catch{await new Promise(resolve=>setTimeout(resolve,250))}}
+  await db.ping();
   await db.migrate();
 },120_000);
 afterAll(async()=>{await db?.close();execFileSync("docker",["rm","-f",container],{stdio:"ignore"})},30_000);

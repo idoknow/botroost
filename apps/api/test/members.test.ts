@@ -1,3 +1,4 @@
+import {waitForPostgres} from "../../../packages/database/test/postgres.js";
 import{afterAll,beforeAll,describe,expect,it}from'vitest';
 import{execFileSync}from'node:child_process';
 import{randomUUID}from'node:crypto';
@@ -16,12 +17,12 @@ async function login(email:string,password:string){const response=await api.inje
 
 beforeAll(async()=>{
   execFileSync('docker',['run','-d','--name',container,'-e','POSTGRES_PASSWORD=postgres','-e','POSTGRES_DB=botroost','-p','127.0.0.1::5432','postgres:16-alpine']);
-  for(let attempt=0;attempt<60;attempt++){try{execFileSync('docker',['exec',container,'pg_isready','-U','postgres'],{stdio:'ignore'});break}catch{await new Promise(resolve=>setTimeout(resolve,250))}}
+  await waitForPostgres(container);
   const mapping=execFileSync('docker',['port',container,'5432/tcp']).toString().trim();
   const port=/:(\d+)$/.exec(mapping)?.[1];
   if(!port)throw new Error(`unable to determine PostgreSQL port from ${mapping}`);
   db=new PostgresDatabase(`postgresql://postgres:postgres@127.0.0.1:${port}/botroost`);
-  for(let attempt=0;attempt<60;attempt++){try{await db.ping();break}catch{await new Promise(resolve=>setTimeout(resolve,250))}}
+  await db.ping();
   await db.migrate();
   await new AuthService(db).bootstrapOwner('owner@example.com','correct horse battery staple','Primary');
   api=buildApi({database:db,credentialKey:Buffer.alloc(32,7),publicOrigin:'https://app.test'});
