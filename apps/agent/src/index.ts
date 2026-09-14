@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
@@ -17,6 +18,11 @@ import { inspectedResourceLimits, parseDockerStats, ResourceUsageSampler, RESOUR
 
 type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
 type JsonObject = { [key: string]: JsonValue };
+function safeRuntimeError(error: unknown): string {
+  // Never include child-process command/stderr (may contain environment secrets).
+  if(error&&typeof error==="object"&&("stderr" in error||"cmd" in error))return "Runtime process failed or timed out; inspect node diagnostics";
+  return (error instanceof Error?error.message:String(error)).replace(/((?:token|password|secret|authorization|cookie|credential)\s*[:=]\s*)(?:Bearer\s+)?[^\s,;]+/gi,"$1[REDACTED]").slice(0,2000)||"Runtime execution failed";
+}
 type RuntimeProgress = Pick<CommandProgressRequest, "phase" | "percent" | "message">;
 
 type OneBotReadAction = "get_status" | "get_login_info" | "get_friend_list" | "get_group_list" | "get_version_info";
@@ -51,6 +57,7 @@ export function qqLoginOnline(status: JsonObject): boolean | null {
 }
 
 const execFileAsync = promisify(execFile);
+const runtimeIoSignal = new AsyncLocalStorage<AbortSignal>();
 export const NAPCAT_IMAGE =
   "mlikiowa/napcat-docker@sha256:1336a777f9a4f1f8cb89fef42f7548deacd3645919a067a50df5b66b5e77390e";
 export const NAPCAT_ARTIFACT =
@@ -86,6 +93,7 @@ export interface DockerClient {
   start(name: string): Promise<void>;
   stop(name: string): Promise<void>;
   restart(name: string): Promise<void>;
+  kill?(name: string): Promise<void>;
   exec(container: string, args: string[]): Promise<{ stdout: string; stderr: string }>;
   logs(container: string, options: { tail: number; sinceSeconds: number; timestamps?: boolean; maxBytes?: number }): Promise<string>;
 }
@@ -111,7 +119,8 @@ export function dockerCreateArguments(input:DockerCreateInput):string[]{
 
 export class DockerCliClient implements DockerClient {
   private async docker(args: string[], maxBuffer = 1024 * 1024, options: { timeout?: number; killSignal?: NodeJS.Signals; signal?: AbortSignal | undefined } = {}) {
-    const { stdout, stderr } = await execFileAsync("docker", args, { timeout: 30_000, maxBuffer, ...options });
+    const signals=[runtimeIoSignal.getStore(),options.signal].filter((value):value is AbortSignal=>Boolean(value));
+    const { stdout, stderr } = await execFileAsync("docker", args, { timeout: 30_000, killSignal: "SIGKILL", maxBuffer, ...options, ...(signals.length?{signal:AbortSignal.any(signals)}:{}) });
     return { stdout: String(stdout), stderr: String(stderr) };
   }
   async stats(containerIds: string[], signal?: AbortSignal) {
@@ -170,6 +179,7 @@ export class DockerCliClient implements DockerClient {
   async start(name: string) { await this.docker(["start", name]); }
   async stop(name: string) { await this.docker(["stop", "--time", "20", name]); }
   async restart(name: string) { await this.docker(["restart", "--time", "20", name]); }
+  async kill(name: string) { await this.docker(["kill", "--signal", "KILL", name]); }
   async exec(container: string, args: string[]) { return this.docker(["exec", container, ...args]); }
   async logs(container: string, options: { tail: number; sinceSeconds: number; timestamps?: boolean; maxBytes?: number }) {
     const limit = options.maxBytes ?? 1024 * 1024;
@@ -377,6 +387,7 @@ export class NapCatRuntime {
   private readonly trafficLastSuccessAt = new Map<string, number>();
   private readonly resourceSampler: ResourceUsageSampler;
   private commandsLoaded = false;
+  private executionQueue: Promise<unknown> = Promise.resolve();
   constructor(private readonly options: {
     docker?: DockerClient;
     stateDirectory: string;
@@ -389,6 +400,7 @@ export class NapCatRuntime {
     qrPollIntervalMs?: number;
     qrPollAttempts?: number;
     directoryRefreshMs?: number;
+    operationTimeoutMs?: number;
   }) {
     this.networkMode = options.networkMode ?? process.env.NAPCAT_DOCKER_NETWORK ?? "bridge";
     this.containerPrefix = options.containerPrefix ?? "botroost-napcat";
@@ -401,7 +413,7 @@ export class NapCatRuntime {
   private docker() { return this.options.docker ?? new DockerCliClient(); }
   private requestSignal(timeoutMs:number){
     const timeout=AbortSignal.timeout(timeoutMs);
-    return this.options.signal?AbortSignal.any([this.options.signal,timeout]):timeout;
+    return AbortSignal.any([timeout,...(this.options.signal?[this.options.signal]:[]),...(runtimeIoSignal.getStore()?[runtimeIoSignal.getStore()!]:[])]);
   }
   private commandStatePath() { return join(this.options.stateDirectory, "runtime-commands.json"); }
   private async loadCommands() {
@@ -454,10 +466,20 @@ export class NapCatRuntime {
     .replace(/("(?:token|password|secret|key|credential|session)"\s*:\s*")[^"]*(")/gi,"$1[REDACTED]$2")
   }
   private async waitForQr(base:URL,endpointId:string,credential:string){let last:Error|undefined;const attempts=this.options.qrPollAttempts??20;for(let attempt=0;attempt<attempts;attempt++){try{return await this.napcatRequest(base,"/api/QQLogin/GetQQLoginQrcode",credential,{},endpointId)}catch(error){last=error instanceof Error?error:new Error(String(error));if(!last.message.includes("QRCode Get Error"))throw last;if(attempt+1<attempts)await new Promise(resolve=>setTimeout(resolve,this.options.qrPollIntervalMs??500))}}throw new Error(`NapCat login kernel not ready: ${last?.message??"QR unavailable"}`)}
-  async apply(_effectId: string, command: RuntimeCommand, onProgress: (progress: RuntimeProgress) => Promise<void> = async () => undefined): Promise<{ state: "running" | "stopped"; observations?: Parameters<AgentCommandTransport["result"]>[0]["observations"]; metadata?: JsonObject }> {
+  apply(effectId: string, command: RuntimeCommand, onProgress: (progress: RuntimeProgress) => Promise<void> = async () => undefined, signal?: AbortSignal) {
+    const pending=this.executionQueue.then(()=>{
+      const deadline=AbortSignal.any([AbortSignal.timeout(this.options.operationTimeoutMs??120_000),...(signal?[signal]:[]),...(this.options.signal?[this.options.signal]:[])]);
+      return runtimeIoSignal.run(deadline,()=>this.applySerial(effectId,command,async progress=>{deadline.throwIfAborted();await onProgress(progress);deadline.throwIfAborted()}));
+    });
+    this.executionQueue=pending.catch(()=>undefined);
+    return pending;
+  }
+  private async applySerial(_effectId: string, command: RuntimeCommand, onProgress: (progress: RuntimeProgress) => Promise<void>): Promise<{ state: "running" | "stopped"; observations?: Parameters<AgentCommandTransport["result"]>[0]["observations"]; metadata?: JsonObject }> {
     this.assertAllowed(command);
     await onProgress({phase:"inspecting-runtime",percent:20,message:"Authorizing runtime command"});
     await this.loadCommands();
+    const previousCommand=this.commands.get(command.endpointId);
+    if(previousCommand&&previousCommand.generation>command.generation)throw new Error("runtime generation fence rejected");
     const name = this.containerName(command.endpointId);
     const docker = this.docker();
     const desiredImage = typeof command.metadata.image === "string" ? command.metadata.image : NAPCAT_IMAGE;
@@ -487,6 +509,23 @@ export class NapCatRuntime {
     await onProgress({phase:"inspecting-runtime",percent:25,message:"Persisting authorized runtime command"});
     this.commands.set(command.endpointId,command);
     await this.persistCommands();
+    if(command.action==="force-restart"){
+      if(!existing)throw new Error("NapCat container not found");
+      if(!docker.kill)throw new Error("Runtime driver does not support force restart");
+      this.snapshotCache.delete(command.endpointId);
+      this.directoryCache.delete(command.endpointId);
+      this.webCredentials.delete(command.endpointId);
+      if(existing.state==="running"){
+        await onProgress({phase:"stopping-container",percent:55,message:"Force killing owned NapCat container (data preserved)"});
+        await docker.kill(existing.id);
+      }
+      await onProgress({phase:"starting-container",percent:75,message:"Starting preserved NapCat container"});
+      await docker.start(existing.id);
+      await onProgress({phase:"inspecting-runtime",percent:90,message:"Verifying restarted container"});
+      const restarted=await docker.inspect(existing.id);
+      if(!restarted||restarted.id!==existing.id||!this.ownsContainer(restarted,command)||restarted.state!=="running")throw new Error("NapCat force restart did not reach running state");
+      return{state:"running",observations:{node:"online",runtime:"ready",provider:"unknown",protocol:"unknown",convergence:"reconciling"},metadata:{forceRestart:true}};
+    }
     if(command.action==="read-container-logs"){
       await onProgress({phase:"probing-provider",percent:75,message:"Reading runtime diagnostics"});
       if(!existing||existing.labels["botroost.workspace_id"]!==command.workspaceId||existing.labels["botroost.endpoint_id"]!==command.endpointId||existing.labels["botroost.provider"]!=="napcat")throw new Error("NapCat container ownership check failed");
@@ -567,6 +606,7 @@ export class NapCatRuntime {
       const credential=await this.webCredential(command.endpointId,base);
       await onProgress({phase:"applying-configuration",percent:70,message:"Refreshing NapCat login QR"});
       await this.napcatRequest(base,"/api/QQLogin/RefreshQRcode",credential,{},command.endpointId);
+      await this.waitForQr(base,command.endpointId,credential);
       this.snapshotCache.delete(command.endpointId);
     }
     await onProgress({phase:"probing-provider",percent:85,message:"Waiting for NapCat runtime readiness"});
@@ -724,9 +764,7 @@ export class NapCatRuntime {
       try {
         qrcode=await this.napcatRequest(base,"/api/QQLogin/GetQQLoginQrcode",webToken,{},command.endpointId);
       } catch(error) {
-        if(!(error instanceof Error)||!error.message.includes("QRCode Get Error"))throw error;
-        await this.napcatRequest(base,"/api/QQLogin/RefreshQRcode",webToken,{},command.endpointId);
-        qrcode=await this.waitForQr(base,command.endpointId,await this.webCredential(command.endpointId,base));
+        return{endpointId:command.endpointId,generation:command.generation,runtime:"ready",provider:"degraded",protocol:"disconnected",convergence:"reconciling",metadata:{qq,login:{},onebot:null,traffic,error:safeRuntimeError(error)}};
       }
       return{endpointId:command.endpointId,generation:command.generation,runtime:"ready",provider:"available",protocol:"disconnected",convergence:"reconciling",metadata:{qq,login:objectData(qrcode),onebot:null,traffic}}
     }
@@ -843,7 +881,9 @@ export class NapCatRuntime {
         return snapshot;
       } catch (error) {
         this.snapshotCache.delete(command.endpointId);
-        return { endpointId:command.endpointId,generation:command.generation,runtime:"failed" as const,provider:"degraded" as const,protocol:"disconnected" as const,convergence:"failed" as const,metadata:{error:error instanceof Error?error.message:String(error)} };
+        const inspection=inspections[index]!;
+        const runtime=inspection.status==="fulfilled"?(inspection.value?.state==="running"?"ready" as const:"stopped" as const):"failed" as const;
+        return { endpointId:command.endpointId,generation:command.generation,runtime,provider:"degraded" as const,protocol:"unknown" as const,convergence:"reconciling" as const,metadata:{error:safeRuntimeError(error)} };
       }
     }));
     // Stats run alongside health probes, with their own three-second budget.
@@ -873,12 +913,19 @@ export class DurableFakeAgent {
   async pollOnce(): Promise<boolean> {
     // Keep command polling responsive without rewriting full telemetry every tick.
     const now=Date.now();
-    if(now-this.lastObservationHeartbeatAt>=5000||now<this.lastObservationHeartbeatAt){
-      await this.transport.heartbeat(this.runtime instanceof NapCatRuntime ? await this.runtime.observations() : []);
+    const observationDue=now-this.lastObservationHeartbeatAt>=5000||now<this.lastObservationHeartbeatAt;
+    if(observationDue){
+      await this.transport.heartbeat([]);
       this.lastObservationHeartbeatAt=now;
     }
     const command = await this.transport.claim();
-    if (!command) return false;
+    if (!command) {
+      if(observationDue&&this.runtime instanceof NapCatRuntime){
+        const observations=await this.runtime.observations();
+        await this.transport.heartbeat(observations);
+      }
+      return false;
+    }
     // A command may change runtime state; refresh immediately on the next poll.
     this.lastObservationHeartbeatAt=Number.NEGATIVE_INFINITY;
     const receipt = {
@@ -893,6 +940,7 @@ export class DurableFakeAgent {
     let latest:RuntimeProgress={phase:"agent-acknowledged",percent:15,message:"Agent acknowledged command"};
     let reporting=Promise.resolve();
     let fenceError:Error|undefined;
+    const commandAbort=new AbortController();
     const report=(progress:RuntimeProgress)=>{
       if(fenceError)return Promise.reject(fenceError);
       latest=progress;
@@ -903,6 +951,7 @@ export class DurableFakeAgent {
         catch(error){
           if(isLegacyProgressUnsupported(error))return;
           fenceError=error instanceof Error?error:new Error("command lease refresh failed");
+          commandAbort.abort(fenceError);
           throw fenceError;
         }
       });
@@ -921,7 +970,7 @@ export class DurableFakeAgent {
         }
         try{if(!fenceError)await report(latest)}catch(error){
           if(!isLegacyProgressUnsupported(error))fenceError=error instanceof Error?error:new Error("command lease refresh failed");
-        }finally{keepaliveRunning=false}
+        }finally{if(fenceError)commandAbort.abort(fenceError);keepaliveRunning=false}
       })();
     },10_000);
     let result = this.journal.get(command.commandId)?.result;
@@ -930,7 +979,9 @@ export class DurableFakeAgent {
         const effectId=`runtime:${command.commandId}`;
         let applied = this.journal.get(command.commandId)?.effects[effectId] as Awaited<ReturnType<NapCatRuntime["apply"]>> | undefined;
         if (!applied)
-          applied = await this.runtime.apply(effectId,command,report);
+          applied = this.runtime instanceof NapCatRuntime
+            ? await this.runtime.apply(effectId,command,report,commandAbort.signal)
+            : await this.runtime.apply(effectId,command,report);
         if(fenceError)throw fenceError;
         if (applied) await this.journal.recordEffect(command.commandId, effectId, applied);
         if(fenceError)throw fenceError;
@@ -954,8 +1005,8 @@ export class DurableFakeAgent {
       }
     } catch(error) {
       if(fenceError||isCommandFenceRejection(error))throw fenceError??error;
-      await report({phase:"retrying",percent:Math.min(latest.percent,95),message:"Runtime attempt failed; waiting for automatic retry"});
-      throw error;
+      result={...receipt,endpointId:command.endpointId,attempt:command.attempt??1,outcome:"failed",error:safeRuntimeError(error),observations:{node:"online",runtime:"unknown",provider:"unknown",protocol:"unknown",convergence:"failed"}};
+      await this.journal.recordResult(command.commandId,result);
     } finally {
       clearInterval(keepalive);
       await keepaliveTask;

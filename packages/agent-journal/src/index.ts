@@ -230,13 +230,14 @@ export class FileAgentJournal {
       entry.receipt ??= event.data;
     } else if (event.type === "effect") {
       if (!entry.receipt) throw new Error("receipt must precede effect");
+      if (entry.result) throw new Error("cannot append an effect after a terminal result");
       const existing = entry.effects[event.effectId];
       if (existing && !equal(existing, event.data))
         throw new Error("effect ID has different payload");
       entry.effects[event.effectId] ??= event.data;
     } else {
       if (!entry.receipt) throw new Error("receipt must precede result");
-      if (Object.keys(entry.effects).length === 0)
+      if (Object.keys(entry.effects).length === 0 && !(event.data !== null && typeof event.data === "object" && !Array.isArray(event.data) && event.data.outcome === "failed"))
         throw new Error("effect must precede result");
       if (entry.result && !equal(entry.result, event.data))
         throw new Error("result ID has different payload");

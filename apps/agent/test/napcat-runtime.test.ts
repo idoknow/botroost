@@ -31,6 +31,8 @@ class RecordingDocker implements DockerClient {
   started: string[] = [];
   stopped: string[] = [];
   restarted: string[] = [];
+  killed: string[] = [];
+  async kill(name: string) { this.killed.push(name); }
   execs: { container: string; args: string[] }[] = [];
   removes: string[] = [];
   hostStateRemovals: { root: string; endpointId: string; image: string }[] = [];
@@ -71,6 +73,78 @@ class RecordingDocker implements DockerClient {
 }
 
 describe("NapCat runtime", () => {
+  it("bounds old provider IO without detaching it before an emergency restart",async()=>{
+    const docker=new RecordingDocker();
+    docker.inspect=async name=>({id:"owned-id",name,image:NAPCAT_IMAGE,state:"running",ipAddress:"172.18.0.10",labels:{"botroost.workspace_id":baseCommand.workspaceId,"botroost.endpoint_id":baseCommand.endpointId,"botroost.provider":"napcat"}});
+    let active=0,aborted=false;
+    const fetcher:typeof fetch=async(_url,init)=>{
+      active++;
+      try{await new Promise<void>((_resolve,reject)=>{
+        const abort=()=>{aborted=true;reject(init?.signal?.reason)};
+        if(init?.signal?.aborted)abort();else init?.signal?.addEventListener("abort",abort,{once:true});
+      });throw new Error("unreachable")}finally{active--}
+    };
+    const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"force-timeout-")),napcatToken:"test",operationTimeoutMs:500,fetcher});
+    const began=Date.now();
+    const old=runtime.apply("qr",{...baseCommand,action:"refresh-login-qr"});
+    const failure=expect(old).rejects.toThrow();
+    const forced=runtime.apply("force",{...baseCommand,generation:2,commandId:"force",action:"force-restart"});
+    await failure;await forced;
+    expect(Date.now()-began).toBeLessThan(3000);
+    expect(aborted).toBe(true);expect(active).toBe(0);expect(docker.killed).toEqual(["owned-id"]);
+  });
+  it("serializes old runtime IO before force restart and refuses late lower generations",async()=>{
+    const docker=new RecordingDocker();
+    docker.inspect=async name=>({id:"owned-id",name,image:NAPCAT_IMAGE,state:"running",ipAddress:null,labels:{"botroost.workspace_id":baseCommand.workspaceId,"botroost.endpoint_id":baseCommand.endpointId,"botroost.provider":"napcat"}});
+    let release!:()=>void,markStarted!:()=>void;
+    const gate=new Promise<void>(r=>{release=r}),started=new Promise<void>(r=>{markStarted=r});
+    docker.stop=async name=>{markStarted();await gate;docker.stopped.push(name)};
+    const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"force-serial-")),napcatToken:"test"});
+    const stopping=runtime.apply("old",{...baseCommand,action:"stop"});await started;
+    const forced=runtime.apply("new",{...baseCommand,generation:2,commandId:"new",action:"force-restart"});
+    await new Promise(r=>setTimeout(r,30));expect(docker.killed).toEqual([]);
+    release();await stopping;await forced;
+    await expect(runtime.apply("late",{...baseCommand,action:"stop"})).rejects.toThrow(/generation/);
+    expect(docker.stopped).toHaveLength(1);expect(docker.killed).toEqual(["owned-id"]);
+  });
+  it("force restarts the owned container by immutable ID without provider HTTP or data recreation",async()=>{
+    const docker=new RecordingDocker();
+    docker.inspect=async name=>({id:"owned-id",name,image:NAPCAT_IMAGE,state:"running",ipAddress:"172.18.0.10",labels:{"botroost.workspace_id":baseCommand.workspaceId,"botroost.endpoint_id":baseCommand.endpointId,"botroost.provider":"napcat"},resources:{cpuMillis:500,memoryMiB:512,memorySwapMiB:1024}});
+    const fetcher=vi.fn(async()=>{throw new Error("provider hung")});
+    const stateDirectory=await mkdtemp(join(tmpdir(),"botroost-force-"));
+    const runtime=new NapCatRuntime({docker,stateDirectory,napcatToken:"test",fetcher});
+    const result=await runtime.apply("force",{...baseCommand,action:"force-restart"});
+    expect(docker.killed).toEqual(["owned-id"]);
+    expect(docker.started).toEqual(["owned-id"]);
+    expect(docker.removes).toEqual([]);expect(docker.created).toEqual([]);expect(docker.hostStateRemovals).toEqual([]);
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(result).toMatchObject({state:"running",observations:{runtime:"ready",provider:"unknown",protocol:"unknown",convergence:"reconciling"}});
+    const reopened=new NapCatRuntime({docker,stateDirectory,napcatToken:"test",fetcher});
+    await expect(reopened.apply("old-stop",{...baseCommand,generation:0,action:"stop"})).rejects.toThrow(/generation/);
+    expect(docker.stopped).toEqual([]);
+  });
+  it("refuses force restart for a foreign or missing container",async()=>{
+    const docker=new RecordingDocker();
+    const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"botroost-force-denied-")),napcatToken:"test"});
+    await expect(runtime.apply("missing",{...baseCommand,action:"force-restart"})).rejects.toThrow(/not found/);
+    docker.inspect=async name=>({id:"foreign",name,image:NAPCAT_IMAGE,state:"running",ipAddress:null,labels:{}});
+    await expect(runtime.apply("foreign",{...baseCommand,action:"force-restart"})).rejects.toThrow(/not owned/);
+    expect(docker.killed).toEqual([]);expect(docker.started).toEqual([]);
+  });
+  it("keeps QQ offline and runtime ready when read-only QR observation is rejected",async()=>{
+    const docker=new RecordingDocker();
+    docker.inspect=async name=>({id:"owned-id",name,image:NAPCAT_IMAGE,state:"running",ipAddress:"172.18.0.10",labels:{"botroost.workspace_id":baseCommand.workspaceId,"botroost.endpoint_id":baseCommand.endpointId,"botroost.provider":"napcat"}});
+    const paths:string[]=[];
+    const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"botroost-offline-")),napcatToken:"test",fetcher:async url=>{
+      const path=new URL(String(url)).pathname;paths.push(path);
+      if(path==="/api/auth/login")return new Response(JSON.stringify({code:0,data:{Credential:"test"}}));
+      if(path==="/api/QQLogin/GetQQLoginInfo")return new Response(JSON.stringify({code:0,data:{online:false}}));
+      return new Response(JSON.stringify({code:-1,message:"QQ Is Logined"}));
+    }});
+    const snapshot=await runtime.snapshot(baseCommand);
+    expect(snapshot).toMatchObject({runtime:"ready",provider:"degraded",protocol:"disconnected",metadata:{qq:{online:false},login:{},error:expect.stringContaining("QQ Is Logined")}});
+    expect(paths).not.toContain("/api/QQLogin/RefreshQRcode");
+  });
   it("maps only explicit NapCat login states to an online boolean", () => {
     expect(qqLoginOnline({ isLogin: true, isOffline: false })).toBe(true);
     expect(qqLoginOnline({ isLogin: false, isOffline: true })).toBe(false);
@@ -560,14 +634,14 @@ describe("NapCat runtime", () => {
     expect(paths).not.toContain("/api/Debug/create");
   });
 
-  it("asks NapCat to create a QR when none exists yet", async () => {
+  it("does not mutate QQ login while observing an unavailable QR", async () => {
     const docker = new RecordingDocker();
     docker.inspect = async () => ({ id:"container-id",name:"botroost-napcat-33333333-3333-4333-8333-333333333333",image:NAPCAT_IMAGE,state:"running" as const,ipAddress:"172.18.0.10",labels:{"botroost.workspace_id":baseCommand.workspaceId,"botroost.endpoint_id":baseCommand.endpointId,"botroost.provider":"napcat"} });
     let qrRequests=0;
     const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"botroost-napcat-create-qr-")),napcatToken:"operator-token",fetcher:async url=>{const path=new URL(String(url)).pathname;if(path==="/api/auth/login")return new Response(JSON.stringify({code:0,data:{Credential:"credential"}}));if(path==="/api/QQLogin/GetQQLoginQrcode"){qrRequests++;return new Response(JSON.stringify(qrRequests===1?{code:-1,message:"QRCode Get Error"}:{code:0,data:{qrcode:"qr-created"}}))}if(path==="/api/QQLogin/RefreshQRcode")return new Response(JSON.stringify({code:0,data:null}));if(path==="/api/QQLogin/GetQQLoginInfo")return new Response(JSON.stringify({code:0,data:{online:false}}));throw new Error(`unexpected request ${path}`)}});
     const snapshot=await runtime.snapshot(baseCommand);
-    expect(snapshot.metadata.login).toEqual({qrcode:"qr-created"});
-    expect(qrRequests).toBe(2);
+    expect(snapshot.metadata).toMatchObject({qq:{online:false},login:{},error:expect.stringContaining("QRCode Get Error")});
+    expect(qrRequests).toBe(1);
   });
 
   it("waits for NapCat to publish a replacement QR after refresh", async () => {
@@ -596,7 +670,7 @@ describe("NapCat runtime", () => {
     const result = await runtime.apply("runtime:refresh-wait", { ...baseCommand, action: "refresh-login-qr" });
 
     expect(result.metadata).toMatchObject({ login: { qrcode: "qr-eventually-ready" } });
-    expect(reads).toBe(3);
+    expect(reads).toBe(4); // explicit readiness wait plus read-only snapshot
   });
 
   it("returns bounded, redacted logs only for the endpoint-owned NapCat container", async () => {
