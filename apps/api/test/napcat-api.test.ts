@@ -1,3 +1,4 @@
+import {waitForPostgres} from "../../../packages/database/test/postgres.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
 import { buildApi } from "../src/index.js";
@@ -19,25 +20,11 @@ const mutation = (cookie: string) => ({ cookie, origin: "https://app.test", host
 
 beforeAll(async () => {
   execFileSync("docker", ["run", "-d", "--name", name, "-e", "POSTGRES_PASSWORD=postgres", "-e", "POSTGRES_DB=botroost", "-p", "127.0.0.1::5432", "postgres:16-alpine"]);
-  for (let i = 0; i < 60; i++) {
-    try {
-      execFileSync("docker", ["exec", name, "pg_isready", "-U", "postgres"], { stdio: "ignore" });
-      break;
-    } catch {
-      await new Promise(resolve => setTimeout(resolve, 250));
-    }
-  }
+  await waitForPostgres(name);
   const port = /:(\d+)$/.exec(execFileSync("docker", ["port", name, "5432/tcp"]).toString().trim())?.[1];
   if (!port) throw new Error("PostgreSQL test port unavailable");
   db = new PostgresDatabase(`postgresql://postgres:postgres@127.0.0.1:${port}/botroost`);
-  for (let i = 0; i < 60; i++) {
-    try {
-      await db.ping();
-      break;
-    } catch {
-      await new Promise(resolve => setTimeout(resolve, 250));
-    }
-  }
+  await db.ping();
   await db.migrate();
   auth = new AuthService(db);
   await auth.bootstrapOwner("owner@example.com", "correct horse battery staple", "Primary");

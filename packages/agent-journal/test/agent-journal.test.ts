@@ -19,6 +19,15 @@ import {
 const pathFor = async () =>
   join(await mkdtemp(join(tmpdir(), "journal-")), "journal.jsonl");
 describe("journal durability and ordering", () => {
+  it("persists failed outcomes without inventing a successful effect and reopens them",async()=>{
+    const path=await pathFor();let journal=await FileAgentJournal.open(path);
+    await journal.recordReceipt("failed",{});
+    await journal.recordResult("failed",{outcome:"failed",error:"provider rejected"});
+    await journal.close();journal=await FileAgentJournal.open(path);
+    expect(journal.get("failed")).toMatchObject({effects:{},result:{outcome:"failed"}});
+    await expect(journal.recordEffect("failed","late",{state:"running"})).rejects.toThrow(/terminal/);
+    await journal.close();
+  });
   it("completes short writes before syncing and updating memory", async () => {
     const path = await pathFor();
     const writeSizes: number[] = [];

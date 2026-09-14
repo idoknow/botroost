@@ -23,7 +23,7 @@ jobs:
       - run: bun run --cwd apps/web build
       - run: bun x --no-install playwright install --with-deps chromium
         working-directory: apps/web
-      - run: bun run --cwd apps/web e2e -- fixture.spec.ts system-status.spec.ts
+      - run: bun run --cwd apps/web e2e -- fixture.spec.ts system-status.spec.ts force-restart.spec.ts
       - run: bun run verify:packages
   live-e2e:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

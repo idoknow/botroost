@@ -8,6 +8,7 @@ import {
   FakeRuntime,
   HttpAgentTransport,
   NodeCredentialStore,
+  NapCatRuntime,
   type AgentCommandTransport,
 } from "../src/index.js";
 
@@ -62,6 +63,21 @@ const command = {
 };
 
 describe("durable fake agent", () => {
+  it("claims emergency work before provider observation IO",async()=>{
+    const dir=await mkdtemp(join(tmpdir(),"agent-emergency-"));
+    const runtime=new NapCatRuntime({stateDirectory:dir,napcatToken:"test"});
+    const observe=vi.spyOn(runtime,"observations").mockRejectedValue(new Error("provider unavailable"));
+    vi.spyOn(runtime,"apply").mockResolvedValue({state:"running"});
+    const transport=new MemoryTransport({...command,action:"force-restart"});
+    const agent=await DurableFakeAgent.open({journalPath:join(dir,"journal"),runtime,transport});
+    try{await expect(agent.pollOnce()).resolves.toBe(true);expect(observe).not.toHaveBeenCalled();expect(transport.results).toHaveLength(1)}finally{await agent.close()}
+  });
+  it("redacts process invocation secrets from persisted terminal failures",async()=>{
+    const dir=await mkdtemp(join(tmpdir(),"agent-failure-redaction-")),runtime=new FakeRuntime();
+    runtime.apply=async()=>{throw Object.assign(new Error("command failed docker --env TOKEN=secret"),{stderr:"TOKEN=secret",cmd:"docker"})};
+    const transport=new MemoryTransport(command),agent=await DurableFakeAgent.open({journalPath:join(dir,"journal"),runtime,transport});
+    try{await agent.pollOnce();expect(JSON.stringify(transport.results)).not.toContain("secret");expect(transport.results[0]).toMatchObject({outcome:"failed",observations:{runtime:"unknown"}})}finally{await agent.close()}
+  });
   it("samples idle heartbeats at five-second cadence without delaying command claims",async()=>{
     const clock=vi.spyOn(Date,"now").mockReturnValue(10000),transport=new MemoryTransport(null),claim=vi.spyOn(transport,"claim");
     const agent=await DurableFakeAgent.open({journalPath:join(await mkdtemp(join(tmpdir(),"heartbeat-cadence-")),"journal"),transport});
@@ -358,15 +374,19 @@ describe("durable fake agent", () => {
     await agent.close();
   });
 
-  it("reports a retrying phase when a runtime attempt fails", async () => {
+  it("journals terminal runtime failures and replays them without repeating the effect", async () => {
     const dir = await mkdtemp(join(tmpdir(), "botroost-agent-"));
     const runtime = new FakeRuntime();
     runtime.apply = async () => { throw new Error("fixture runtime failure"); };
     const transport = new MemoryTransport(command);
     const agent = await DurableFakeAgent.open({journalPath:join(dir,"agent-journal.jsonl"),runtime,transport});
-    await expect(agent.pollOnce()).rejects.toThrow("fixture runtime failure");
-    expect(transport.progresses.at(-1)).toMatchObject({phase:"retrying",message:"Runtime attempt failed; waiting for automatic retry"});
-    expect(transport.results).toHaveLength(0);
+    await expect(agent.pollOnce()).resolves.toBe(true);
+    expect(transport.results).toHaveLength(1);
+    expect(transport.results[0]).toMatchObject({outcome:"failed",error:"fixture runtime failure",observations:{runtime:"unknown",provider:"unknown",convergence:"failed"}});
+    runtime.apply = async () => { throw new Error("must not execute again"); };
+    transport.command = {...command,attempt:2};
+    await agent.pollOnce();
+    expect(transport.results[1]).toMatchObject({outcome:"failed",error:"fixture runtime failure",attempt:2});
     await agent.close();
   });
 });

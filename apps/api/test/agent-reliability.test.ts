@@ -1,3 +1,4 @@
+import {waitForPostgres} from "../../../packages/database/test/postgres.js";
 import {afterAll,beforeAll,describe,expect,it} from "vitest";
 import {execFileSync} from "node:child_process";
 import {randomUUID} from "node:crypto";
@@ -5,12 +6,42 @@ import {PostgresDatabase} from "@botroost/database";
 
 const container=`botroost-agent-reliability-${process.pid}-${Date.now()}`;
 let db:PostgresDatabase;
-beforeAll(async()=>{execFileSync("docker",["run","-d","--name",container,"-e","POSTGRES_PASSWORD=postgres","-e","POSTGRES_DB=botroost","-p","127.0.0.1::5432","postgres:16-alpine"]);for(let i=0;i<60;i++){try{execFileSync("docker",["exec",container,"pg_isready","-U","postgres"],{stdio:"ignore"});break}catch{await new Promise(resolve=>setTimeout(resolve,250))}}const port=/:(\d+)$/.exec(execFileSync("docker",["port",container,"5432/tcp"]).toString().trim())?.[1];if(!port)throw new Error("PostgreSQL test port unavailable");db=new PostgresDatabase(`postgresql://postgres:postgres@127.0.0.1:${port}/botroost`);for(let i=0;i<60;i++){try{await db.ping();break}catch{await new Promise(resolve=>setTimeout(resolve,250))}}await db.migrate()},120_000);
+beforeAll(async()=>{execFileSync("docker",["run","-d","--name",container,"-e","POSTGRES_PASSWORD=postgres","-e","POSTGRES_DB=botroost","-p","127.0.0.1::5432","postgres:16-alpine"]);await waitForPostgres(container);const port=/:(\d+)$/.exec(execFileSync("docker",["port",container,"5432/tcp"]).toString().trim())?.[1];if(!port)throw new Error("PostgreSQL test port unavailable");db=new PostgresDatabase(`postgresql://postgres:postgres@127.0.0.1:${port}/botroost`);await db.ping();await db.migrate()},120_000);
 afterAll(async()=>{await db?.close();try{execFileSync("docker",["rm","-f",container],{stdio:"ignore"})}catch(error){console.warn("failed to remove PostgreSQL reliability test container",error)}},30_000);
 async function fixture(sessionId="session-a"){const workspaceId=randomUUID(),nodeId=randomUUID(),endpointId=randomUUID(),userId=randomUUID();await db.pool.query("INSERT INTO users(id,email,password_hash) VALUES($1,$2,'hash')",[userId,`${userId}@example.test`]);await db.pool.query("INSERT INTO workspaces(id,name) VALUES($1,'test')",[workspaceId]);await db.pool.query("INSERT INTO nodes(id,workspace_id,name,provider,connection_session_id,last_heartbeat_at,connection_epoch) VALUES($1,$2,$3,'fake',$4,now(),1)",[nodeId,workspaceId,`node-${nodeId}`,sessionId]);await db.pool.query("INSERT INTO endpoints(id,workspace_id,node_id,name,provider_id) VALUES($1,$2,$3,$4,'fake')",[endpointId,workspaceId,nodeId,`endpoint-${endpointId}`]);return {workspaceId,nodeId,endpointId,userId,sessionId}}
 async function commandFor(f:Awaited<ReturnType<typeof fixture>>,action:"start"|"delete"="start"){const mutation=await db.mutateEndpoint({workspaceId:f.workspaceId,endpointId:f.endpointId,actorUserId:f.userId,action,expectedGeneration:0,idempotencyKey:randomUUID()});await db.processOne();const command=await db.claimAgentCommand(f.nodeId,f.sessionId);if(!command)throw new Error("command unavailable");return {operationId:mutation.operation.id,command}}
 const heartbeat=(sessionId:string,observedAt:string)=>({sessionId,observedAt,runtimes:[]});
 describe("agent session reliability on real PostgreSQL",()=>{
+for(const oldStatus of ["queued","running"] as const)it(`force restart atomically supersedes ${oldStatus} work and fences old commands`,async()=>{
+  const f=await fixture();
+  const old=await db.mutateEndpoint({workspaceId:f.workspaceId,endpointId:f.endpointId,actorUserId:f.userId,action:"start",expectedGeneration:0,idempotencyKey:randomUUID()});
+  let command:Awaited<ReturnType<typeof db.claimAgentCommand>>=null;
+  if(oldStatus==="running"){await db.processOne();command=await db.claimAgentCommand(f.nodeId,f.sessionId)}
+  const input={workspaceId:f.workspaceId,endpointId:f.endpointId,actorUserId:f.userId,action:"force-restart" as const,expectedGeneration:1,idempotencyKey:randomUUID()};
+  const [forced,replay]=await Promise.all([db.mutateEndpoint(input),db.mutateEndpoint(input)]);
+  expect(forced.operation.id).toBe(replay.operation.id);
+  expect(forced.operation).toMatchObject({action:"force-restart",generation:2,status:"queued"});
+  expect(await db.operation(f.workspaceId,old.operation.id)).toMatchObject({status:"stale",result:{reason:"force_restart_superseded",supersededBy:forced.operation.id}});
+  expect((await db.pool.query("SELECT processed_at IS NOT NULL done FROM outbox_events WHERE operation_id=$1",[old.operation.id])).rows[0].done).toBe(true);
+  expect((await db.audit(f.workspaceId)).some(x=>x.action==="operation.superseded")).toBe(true);
+  if(command){
+    const base={sessionId:f.sessionId,operationId:old.operation.id,generation:1,connectionEpoch:1};
+    await expect(db.recordAgentReceipt(f.nodeId,command.commandId,base)).rejects.toMatchObject({code:"conflict"});
+    await expect(db.recordAgentProgress(f.nodeId,command.commandId,{...base,endpointId:f.endpointId,attempt:1,sequence:1,phase:"starting-container",percent:50,message:"late"})).rejects.toMatchObject({code:"conflict"});
+    await expect(db.recordAgentResult(f.nodeId,command.commandId,{...base,endpointId:f.endpointId,attempt:1,outcome:"succeeded",observations:{runtime:"stopped"}})).rejects.toMatchObject({code:"conflict"});
+  }
+  await db.processOne();const next=await db.claimAgentCommand(f.nodeId,f.sessionId);
+  expect(next).toMatchObject({operationId:forced.operation.id,action:"force-restart",generation:2});
+  await expect(db.mutateEndpoint({...input,idempotencyKey:randomUUID(),expectedGeneration:1})).rejects.toMatchObject({code:"conflict"});
+  await expect(db.mutateEndpoint({...input,action:"stop"})).rejects.toMatchObject({code:"idempotency_mismatch"});
+});
+it("does not supersede an active delete or a deleted endpoint",async()=>{
+  const f=await fixture();await commandFor(f,"delete");
+  const input={workspaceId:f.workspaceId,endpointId:f.endpointId,actorUserId:f.userId,action:"force-restart" as const,expectedGeneration:1,idempotencyKey:randomUUID()};
+  await expect(db.mutateEndpoint(input)).rejects.toMatchObject({code:"conflict"});
+  await db.pool.query("UPDATE endpoints SET deleted_at=now() WHERE id=$1",[f.endpointId]);
+  await expect(db.mutateEndpoint(input)).rejects.toMatchObject({code:"not_found"});
+});
 it("upgrades a deployed legacy checksum ledger to immutable historical checksums",async()=>{await db.pool.query("UPDATE schema_migrations SET checksum=CASE name WHEN '0001_control_plane.sql' THEN '011b962aa6d1493033b3c42e7d68b5c905d3b2f1f83666761d74af5cf3b5bb3b' WHEN '0002_outbound_agent.sql' THEN '591d69d25129a5be361930030c52f602f2d85042686f5c306d279d5fb6545cfb' ELSE checksum END WHERE name IN ('0001_control_plane.sql','0002_outbound_agent.sql')");await db.migrate();expect((await db.pool.query("SELECT name,checksum FROM schema_migrations WHERE name IN ('0001_control_plane.sql','0002_outbound_agent.sql') ORDER BY name")).rows).toEqual([{name:"0001_control_plane.sql",checksum:"21e94c5207ad27a74cd15a205268b97aab465f2ab162777a053e971192db08b8"},{name:"0002_outbound_agent.sql",checksum:"1723679204313029ac5ce9c82be735e3b6e461dc0062b1a8a7ccd6d142ec5143"}])});
 it("uses database time for heartbeat freshness and keeps client time only as metadata",async()=>{const f=await fixture();const before=Date.now();await db.heartbeat(f.nodeId,heartbeat(f.sessionId,"2099-01-01T00:00:00.000Z"));const row=(await db.pool.query("SELECT last_heartbeat_at,heartbeat_metadata FROM nodes WHERE id=$1",[f.nodeId])).rows[0];expect(new Date(row.last_heartbeat_at).getTime()).toBeGreaterThanOrEqual(before-1000);expect(new Date(row.last_heartbeat_at).getUTCFullYear()).not.toBe(2099);expect(row.heartbeat_metadata).toMatchObject({observedAt:"2099-01-01T00:00:00.000Z"})});
 it("uses database time rather than API clock to decide session takeover freshness",async()=>{const f=await fixture();const realNow=Date.now;Date.now=()=>realNow()+10*60_000;try{await expect(db.heartbeat(f.nodeId,heartbeat("session-b",new Date().toISOString()))).rejects.toMatchObject({code:"conflict"});expect((await db.pool.query("SELECT connection_session_id,connection_epoch FROM nodes WHERE id=$1",[f.nodeId])).rows[0]).toEqual({connection_session_id:f.sessionId,connection_epoch:"1"})}finally{Date.now=realNow}});
