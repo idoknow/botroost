@@ -617,9 +617,8 @@ export class NapCatRuntime {
     }
     if (command.action === "stop" && existing) { await onProgress({phase:"stopping-container",percent:70,message:"Stopping NapCat container"}); await docker.stop(name); }
     else if (command.action === "restart") { await onProgress({phase:"starting-container",percent:70,message:"Restarting NapCat container"}); this.webCredentials.delete(command.endpointId); await docker.restart(name); }
-    else if (command.action === "start") { await onProgress({phase:"starting-container",percent:70,message:"Starting NapCat container"}); await docker.start(name); }
+    else if (command.action !== "stop" && created) { await onProgress({phase:"starting-container",percent:70,message:"Starting NapCat container"}); await docker.start(name); }
     if (command.action === "refresh-login-qr") {
-      if(created){await onProgress({phase:"starting-container",percent:55,message:"Starting replacement NapCat container"});await docker.start(name)}
       const current=created?await docker.inspect(name):existing;
       if(current&&!this.ownsContainer(current,command))throw new Error("NapCat container is not owned by this endpoint");
       if (!current?.ipAddress||current.state!=="running") throw new Error("NapCat container is not available for QR refresh");

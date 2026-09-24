@@ -35,12 +35,13 @@ const ownedLabels = {
 
 class RecordingDocker implements DockerClient {
   created: Parameters<DockerClient["create"]>[0][] = [];
+  started: string[] = [];
   inspected: DockerInspectResult | null = null;
   async inspect(name: string): Promise<DockerInspectResult | null> { void name; return this.inspected; }
   async create(input: Parameters<DockerClient["create"]>[0]) { this.created.push(input); return { id: "container-id" }; }
   async remove(name: string) { void name; }
   async removeHostEndpoint(root: string, endpointId: string, image: string) { void root; void endpointId; void image; }
-  async start(name: string) { void name; }
+  async start(name: string) { this.started.push(name); }
   async stop(name: string) { void name; }
   async restart(name: string) { void name; }
   async exec(container: string, args: string[]) { void container; void args; return { stdout: "", stderr: "" }; }
@@ -123,5 +124,24 @@ describe("NapCat runtime proxy injection", () => {
     const env = docker.created[0]!.environment ?? {};
     expect(env.HTTP_PROXY).toBeUndefined();
     expect(env.NAPCAT_WEBUI_SECRET_KEY).toBe("test-token");
+  });
+
+  it("starts a container recreated by a proxy change dispatched via update-endpoint-proxy", async () => {
+    const docker = new RecordingDocker();
+    const state = await mkdtemp(join(tmpdir(), "botroost-proxy-"));
+    docker.inspected = {
+      id: "owned-id",
+      name: "botroost-napcat-33333333-3333-4333-8333-333333333333",
+      image: NAPCAT_IMAGE,
+      state: "running",
+      ipAddress: "172.18.0.10",
+      labels: ownedLabels,
+      proxyEnvironment: { HTTP_PROXY: "http://old:1", HTTPS_PROXY: "http://old:1", ALL_PROXY: "http://old:1" },
+    };
+    const command = { ...baseCommand({ protocol: "http", host: "10.0.0.5", port: 8080 }), action: "update-endpoint-proxy" as const };
+    await runtime(docker, state).apply("effect-6", command);
+    expect(docker.created).toHaveLength(1);
+    expect((docker.created[0]!.environment ?? {}).HTTP_PROXY).toBe("http://10.0.0.5:8080");
+    expect(docker.started).toEqual(["botroost-napcat-33333333-3333-4333-8333-333333333333"]);
   });
 });
