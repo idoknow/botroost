@@ -576,6 +576,12 @@ export class NapCatRuntime {
       return{state:"running",observations:{node:"online",runtime:snapshot.runtime,provider:snapshot.provider,protocol:snapshot.protocol,convergence:snapshot.convergence},metadata:snapshot.metadata};
     }
     if(existing&&!this.ownsContainer(existing,command))throw new Error("NapCat container is not owned by this endpoint");
+    if(command.action==="update-endpoint-proxy"&&(command.metadata.desiredState as {state?:string}|undefined)?.state==="stopped"){
+      await onProgress({phase:"stopping-container",percent:60,message:"Applying proxy configuration to a stopped endpoint"});
+      const stoppedProxy=applyProxyEnvironment(((command.metadata.configuration as Record<string,unknown>|undefined)??{}).proxy??null);
+      if(existing&&existing.proxyEnvironment&&(stoppedProxy?.HTTP_PROXY??null)!==(existing.proxyEnvironment.HTTP_PROXY??null))await docker.remove(name);
+      return{state:"stopped",observations:{node:"online",runtime:"stopped",provider:"unavailable",protocol:"disconnected",convergence:"converged"},metadata:{proxyUpdated:true}};
+    }
     const desiredResources=napcatResourceLimits(command.runtimeRequest.resources);
     const storedConfiguration=(command.metadata.configuration as Record<string,unknown>|undefined)??{};
     const proxyEnvironment=applyProxyEnvironment(storedConfiguration.proxy??null);

@@ -144,4 +144,23 @@ describe("NapCat runtime proxy injection", () => {
     expect((docker.created[0]!.environment ?? {}).HTTP_PROXY).toBe("http://10.0.0.5:8080");
     expect(docker.started).toEqual(["botroost-napcat-33333333-3333-4333-8333-333333333333"]);
   });
+
+  it("does not boot a stopped endpoint when applying a proxy change; config applies on next start", async () => {
+    const docker = new RecordingDocker();
+    const state = await mkdtemp(join(tmpdir(), "botroost-proxy-"));
+    docker.inspected = {
+      id: "owned-id",
+      name: "botroost-napcat-33333333-3333-4333-8333-333333333333",
+      image: NAPCAT_IMAGE,
+      state: "exited",
+      ipAddress: null,
+      labels: ownedLabels,
+      proxyEnvironment: { HTTP_PROXY: "http://old:1", HTTPS_PROXY: "http://old:1", ALL_PROXY: "http://old:1" },
+    };
+    const command = { ...baseCommand({ protocol: "http", host: "10.0.0.5", port: 8080 }), action: "update-endpoint-proxy" as const, metadata: { ...baseCommand({ protocol: "http", host: "10.0.0.5", port: 8080 }).metadata, desiredState: { state: "stopped" } } };
+    const result = await runtime(docker, state).apply("effect-7", command);
+    expect(docker.created).toHaveLength(0);
+    expect(docker.started).toHaveLength(0);
+    expect(result.state).toBe("stopped");
+  });
 });
