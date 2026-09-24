@@ -13,6 +13,7 @@ import {
   type CommandResultRequest,
   type RuntimeCommand,
 } from "@botroost/agent-protocol";
+import { applyProxyEnvironment } from "@botroost/agent-protocol";
 import { NapCatTrafficAccumulator } from "./traffic.js";
 import { inspectedResourceLimits, parseDockerStats, ResourceUsageSampler, RESOURCE_SAMPLE_TIMEOUT_MS, type DockerStatsReader, type ResourceLimits } from "./resource-usage.js";
 
@@ -83,6 +84,7 @@ export interface DockerInspectResult {
   labels: Record<string, string>;
   resources?: { cpuMillis: number; memoryMiB: number; memorySwapMiB: number };
   resourceLimits?: ResourceLimits;
+  proxyEnvironment?: Record<string, string>;
 }
 export interface DockerClient {
   stats?: DockerStatsReader;
@@ -101,6 +103,19 @@ export interface DockerClient {
 export function isDockerObjectMissingError(error: unknown): boolean {
   const stderr = (error as { stderr?: unknown } | null)?.stderr;
   return /no such object/i.test(String(stderr ?? ""));
+}
+
+const proxyEnvKeys = ["HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","NO_PROXY","http_proxy","https_proxy","all_proxy","no_proxy"] as const;
+/** Extract only the proxy-related environment of an existing container for drift comparison. */
+export function proxyEnvironmentFrom(env: string[]): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const entry of env) {
+    const index = entry.indexOf("=");
+    if (index <= 0) continue;
+    const key = entry.slice(0, index);
+    if ((proxyEnvKeys as readonly string[]).includes(key)) result[key] = entry.slice(index + 1);
+  }
+  return result;
 }
 
 export function napcatResourceLimits(requested:{cpuMillis:number;memoryMiB:number}):DockerCreateInput["resources"]{
@@ -146,6 +161,7 @@ export class DockerCliClient implements DockerClient {
         state: state?.Running ? "running" : "exited",
         ipAddress,
         labels: ((item.Config as Record<string, unknown> | undefined)?.Labels as Record<string, string> | undefined) ?? {},
+        proxyEnvironment: proxyEnvironmentFrom(((item.Config as Record<string, unknown> | undefined)?.Env as string[] | undefined) ?? []),
         resourceLimits: inspectedResourceLimits(hostConfig),
         resources: {
           cpuMillis: Number(hostConfig?.CpuQuota) > 0 ? Math.round(Number(hostConfig?.CpuQuota) / Number(hostConfig?.CpuPeriod || 100000) * 1000) : 0,
@@ -561,9 +577,12 @@ export class NapCatRuntime {
     }
     if(existing&&!this.ownsContainer(existing,command))throw new Error("NapCat container is not owned by this endpoint");
     const desiredResources=napcatResourceLimits(command.runtimeRequest.resources);
+    const storedConfiguration=(command.metadata.configuration as Record<string,unknown>|undefined)??{};
+    const proxyEnvironment=applyProxyEnvironment(storedConfiguration.proxy??null);
     const resourceDrift=existing?.resources&&(existing.resources.cpuMillis!==desiredResources.cpuMillis||existing.resources.memoryMiB!==desiredResources.memoryMiB||existing.resources.memorySwapMiB!==desiredResources.memorySwapMiB);
+    const proxyDrift=existing!==null&&((proxyEnvironment?.HTTP_PROXY??null)!==(existing.proxyEnvironment?.HTTP_PROXY??null));
     let created=false;
-    if (command.action !== "stop" && (!existing || existing.image !== desiredImage || resourceDrift)) {
+    if (command.action !== "stop" && (!existing || existing.image !== desiredImage || resourceDrift || proxyDrift)) {
       if (existing){await onProgress({phase:"preparing-runtime",percent:35,message:"Replacing outdated NapCat container"});await docker.remove(name)}
       await onProgress({phase:"preparing-runtime",percent:40,message:"Preparing runtime image and storage"});
       const qq = this.endpointDirectory(command.endpointId, "qq");
@@ -583,7 +602,10 @@ export class NapCatRuntime {
           "botroost.endpoint_id": command.endpointId,
           "botroost.generation": String(command.generation),
         },
-        environment: { NAPCAT_WEBUI_SECRET_KEY: this.options.napcatToken ?? process.env.NAPCAT_TOKEN ?? "" },
+        environment: {
+          NAPCAT_WEBUI_SECRET_KEY: this.options.napcatToken ?? process.env.NAPCAT_TOKEN ?? "",
+          ...(proxyEnvironment ?? {}),
+        },
         mounts: [
           { type: "bind", source: hostQq, target: "/app/.config/QQ" },
           { type: "bind", source: hostConfig, target: "/app/napcat/config" },

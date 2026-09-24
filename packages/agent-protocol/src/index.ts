@@ -1,6 +1,8 @@
 import { RuntimeRequestSchema } from "@botroost/runtime-sdk";
 import { z } from "zod";
 
+export * from "./proxy.js";
+
 const jsonValue: z.ZodType<unknown> = z.lazy(() =>
   z.union([
     z.null(),
@@ -62,7 +64,7 @@ export const RuntimeCommandSchema = z.strictObject({
   generation: z.number().int().nonnegative(),
   connectionEpoch: z.number().int().nonnegative(),
   attempt: z.number().int().positive().optional(),
-  action: z.enum(["start", "stop", "restart", "force-restart", "delete", "refresh-login-qr", "read-container-logs", "update-onebot-websockets"]),
+  action: z.enum(["start", "stop", "restart", "force-restart", "delete", "refresh-login-qr", "read-container-logs", "update-onebot-websockets", "update-endpoint-proxy"]),
   runtimeRequest: RuntimeRequestSchema,
   metadata: jsonObject,
 });

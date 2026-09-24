@@ -1,6 +1,5 @@
 {
   "lockfileVersion": 1,
-  "configVersion": 1,
   "workspaces": {
     "": {
       "name": "botroost",
@@ -157,8 +156,10 @@
       "name": "@botroost/database",
       "version": "0.0.0",
       "dependencies": {
+        "@botroost/agent-protocol": "workspace:*",
         "drizzle-orm": "^0.44.7",
         "pg": "^8.16.3",
+        "zod": "^4.1.12",
       },
       "devDependencies": {
         "vitest": "^3.2.4",
