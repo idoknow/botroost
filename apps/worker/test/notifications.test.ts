@@ -33,11 +33,11 @@ describe("ResendClient",()=>{
       expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer re_test");
       return new Response(JSON.stringify({id:"msg_123"}),{status:200,headers:{"content-type":"application/json"}});
     });
-    const client=new ResendClient({fetcher:fetcher as unknown as typeof fetch,timeoutMs:100});
+    const client=new ResendClient({fetcher:fetcher ,timeoutMs:100});
     await expect(client.send({apiKey:"re_test",from:"Botroost <alerts@example.com>",to:"ops@example.com",subject:"offline",html:"<p>offline</p>"})).resolves.toEqual({providerMessageId:"msg_123"});
   });
   it("rejects unsuccessful or malformed provider responses",async()=>{
-    const failed=new ResendClient({fetcher:vi.fn(async()=>new Response("no",{status:429})) as unknown as typeof fetch,timeoutMs:100});
+    const failed=new ResendClient({fetcher:vi.fn(async()=>new Response("no",{status:429})) ,timeoutMs:100});
     await expect(failed.send({apiKey:"key",from:"a@example.com",to:"b@example.com",subject:"x",html:"x"})).rejects.toThrow("Resend request failed (429)");
   });
 });

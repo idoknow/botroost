@@ -25,6 +25,7 @@ function safeRuntimeError(error: unknown): string {
   return (error instanceof Error?error.message:String(error)).replace(/((?:token|password|secret|authorization|cookie|credential)\s*[:=]\s*)(?:Bearer\s+)?[^\s,;]+/gi,"$1[REDACTED]").slice(0,2000)||"Runtime execution failed";
 }
 type RuntimeProgress = Pick<CommandProgressRequest, "phase" | "percent" | "message">;
+export type FetchLike=(input:string|URL,init?:RequestInit)=>Promise<Response>;
 
 type OneBotReadAction = "get_status" | "get_login_info" | "get_friend_list" | "get_group_list" | "get_version_info";
 type OneBotProbe = { ok: boolean; durationMs: number; error: string | null };
@@ -389,7 +390,7 @@ export class FakeRuntime {
 export class NapCatRuntime {
   private readonly networkMode: string;
   private readonly containerPrefix: string;
-  private readonly fetcher: typeof fetch;
+  private readonly fetcher: FetchLike;
   private readonly commands = new Map<string, RuntimeCommand>();
   private readonly snapshotCache = new Map<string, { at: number; value: Awaited<ReturnType<NapCatRuntime["snapshot"]>> }>();
   private readonly directoryCache = new Map<string, {
@@ -411,7 +412,7 @@ export class NapCatRuntime {
     containerPrefix?: string;
     networkMode?: string;
     napcatToken?: string;
-    fetcher?: typeof fetch;
+    fetcher?: FetchLike;
     signal?: AbortSignal;
     qrPollIntervalMs?: number;
     qrPollAttempts?: number;

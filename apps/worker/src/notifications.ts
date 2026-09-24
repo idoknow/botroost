@@ -11,8 +11,9 @@ export function evaluateNapcatAlertTransition(input:{previous:NapcatAlertState;i
 }
 
 export interface ResendMessage{apiKey:string;from:string;to:string;subject:string;html:string;idempotencyKey?:string}
+export type FetchLike=(input:string|URL,init?:RequestInit)=>Promise<Response>;
 export class ResendClient{
-  constructor(private options:{fetcher?:typeof fetch;timeoutMs?:number}={}){}
+  constructor(private options:{fetcher?:FetchLike;timeoutMs?:number}={}){}
   async send(message:ResendMessage):Promise<{providerMessageId:string}>{
     const response=await (this.options.fetcher??globalThis.fetch)("https://api.resend.com/emails",{
       method:"POST",signal:AbortSignal.timeout(this.options.timeoutMs??10_000),headers:{Authorization:`Bearer ${message.apiKey}`,"Content-Type":"application/json","User-Agent":"Botroost/1.0 (+https://botroost.com)",...(message.idempotencyKey?{"Idempotency-Key":message.idempotencyKey}:{})},body:JSON.stringify({from:message.from,to:[message.to],subject:message.subject,html:message.html})

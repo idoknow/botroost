@@ -2,7 +2,7 @@ import { access, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { dockerCreateArguments, isDockerObjectMissingError, NAPCAT_IMAGE, NapCatRuntime, qqLoginOnline, type DockerClient, type DockerInspectResult } from "../src/index.js";
+import { dockerCreateArguments, isDockerObjectMissingError, NAPCAT_IMAGE, NapCatRuntime, qqLoginOnline, type DockerClient, type DockerInspectResult, type FetchLike } from "../src/index.js";
 import type { RuntimeCommand } from "@botroost/agent-protocol";
 
 const baseCommand: RuntimeCommand = {
@@ -77,7 +77,7 @@ describe("NapCat runtime", () => {
     const docker=new RecordingDocker();
     docker.inspect=async name=>({id:"owned-id",name,image:NAPCAT_IMAGE,state:"running",ipAddress:"172.18.0.10",labels:{"botroost.workspace_id":baseCommand.workspaceId,"botroost.endpoint_id":baseCommand.endpointId,"botroost.provider":"napcat"}});
     let active=0,aborted=false;
-    const fetcher:typeof fetch=async(_url,init)=>{
+    const fetcher:FetchLike=async(_url,init)=>{
       active++;
       try{await new Promise<void>((_resolve,reject)=>{
         const abort=()=>{aborted=true;reject(init?.signal?.reason)};
@@ -196,14 +196,14 @@ describe("NapCat runtime", () => {
     expect(docker.removes).toHaveLength(0);
     expect(docker.created).toHaveLength(0);
     expect(docker.started).toHaveLength(0);
-    const reopened=new NapCatRuntime({docker,stateDirectory,napcatToken:"operator-token",fetcher:vi.fn(async()=>{throw new Error("must not probe")}) as unknown as typeof fetch});
+    const reopened=new NapCatRuntime({docker,stateDirectory,napcatToken:"operator-token",fetcher:vi.fn(async()=>{throw new Error("must not probe")}) });
     expect(await reopened.observations()).toEqual([]);
   });
   it("fails closed before sending NapCat credentials when a heartbeat sees a foreign container",async()=>{
     const docker=new RecordingDocker();
     docker.inspect=async name=>({id:"foreign",name,image:NAPCAT_IMAGE,state:"running",ipAddress:"172.18.0.99",labels:{"botroost.workspace_id":"another-workspace","botroost.endpoint_id":baseCommand.endpointId,"botroost.provider":"napcat"}});
     const fetcher=vi.fn(async()=>{throw new Error("must not probe")});
-    const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"botroost-napcat-foreign-snapshot-")),napcatToken:"operator-token",fetcher:fetcher as unknown as typeof fetch});
+    const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"botroost-napcat-foreign-snapshot-")),napcatToken:"operator-token",fetcher:fetcher });
     await expect(runtime.snapshot(baseCommand)).rejects.toThrow("not owned by this endpoint");
     expect(fetcher).not.toHaveBeenCalled();
   });
@@ -212,7 +212,7 @@ describe("NapCat runtime", () => {
     let foreign=false;
     docker.inspect=async name=>({id:foreign?"foreign":"owned",name,image:NAPCAT_IMAGE,state:"running",ipAddress:foreign?"172.18.0.99":"172.18.0.10",labels:foreign?{"botroost.workspace_id":"another-workspace","botroost.endpoint_id":baseCommand.endpointId,"botroost.provider":"napcat"}:{"botroost.workspace_id":baseCommand.workspaceId,"botroost.endpoint_id":baseCommand.endpointId,"botroost.provider":"napcat"},resources:{cpuMillis:1000,memoryMiB:1024,memorySwapMiB:1536}});
     const fetcher=vi.fn(async url=>{const path=new URL(String(url)).pathname;if(path==="/api/auth/login")return new Response(JSON.stringify({code:0,data:{Credential:"credential"}}));if(path==="/api/QQLogin/GetQQLoginInfo")return new Response(JSON.stringify({code:0,data:{online:false}}));if(path==="/api/QQLogin/GetQQLoginQrcode")return new Response(JSON.stringify({code:0,data:{qrcode:"qr"}}));throw new Error(`unexpected request ${path}`)});
-    const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"botroost-napcat-cached-ownership-")),napcatToken:"operator-token",fetcher:fetcher as unknown as typeof fetch});
+    const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"botroost-napcat-cached-ownership-")),napcatToken:"operator-token",fetcher:fetcher });
     await runtime.apply("runtime:cached-ownership",baseCommand);
     expect((await runtime.observations())[0]?.runtime).toBe("ready");
     foreign=true;
@@ -233,7 +233,7 @@ describe("NapCat runtime", () => {
       requestSignal=init?.signal??undefined;
       requestStarted();
       return await new Promise<Response>((_resolve,reject)=>init?.signal?.addEventListener("abort",()=>reject(init.signal?.reason),{once:true}));
-    }) as unknown as typeof fetch});
+    }) });
     const applying=runtime.apply("runtime:abort",{...baseCommand,action:"start"},async()=>undefined);
     await started;
     controller.abort(new Error("agent shutdown"));

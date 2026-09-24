@@ -54,7 +54,7 @@ function runtime(docker: DockerClient, stateDirectory: string) {
     stateDirectory,
     hostStateDirectory: stateDirectory,
     napcatToken: "test-token",
-    fetcher: (async () => new Response(JSON.stringify({ code: 0, data: { isLogin: false } }), { status: 200 })) as unknown as typeof fetch,
+    fetcher: (async () => new Response(JSON.stringify({ code: 0, data: { isLogin: false } }), { status: 200 })),
     qrPollAttempts: 1,
   });
 }
