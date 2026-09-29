@@ -9,7 +9,7 @@ export function BrandMark({compact=false}:{compact?:boolean}){const{t}=useI18n()
 export const PageContainer=({children}:{children:ReactNode})=><div className="page-container">{children}</div>;
 export const Stack=({children,className}:{children:ReactNode;className?:string})=><div className={cn('stack',className)}>{children}</div>;
 export const Card=({children,className}:{children:ReactNode;className?:string})=><section className={cn('card',className)}>{children}</section>;
-export function Button({className,busy,...props}:React.ComponentProps<typeof PrimitiveButton>&{busy?:boolean}){const{t}=useI18n();return <PrimitiveButton className={className} disabled={busy||props.disabled} {...props}>{busy?t('common.working'):props.children}</PrimitiveButton>}
+export function Button({className,busy,...props}:React.ComponentProps<typeof PrimitiveButton>&{busy?:boolean}){const{t}=useI18n();return <PrimitiveButton className={className} {...props} disabled={busy||props.disabled}>{busy?t('common.working'):props.children}</PrimitiveButton>}
 export function Input({label,description,...props}:InputHTMLAttributes<HTMLInputElement>&{label:string;description?:string}){return <label className="field"><span>{label}</span><PrimitiveInput {...props}/>{description&&<small>{description}</small>}</label>}
 export function Select({label,children,...props}:SelectHTMLAttributes<HTMLSelectElement>&{label:string;children:ReactNode}){return <label className="field"><span>{label}</span><select {...props}>{children}</select></label>}
 export const Badge=({children,good=false}:{children:ReactNode;good?:boolean})=><PrimitiveBadge variant="secondary" className={good?'status-good':undefined}>{children}</PrimitiveBadge>;
