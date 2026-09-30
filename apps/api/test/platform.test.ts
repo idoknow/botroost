@@ -86,8 +86,8 @@ describe("platform administration",()=>{
     }
 
     expect((await f.api.inject({method:"GET",url:"/api/v1/platform/workspaces",headers:{cookie:f.sessions.owner!}})).json()).toMatchObject({workspaces:[{name:"Primary"},{name:"Second"},{name:"Third"}]});
-    expect((await f.api.inject({method:"POST",url:"/api/v1/workspaces",headers:mutation(f.sessions.otherAdmin!),payload:{name:"Nope"}})).statusCode).toBe(403);
-
+    // Any authenticated user may create a workspace for themselves while under the platform quota.
+    expect((await f.api.inject({method:"POST",url:"/api/v1/workspaces",headers:mutation(f.sessions.otherAdmin!),payload:{name:"Nope"}})).statusCode).toBe(201);
     const created=await f.api.inject({method:"POST",url:"/api/v1/workspaces",headers:mutation(f.sessions.owner!),payload:{name:"Additional"}});
     expect(created.statusCode).toBe(201);
     const workspace=created.json() as {id:string;name:string};
@@ -99,7 +99,7 @@ describe("platform administration",()=>{
     expect((await f.api.inject({method:"DELETE",url:`/api/v1/platform/workspaces/${f.owner.workspaceId}`,headers:mutation(f.sessions.owner!)})).statusCode).toBe(409);
     expect((await f.api.inject({method:"DELETE",url:`/api/v1/platform/workspaces/${workspace.id}`,headers:{...mutation(f.sessions.owner!),cookie:f.sessions.viewer!}})).statusCode).toBe(403);
     expect((await f.api.inject({method:"DELETE",url:`/api/v1/platform/workspaces/${workspace.id}`,headers:mutation(f.sessions.owner!)})).statusCode).toBe(204);
-    expect((await f.api.inject({method:"GET",url:"/api/v1/platform/workspaces",headers:{cookie:f.sessions.owner!}})).json()).toMatchObject({workspaces:[{name:"Primary"},{name:"Second"},{name:"Third"}]});
+    expect((await f.api.inject({method:"GET",url:"/api/v1/platform/workspaces",headers:{cookie:f.sessions.owner!}})).json()).toMatchObject({workspaces:[{name:"Primary"},{name:"Second"},{name:"Third"},{name:"Nope"}]});
     await f.api.close();
   });
 

@@ -17,12 +17,31 @@ describe("multi-tenant upgrade migration",()=>{
     expect(migration).not.toContain("DROP TABLE");
     expect(migration).not.toContain("DELETE FROM workspaces");
   });
-  it("does not allow ordinary workspace members to create new owner workspaces",async()=>{
-    const {InMemoryDatabase}=await import("../src/index.js"),db=new InMemoryDatabase();db.users.push({id:"member",email:"member@example.com",password_hash:"hash",is_platform_owner:false});
-    await expect(db.createWorkspaceForUser("member","new workspace","member")).rejects.toMatchObject({code:"forbidden"});
-    expect(db.workspaces).toHaveLength(0);
+  it("lets a workspace member create their own workspace under the quota but not one for somebody else",async()=>{
+    const {InMemoryDatabase}=await import("../src/index.js"),db=new InMemoryDatabase();db.users.push({id:"member",email:"member@example.com",password_hash:"hash",is_platform_owner:false});db.users.push({id:"other",email:"other@example.com",password_hash:"hash",is_platform_owner:false});
+    const created=await db.createWorkspaceForUser("member","new workspace","member");
+    expect(created).toMatchObject({name:"new workspace"});
+    expect(db.workspaces).toHaveLength(1);
+    expect(db.members).toMatchObject([{workspace_id:created.id,user_id:"member",role:"admin",workspace_role:"owner"}]);
+    // A member must not be able to create a workspace owned by another account.
+    await expect(db.createWorkspaceForUser("other","second workspace","member")).rejects.toMatchObject({code:"forbidden"});
+    expect(db.workspaces).toHaveLength(1);
+    // The platform quota is enforced in the database path, not only in the UI.
+    await db.updatePlatformSettings({maxWorkspacesPerUser:1});
+    await expect(db.createWorkspaceForUser("member","over quota","member")).rejects.toMatchObject({code:"forbidden"});
+    expect(db.workspaces).toHaveLength(1);
     expect(source).toContain("async createWorkspaceForUser(userId:string,name:string,actorUserId:string)");
-    expect(source).toContain("if(!actor?.is_platform_owner)throw new DatabaseError(\"forbidden\"");
+    expect(source).toContain('if(actorUserId!==userId&&!actor?.is_platform_owner)throw new DatabaseError("forbidden"');
+    expect(source).toContain("workspace quota exceeded");
+  });
+  it("adds the platform quota and expiry columns without touching existing data",async()=>{
+    const quotas=await readFile(fileURLToPath(new URL("../migrations/0026_platform_quotas_and_expiry.sql",import.meta.url)),"utf8");
+    expect(quotas).toContain("ADD COLUMN IF NOT EXISTS expires_at timestamptz");
+    expect(quotas).toContain("ADD COLUMN IF NOT EXISTS endpoint_expiry_grace_hours integer NOT NULL DEFAULT 24");
+    expect(quotas).toContain("ADD COLUMN IF NOT EXISTS max_endpoints_per_workspace integer");
+    expect(quotas).toContain("ADD COLUMN IF NOT EXISTS remark text");
+    expect(quotas).not.toContain("DROP COLUMN");
+    expect(quotas).not.toContain("DROP TABLE");
   });
   it("keeps the published control-plane migration immutable for automatic upgrades",async()=>{
     const legacy=await readFile(fileURLToPath(new URL("../migrations/0001_control_plane.sql",import.meta.url)),"utf8");

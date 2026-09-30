@@ -7,7 +7,7 @@ import {nodeConnectionStatus} from './policy';
 import {resourceState} from './system-status-policy';
 import {Empty,Failure,Loading} from './states';
 import type {Endpoint,Node,Page,Provider,Session} from './types';
-import {Badge,Button,Link,Modal,PageHeading,Stack,Table,navigate} from './ui';
+import {Badge,Button,Input,Link,Modal,PageHeading,Stack,Table,navigate} from './ui';
 import {Tabs,TabsContent,TabsList,TabsTrigger} from './components/tabs';
 
 type Query<T>=ReturnType<typeof useApi<T>>;
@@ -22,6 +22,7 @@ export function SystemStatus({session,path,endpoints}:{session:Session;path:stri
  const nodes=useApi<Page<Node>>('/nodes',5000,can('node:read'),true);
  const providers=useApi<Page<Provider>>('/providers',10000,can('provider:read'),true);
  const [now,setNow]=useState(Date.now()),[secret,setSecret]=useState<string>(),[enrolling,setEnrolling]=useState(false),[enrollError,setEnrollError]=useState<unknown>();
+ const [editingNode,setEditingNode]=useState<Node>(),[nodeName,setNodeName]=useState(''),[nodeRemark,setNodeRemark]=useState(''),[nodeError,setNodeError]=useState<unknown>(),[nodeSaved,setNodeSaved]=useState(false);
  useEffect(()=>{const timer=setInterval(()=>setNow(Date.now()),1000);return()=>clearInterval(timer)},[]);
  const sections=[...(can('endpoint:read')?[{id:'resources',label:t('system.resources')}]:[]),...(can('node:read')?[{id:'nodes',label:t('nav.agentNodes')}]:[]),...(can('provider:read')?[{id:'integrations',label:t('system.integrations')}]:[])];
  const params=new URLSearchParams(path.split('?')[1]),requested=params.get('section');
@@ -40,6 +41,7 @@ export function SystemStatus({session,path,endpoints}:{session:Session;path:stri
   ...(can('workspace:read')?[{label:t('system.changes'),value:summary.error?'—':summary.data?.operations??'—'}]:[]),
  ];
  async function enroll(){setEnrolling(true);setEnrollError(undefined);try{setSecret((await api.requestSecret<{token:string}>('/nodes/enrollment-tokens',{name:'agent',ttlSeconds:900,labels:{}})).token)}catch(error){setEnrollError(error)}finally{setEnrolling(false)}}
+ async function saveNode(event:React.FormEvent){event.preventDefault();if(!editingNode)return;setNodeSaved(false);setNodeError(undefined);try{const trimmed=nodeRemark.trim();await api.updateNode(editingNode.id,{name:nodeName.trim(),remark:trimmed===''?null:trimmed});setEditingNode(undefined);await nodes.refresh();setNodeSaved(true)}catch(error){setNodeError(error)}}
  return <Stack className="system-status">
   <PageHeading title={t('system.title')} action={<Button variant="outline" aria-label={t('system.refresh')} disabled={refreshing} onClick={()=>void refresh()}><RefreshCw className={refreshing?'refresh-spin':undefined}/>{t('common.refresh')}</Button>}/>
   <div className="system-summary">{counts.map(item=><div key={item.label}><small>{item.label}</small><strong>{item.value}</strong></div>)}</div>
@@ -56,8 +58,15 @@ export function SystemStatus({session,path,endpoints}:{session:Session;path:stri
    <TabsContent value="nodes" className="system-panel">
     {can('node:create')?<div className="system-section-actions"><Button variant="outline" busy={enrolling} onClick={()=>void enroll()}>{t('nodes.generateToken')}</Button></div>:null}
     {enrollError?<Failure error={enrollError}/>:null}
-    <Collection q={nodes} empty={t('system.noNodes')}>{items=><Table headers={[t('nodes.colName'),t('nodes.colProvider'),t('nodes.colHeartbeat'),t('nodes.lastHeartbeat')]} rows={items.map(node=>[
-     <details key={`${node.id}-${selectedNode??''}`} open={selectedNode===node.id}><summary>{node.name}</summary><dl className="system-node-detail"><dt>ID</dt><dd>{node.id}</dd><dt>{t('nodes.agentConfigured')}</dt><dd>{node.configured?t('common.yes'):t('common.no')}</dd><dt>{t('system.epoch')}</dt><dd>{node.connectionEpoch??'—'}</dd>{node.lastSeenAt?<><dt>{t('nodes.lastSeen')}</dt><dd>{time(node.lastSeenAt)}</dd></>:null}</dl></details>,node.provider,<Badge good={!nodes.error&&nodeConnectionStatus(node)==='online'}>{nodes.error?t('sidebar.statusUnknown'):nodeConnectionStatus(node)}</Badge>,time(node.lastHeartbeatAt)
+    {nodeError?<Failure error={nodeError} focus title={t('platform.nodeFailed')}/>:null}
+    {nodeSaved?<p className="success-message" role="status">{t('platform.nodeUpdated')}</p>:null}
+    <Collection q={nodes} empty={t('system.noNodes')}>{items=><Table headers={[t('nodes.colName'),t('nodes.remark'),t('nodes.colProvider'),t('nodes.colHeartbeat'),t('nodes.lastHeartbeat'),t('platform.colActions')]} rows={items.map(node=>[
+     <details key={`${node.id}-${selectedNode??''}`} open={selectedNode===node.id}><summary>{node.name}</summary><dl className="system-node-detail"><dt>ID</dt><dd>{node.id}</dd><dt>{t('nodes.agentConfigured')}</dt><dd>{node.configured?t('common.yes'):t('common.no')}</dd><dt>{t('system.epoch')}</dt><dd>{node.connectionEpoch??'—'}</dd>{node.lastSeenAt?<><dt>{t('nodes.lastSeen')}</dt><dd>{time(node.lastSeenAt)}</dd></>:null}</dl></details>,
+     node.remark?<span>{node.remark}</span>:<span className="muted">{t('platform.nodeEmpty')}</span>,
+     node.provider,
+     <Badge good={!nodes.error&&nodeConnectionStatus(node)==='online'}>{nodes.error?t('sidebar.statusUnknown'):nodeConnectionStatus(node)}</Badge>,
+     time(node.lastHeartbeatAt),
+     can('manage-nodes')||session.permissions.includes('node:create')?<Button variant="outline" size="sm" onClick={()=>{setEditingNode(node);setNodeName(node.name);setNodeRemark(node.remark??'');setNodeError(undefined)}}>{t('platform.editNode')}</Button>:'—'
     ])}/>}</Collection>
    </TabsContent>
    <TabsContent value="integrations" className="system-panel">
@@ -65,5 +74,6 @@ export function SystemStatus({session,path,endpoints}:{session:Session;path:stri
    </TabsContent>
   </Tabs>:null}
   <Modal open={Boolean(secret)} title={t('nodes.tokenTitle')} description={t('nodes.tokenDescription')} onClose={()=>setSecret(undefined)} footer={<Button onClick={()=>setSecret(undefined)}>{t('common.done')}</Button>}><code className="enrollment-token">{secret}</code></Modal>
+  <Modal open={Boolean(editingNode)} title={t('platform.editNode')} onClose={()=>setEditingNode(undefined)} footer={<><Button variant="outline" onClick={()=>setEditingNode(undefined)}>{t('common.cancel')}</Button><Button type="submit" form="system-node-form">{t('common.saveChanges')}</Button></>}><form id="system-node-form" className="stack" onSubmit={saveNode}><Input label={t('platform.nodeName')} required value={nodeName} onChange={event=>setNodeName(event.currentTarget.value)}/><Input label={t('nodes.remark')} value={nodeRemark} onChange={event=>setNodeRemark(event.currentTarget.value)}/></form></Modal>
  </Stack>;
 }

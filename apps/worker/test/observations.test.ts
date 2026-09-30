@@ -4,7 +4,7 @@ import {DurableWorker} from "../src/index.js";
 
 afterEach(()=>vi.restoreAllMocks());
 function fixture(){
-  const db={repairMissingOutbox:vi.fn(async()=>0),reconcileEndpointNotifications:vi.fn(async()=>0),processOne:vi.fn(async()=>false),pruneObservations:vi.fn(async(_input:unknown)=>({removed:7,afterEndpointId:"endpoint-cursor" as string|null}))};
+  const db={repairMissingOutbox:vi.fn(async()=>0),reconcileEndpointNotifications:vi.fn(async()=>0),processExpiredWorkspaces:vi.fn(async()=>({stopped:0,deleted:0})),processOne:vi.fn(async()=>false),pruneObservations:vi.fn(async(input:unknown)=>{void input;return{removed:7,afterEndpointId:"endpoint-cursor" as string|null}})};
   return{db,worker:new DurableWorker(db as unknown as PostgresDatabase)};
 }
 describe("worker observation maintenance",()=>{

@@ -19,6 +19,8 @@ export class DurableWorker{
   async runOnce(){
     await this.reconcileMissingOutbox();
     await this.db.reconcileEndpointNotifications();
+    // Expiry drives endpoint shutdown and deletion; a failure here must not stall operation work.
+    try{await this.db.processExpiredWorkspaces()}catch(error){console.warn("workspace expiry processing failed",error)}
     const operationWorked=await this.db.processOne();
     const notificationWorked=this.emailConfig?await this.db.processConfiguredNotification(this.emailConfig,this.resend):false;
     await this.maintainObservations();

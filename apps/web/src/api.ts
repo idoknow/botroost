@@ -1,4 +1,4 @@
-import type {Invitation,Page,PlatformNode,PlatformWorkspace} from './types';
+import type {Invitation,Operation,Page,PlatformEndpoint,PlatformNode,PlatformSettings,PlatformUser,PlatformWorkspace} from './types';
 const ROOT='/api/v1';
 export class ApiError extends Error{constructor(public status:number,message:string){super(message);this.name='ApiError'}}
 export class ApiClient{
@@ -20,6 +20,15 @@ export class ApiClient{
  async renameWorkspace(workspaceId:string,name:string){return this.mutate<PlatformWorkspace>(`/platform/workspaces/${workspaceId}`,{name},'PATCH')}
  async deleteWorkspace(workspaceId:string){return this.mutate<void>(`/platform/workspaces/${workspaceId}`,undefined,'DELETE')}
  async platformNodes(){return this.get<{nodes:PlatformNode[]}>('/platform/nodes')}
+ async updatePlatformNode(id:string,input:{name?:string;remark?:string|null}){return this.mutate<PlatformNode>(`/platform/nodes/${id}`,input,'PATCH')}
+ async updateNode(id:string,input:{name?:string;remark?:string|null}){return this.mutate<{id:string;name:string;remark:string|null;provider:string}>(`/nodes/${id}`,input,'PATCH')}
+ async platformSettings(){return this.get<PlatformSettings>('/platform/settings')}
+ async updatePlatformSettings(input:Partial<Omit<PlatformSettings,'registrationOpen'>>){return this.mutate<PlatformSettings>('/platform/settings',input,'PATCH')}
+ async platformUsers(){return this.get<{users:PlatformUser[]}>('/platform/users')}
+ async updatePlatformUser(id:string,input:{disabled?:boolean;maxEndpointsPerWorkspace?:number|null}){return this.mutate<PlatformUser>(`/platform/users/${id}`,input,'PATCH')}
+ async platformEndpoints(){return this.get<{endpoints:PlatformEndpoint[]}>('/platform/endpoints')}
+ async deletePlatformEndpoint(id:string){return this.mutate<Operation>(`/platform/endpoints/${id}`,undefined,'DELETE')}
+ async setWorkspaceExpiry(workspaceId:string,expiresAt:string|null){return this.mutate<{id:string;name:string;expiresAt:string|null}>(`/platform/workspaces/${workspaceId}/expiry`,{expiresAt},'PUT')}
  async setSharedNode(id:string,enabled:boolean,labels:Record<string,string>){return this.mutate<{nodeId:string;enabled:boolean;labels:Record<string,string>}>(`/platform/nodes/${id}/shared`,{enabled,labels},'PUT')}
  async grantSharedNode(workspaceId:string,nodeId:string){return this.mutate<void>(`/platform/workspaces/${workspaceId}/nodes/${nodeId}`,undefined,'PUT')}
  async revokeSharedNode(workspaceId:string,nodeId:string){return this.mutate<void>(`/platform/workspaces/${workspaceId}/nodes/${nodeId}`,undefined,'DELETE')}
