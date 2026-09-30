@@ -1,3 +1,4 @@
+import type {Invitation,Page,PlatformNode,PlatformWorkspace} from './types';
 const ROOT='/api/v1';
 export class ApiError extends Error{constructor(public status:number,message:string){super(message);this.name='ApiError'}}
 export class ApiClient{
@@ -9,8 +10,19 @@ export class ApiClient{
  async register(body:{email:string;password:string;name:string}){delete this.csrf;const response=await this.raw('/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return response.json()}
  async acceptInvitation(body:{token:string;email:string;password:string}){delete this.csrf;const response=await this.raw('/auth/invitations/accept',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return response.json()}
  async registrationStatus(){return this.get<{registrationOpen:boolean}>('/platform/registration')}
+ async updateRegistration(open:boolean){return this.mutate<{registrationOpen:boolean}>('/platform/registration',{open})}
  async createInvitation(body:{email:string;role:'admin'|'operator'|'viewer'}){return this.mutate<{id:string;email:string;role:string;expiresAt:string;acceptUrl:string}>('/workspaces/current/invitations',body)}
+ async invitations(){return this.get<Page<Invitation>>('/workspaces/current/invitations')}
+ async revokeInvitation(id:string){return this.mutate<void>(`/workspaces/current/invitations/${id}`,undefined,'DELETE')}
  async sharedNodes(){return this.get<{nodes:{id:string;name:string;provider:string;labels:Record<string,string>}[]}>('/workspaces/current/nodes/shared')}
+ async platformWorkspaces(){return this.get<{workspaces:PlatformWorkspace[]}>('/platform/workspaces')}
+ async createWorkspace(name:string){return this.mutate<PlatformWorkspace>('/workspaces',{name})}
+ async renameWorkspace(workspaceId:string,name:string){return this.mutate<PlatformWorkspace>(`/platform/workspaces/${workspaceId}`,{name},'PATCH')}
+ async deleteWorkspace(workspaceId:string){return this.mutate<void>(`/platform/workspaces/${workspaceId}`,undefined,'DELETE')}
+ async platformNodes(){return this.get<{nodes:PlatformNode[]}>('/platform/nodes')}
+ async setSharedNode(id:string,enabled:boolean,labels:Record<string,string>){return this.mutate<{nodeId:string;enabled:boolean;labels:Record<string,string>}>(`/platform/nodes/${id}/shared`,{enabled,labels},'PUT')}
+ async grantSharedNode(workspaceId:string,nodeId:string){return this.mutate<void>(`/platform/workspaces/${workspaceId}/nodes/${nodeId}`,undefined,'PUT')}
+ async revokeSharedNode(workspaceId:string,nodeId:string){return this.mutate<void>(`/platform/workspaces/${workspaceId}/nodes/${nodeId}`,undefined,'DELETE')}
  async workspaces(){return this.get<{workspaces:{id:string;name:string;role:string}[];currentWorkspaceId:string}>('/auth/workspaces')}
  async switchWorkspace(workspaceId:string){await this.mutate<void>('/auth/workspace',{workspaceId});delete this.csrf}
  async login(body:{email:string;password:string}){delete this.csrf;const response=await this.raw('/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return response.json()}

@@ -19,6 +19,19 @@ describe("registration policy",()=>{
     await api.close();
   });
 
+  it("reports registration policy anonymously without exposing account details",async()=>{
+    const database=new InMemoryDatabase();
+    const api=buildApi({database:database as never,credentialKey:Buffer.alloc(32,1),publicOrigin:"https://app.test"});
+    await api.ready();
+
+    const response=await api.inject({method:"GET",url:"/api/v1/platform/registration"});
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({registrationOpen:false});
+    expect(response.headers["set-cookie"]).toBeUndefined();
+    await api.close();
+  });
+
   it("bootstraps a CSRF-valid session after invitation acceptance",async()=>{
     const database=new InMemoryDatabase();
     const api=buildApi({database:database as never,credentialKey:Buffer.alloc(32,1),publicOrigin:"https://app.test"});

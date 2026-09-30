@@ -89,6 +89,9 @@ describe('Login registration policy',()=>{
     expect(container.textContent).toContain('Public registration is unavailable.');
     expect(container.querySelector('button.button-link')).not.toBeNull();
     expect(container.querySelector('button.button-link')?.textContent).toContain('Create account');
+    await switchToSignup();
+    expect(submitButton().disabled).toBe(true);
+    expect(container.textContent).toContain('Public registration is unavailable.');
   });
 
   it('opens signup controls directly on an invitation route despite closed public registration',async()=>{
