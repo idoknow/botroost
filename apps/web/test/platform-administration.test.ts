@@ -131,7 +131,7 @@ describe('Invitations page',()=>{
     await act(async()=>{form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))});
     await flush();
 
-    expect(api.createInvitation).toHaveBeenCalledWith({email:'new@example.com',role:'viewer'});
+    expect(api.createInvitation).toHaveBeenCalledWith({email:'new@example.com',role:'viewer',scope:'workspace'});
     expect(document.body.textContent).toContain('https://app.test/login?invite=raw-token');
     expect(document.body.textContent).not.toMatch(/token_hash/);
     // The list is refetched after a successful create.
