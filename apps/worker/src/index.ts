@@ -21,6 +21,9 @@ export class DurableWorker{
     await this.db.reconcileEndpointNotifications();
     // Expiry drives endpoint shutdown and deletion; a failure here must not stall operation work.
     try{await this.db.processExpiredWorkspaces()}catch(error){console.warn("workspace expiry processing failed",error)}
+    // Re-adopt endpoints whose agents silently lost ownership (empty runtime-commands.json journal)
+    // by re-issuing a read-only reconcile command so telemetry resumes.
+    try{const reclaimed=await this.db.reclaimStaleEndpoints({max:12,staleAfterSeconds:45});if(reclaimed)console.info("stale-endpoint reclaim",{reclaimed})}catch(error){console.warn("stale-endpoint reclaim failed",error)}
     const operationWorked=await this.db.processOne();
     const notificationWorked=this.emailConfig?await this.db.processConfiguredNotification(this.emailConfig,this.resend):false;
     await this.maintainObservations();

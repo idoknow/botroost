@@ -149,6 +149,51 @@ export class PostgresDatabase {
     return 1;
   }
   async processExpiredWorkspaces(){return this.tx(async c=>{const grace=(await c.query("SELECT endpoint_expiry_grace_hours FROM platform_settings WHERE id=true")).rows[0]?.endpoint_expiry_grace_hours??24;const workspaces=(await c.query("SELECT id FROM workspaces WHERE expires_at IS NOT NULL AND expires_at<=now() ORDER BY expires_at FOR UPDATE SKIP LOCKED")).rows;let stopped=0,deleted=0;for(const w of workspaces){const due=(await c.query("SELECT expires_at<=now()-make_interval(hours=>$2) expired FROM workspaces WHERE id=$1",[w.id,grace])).rows[0]?.expired===true;const endpoints=(await c.query("SELECT id FROM endpoints WHERE workspace_id=$1 AND deleted_at IS NULL ORDER BY created_at",[w.id])).rows;for(const ep of endpoints){if(due)deleted+=await this.enqueueExpiryOperation(c,{workspaceId:w.id,endpointId:ep.id,action:"delete"});else stopped+=await this.enqueueExpiryOperation(c,{workspaceId:w.id,endpointId:ep.id,action:"stop"})}}return{stopped,deleted}})}
+  /**
+   * Re-issue ownership for endpoints whose agent went silent (empty runtime-commands.json
+   * journal after an agent restart) but whose node is still online and whose desired state is
+   * running. The agent re-adopts the endpoint on the next command (apply -> persistCommands),
+   * so its telemetry resumes and the system-status page stops showing stale "ready" + 采样不可用.
+   * Action is 'read-container-logs' (read-only): it never disrupts the running QQ session and
+   * its execution path still persists the command into the agent journal. Bounded per sweep and
+   * deduplicated to avoid a reclaim storm. Returns the number of reclaim operations enqueued.
+   */
+  async reclaimStaleEndpoints(input:{max?:number;staleAfterSeconds?:number}={}){
+    const max=Math.max(1,Math.min(50,input.max??25));
+    const staleAfter=input.staleAfterSeconds??45;
+    return this.tx(async c=>{
+      await c.query("SET LOCAL statement_timeout='5s'");
+      const candidates=(await c.query(`SELECT e.id,e.workspace_id,e.generation,e.configuration,e.desired_state,e.provider_id,n.id node_id,n.connection_epoch,n.last_heartbeat_at,
+          (SELECT max(created_at) FROM observations o WHERE o.endpoint_id=e.id AND o.operation_id IS NULL) last_observation_at
+        FROM endpoints e JOIN nodes n ON n.id=e.node_id
+        WHERE e.deleted_at IS NULL
+          AND e.provider_id='napcat'
+          AND e.desired_state->>'state'='running'
+          AND n.revoked_at IS NULL
+          AND n.last_heartbeat_at > now()-make_interval(secs => $1)
+          AND NOT EXISTS(SELECT 1 FROM operations op WHERE op.endpoint_id=e.id AND op.status IN ('queued','running'))
+          AND ( (SELECT max(created_at) FROM observations o WHERE o.endpoint_id=e.id AND o.operation_id IS NULL) IS NULL
+                OR (SELECT max(created_at) FROM observations o WHERE o.endpoint_id=e.id AND o.operation_id IS NULL) < now()-make_interval(secs => $2) )
+        ORDER BY e.id LIMIT $3 FOR UPDATE OF e SKIP LOCKED`,[nodeFreshMs/1000,staleAfter,max])).rows;
+      let reclaimed=0;
+      for(const row of candidates){
+        const endpointId=String(row.id),workspaceId=String(row.workspace_id);
+        const history=(await c.query("SELECT status FROM operations WHERE endpoint_id=$1 AND idempotency_key LIKE 'stale-telemetry-reclaim:'||$1||':%' ORDER BY created_at DESC LIMIT 3",[endpointId])).rows;
+        if(history.some(item=>item.status==="succeeded"))continue;
+        const activeReclaim=(await c.query("SELECT 1 FROM operations WHERE endpoint_id=$1 AND status IN ('queued','running')",[endpointId])).rows.length;
+        if(activeReclaim)continue;
+        // Read-only reconcile mirrors mutateEndpoint's readOnly path: generation stays at the
+        // current value so the operation is not marked stale by processOne's generation fence.
+        const id=randomUUID(),generation=Number(row.generation),idempotencyKey=`stale-telemetry-reclaim:${endpointId}:${generation}`;
+        const requestHash=digest(JSON.stringify({action:"read-container-logs",expectedGeneration:Number(row.generation),metadata:{trigger:"stale-telemetry-reclaim",logTail:20,logSinceSeconds:120}}));
+        await c.query("INSERT INTO operations(id,workspace_id,endpoint_id,generation,action,idempotency_key,request_hash,status,desired_state,result,metadata) VALUES($1,$2,$3,$4,'read-container-logs',$5,$6,'queued',$7,$8,$9)",[id,workspaceId,endpointId,generation,idempotencyKey,requestHash,row.desired_state??{state:"running"},{progress:{phase:"queued",percent:5,message:"Reclaiming silent agent telemetry",sequence:0,updatedAt:new Date().toISOString()}},{trigger:"stale-telemetry-reclaim",logTail:20,logSinceSeconds:120}]);
+        await c.query("INSERT INTO audit_events(id,workspace_id,actor_user_id,action,resource_type,resource_id,metadata) VALUES($1,$2,NULL,'operation.queued','operation',$3,$4)",[randomUUID(),workspaceId,id,{action:"read-container-logs",trigger:"stale-telemetry-reclaim",generation}]);
+        await c.query("INSERT INTO outbox_events(id,workspace_id,operation_id,event_type,payload) VALUES($1,$2,$3,'operation.queued',$4)",[randomUUID(),workspaceId,id,{operationId:id}]);
+        reclaimed++;
+      }
+      return reclaimed;
+    });
+  }
   async setWorkspaceExpiry(workspaceId:string,expiresAt:Date|null){const r=(await this.pool.query("UPDATE workspaces SET expires_at=$2,updated_at=now() WHERE id=$1 RETURNING id,name,expires_at \"expiresAt\"",[workspaceId,expiresAt])).rows[0];if(!r)throw new DatabaseError("not_found","workspace not found");return r}
     async platformEndpoints(){return(await this.pool.query("SELECT e.id,e.workspace_id \"workspaceId\",w.name \"workspaceName\",e.name,e.provider_id \"providerId\",e.node_id \"nodeId\",e.desired_state->>'state' \"desiredState\",e.deleted_at \"deletedAt\",e.created_at \"createdAt\" FROM endpoints e JOIN workspaces w ON w.id=e.workspace_id WHERE e.deleted_at IS NULL ORDER BY e.created_at DESC")).rows}
     async updatePlatformSettings(input:boolean|{registrationOpen?:boolean|undefined;maxWorkspacesPerUser?:number|undefined;maxEndpointsPerWorkspace?:number|undefined;endpointExpiryGraceHours?:number|undefined}){return this.tx(async c=>{const v=typeof input==='boolean'?{registrationOpen:input}:input;for(const [field,col] of [['registrationOpen','registration_open'],['maxWorkspacesPerUser','max_workspaces_per_user'],['maxEndpointsPerWorkspace','max_endpoints_per_workspace'],['endpointExpiryGraceHours','endpoint_expiry_grace_hours']] as const)if(v[field]!==undefined)await c.query(`UPDATE platform_settings SET ${col}=$1,updated_at=now() WHERE id=true`,[v[field]]);return (await c.query("SELECT registration_open \"registrationOpen\",max_workspaces_per_user \"maxWorkspacesPerUser\",max_endpoints_per_workspace \"maxEndpointsPerWorkspace\",endpoint_expiry_grace_hours \"endpointExpiryGraceHours\" FROM platform_settings WHERE id=true")).rows[0]})}
