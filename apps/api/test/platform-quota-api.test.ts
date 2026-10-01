@@ -122,8 +122,11 @@ describe("node registration name and remark",()=>{
     expect((await f.api.inject({method:"PATCH",url:`/api/v1/nodes/${node.id}`,headers:mutation(f.sessions.owner!),payload:{}})).statusCode).toBe(400);
     expect((await f.api.inject({method:"GET",url:`/api/v1/nodes/${node.id}`,headers:{cookie:f.sessions.owner!}})).json()).toMatchObject({name:"agent-b"});
 
-    // A member of another workspace gets no view of the node (404, never a cross-tenant write).
-    expect((await f.api.inject({method:"PATCH",url:`/api/v1/nodes/${node.id}`,headers:mutation(f.sessions.member!),payload:{remark:"hijack"}})).statusCode).toBe(404);
+    // A non-platform-owner may not manage nodes at all: management is platform-only,
+    // so the member-from-another-workspace is uniformly forbidden (403) rather than
+    // revealing that a node exists in a workspace they cannot see (the 404 isolation
+    // still applies to platform owners operating across workspaces).
+    expect((await f.api.inject({method:"PATCH",url:`/api/v1/nodes/${node.id}`,headers:mutation(f.sessions.member!),payload:{remark:"hijack"}})).statusCode).toBe(403);
     await f.api.close();
   });
 
