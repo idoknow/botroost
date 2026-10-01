@@ -1,7 +1,7 @@
 import {act,createElement} from 'react';
 import {createRoot,type Root} from 'react-dom/client';
 import {afterEach,beforeEach,describe,expect,it,vi} from 'vitest';
-import {Invitations,Platform,SharedNodes} from '../src/pages';
+import {Invitations,Platform} from '../src/pages';
 import {LocaleProvider} from '../src/i18n';
 import type {Invitation,PlatformNode,PlatformWorkspace,Session} from '../src/types';
 
@@ -12,7 +12,6 @@ const state={
   registrationOpen:false,
   workspaces:[] as (PlatformWorkspace & {members?:number;endpoints?:number;createdAt?:string|null})[],
   nodes:[] as PlatformNode[],
-  shared:[] as {id:string;name:string;provider:string;labels:Record<string,string>}[],
 };
 
 const mock=vi.hoisted(()=>({get:vi.fn(),mutate:vi.fn()}));
@@ -26,18 +25,14 @@ vi.mock('../src/api',()=>({
     createInvitation:vi.fn(),
     invitations:vi.fn(),
     revokeInvitation:vi.fn(),
-    sharedNodes:vi.fn(),
     platformWorkspaces:vi.fn(),
     createWorkspace:vi.fn(),
     renameWorkspace:vi.fn(),
     deleteWorkspace:vi.fn(),
     platformNodes:vi.fn(),
-    setSharedNode:vi.fn(),
-    grantSharedNode:vi.fn(),
-    revokeSharedNode:vi.fn(),
   },
   getAllPages:vi.fn(),
-}));
+}))
 
 const api=(await import('../src/api')).api as unknown as Record<string,ReturnType<typeof vi.fn>>;
 
@@ -79,15 +74,13 @@ beforeEach(()=>{
   state.registrationOpen=false;
   state.workspaces=[];
   state.nodes=[];
-  state.shared=[];
   mock.get.mockReset();
   mock.mutate.mockReset();
-  for(const key of ['registrationStatus','updateRegistration','createInvitation','invitations','revokeInvitation','sharedNodes','platformWorkspaces','createWorkspace','renameWorkspace','deleteWorkspace','platformNodes','setSharedNode','grantSharedNode','revokeSharedNode'])api[key]!.mockReset();
+  for(const key of ['registrationStatus','updateRegistration','createInvitation','invitations','revokeInvitation','platformWorkspaces','createWorkspace','renameWorkspace','deleteWorkspace','platformNodes'])api[key]!.mockReset();
   mock.get.mockImplementation(async(path:string)=>{
     if(path==='/platform/registration')return{registrationOpen:state.registrationOpen};
     if(path==='/platform/workspaces')return{workspaces:state.workspaces};
     if(path==='/platform/nodes')return{nodes:state.nodes};
-    if(path==='/workspaces/current/nodes/shared')return{nodes:state.shared};
     if(path.startsWith('/workspaces/current/invitations'))return page(state.invitations);
     throw new Error(`unexpected GET ${path}`);
   });
@@ -254,72 +247,5 @@ describe('Platform page',()=>{
     await act(async()=>{dialogButton('Delete').click()});
     await flush();
     expect(container.textContent).toContain('Unable to delete workspace');
-  });
-
-  it('publishes a node to the shared pool, grants it, and revokes the grant',async()=>{
-    state.workspaces=[{id:'w1',name:'Primary'},{id:'w2',name:'Second'}];
-    state.nodes=[{id:'n1',workspaceId:'w1',name:'node-a',provider:'fake',labels:{region:'eu'},enabled:false,grantedWorkspaceIds:[]}];
-    api.setSharedNode!.mockImplementation(async(id:string,enabled:boolean,labels:Record<string,string>)=>{state.nodes=state.nodes.map(node=>node.id===id?{...node,enabled,labels}:node);return{nodeId:id,enabled,labels}});
-    api.grantSharedNode!.mockImplementation(async(workspaceId:string,nodeId:string)=>{state.nodes=state.nodes.map(node=>node.id===nodeId?{...node,grantedWorkspaceIds:[...node.grantedWorkspaceIds,workspaceId]}:node)});
-    api.revokeSharedNode!.mockImplementation(async(workspaceId:string,nodeId:string)=>{state.nodes=state.nodes.map(node=>node.id===nodeId?{...node,grantedWorkspaceIds:node.grantedWorkspaceIds.filter(id=>id!==workspaceId)}:node)});
-    const{container}=render(createElement(Platform,{session}));
-    await flush();
-
-    await activateTab(container,'Shared node pool');
-    expect(container.textContent).toContain('Private');
-    expect(container.textContent).toContain('node-a');
-
-    await act(async()=>{button(container,'Enable sharing')!.click()});
-    await flush();
-    expect(api.setSharedNode).toHaveBeenCalledWith('n1',true,{region:'eu'});
-    expect(container.textContent).toContain('Shared');
-
-    const select=container.querySelector('select[aria-label="Select workspace"], select') as HTMLSelectElement;
-    await act(async()=>{
-      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value')!.set!.call(select,'w2');
-      select.dispatchEvent(new Event('change',{bubbles:true}));
-    });
-    await flush();
-    expect(api.grantSharedNode).toHaveBeenCalledWith('w2','n1');
-
-    const grant=[...container.querySelectorAll('button')].find(element=>element.textContent==='Second ✕')!;
-    expect(grant).toBeDefined();
-    await act(async()=>{grant.click()});
-    await flush();
-    expect(api.revokeSharedNode).toHaveBeenCalledWith('w2','n1');
-
-    await act(async()=>{button(container,'Disable sharing')!.click()});
-    await flush();
-    expect(api.setSharedNode).toHaveBeenLastCalledWith('n1',false,{region:'eu'});
-    expect(container.textContent).toContain('Private');
-  });
-
-  it('reports a failing shared-node update',async()=>{
-    state.nodes=[{id:'n1',workspaceId:'w1',name:'node-a',provider:'fake',labels:{},enabled:false,grantedWorkspaceIds:[]}];
-    api.setSharedNode!.mockRejectedValue(new Error('forbidden'));
-    const{container}=render(createElement(Platform,{session}));
-    await flush();
-    await activateTab(container,'Shared node pool');
-    await act(async()=>{button(container,'Enable sharing')!.click()});
-    await flush();
-    expect(container.textContent).toContain('Unable to update shared node');
-  });
-});
-
-describe('SharedNodes page',()=>{
-  it('lists the nodes other workspaces share with this one',async()=>{
-    state.shared=[{id:'n1',name:'node-a',provider:'fake',labels:{region:'eu'}},{id:'n2',name:'node-b',provider:'fake',labels:{}}];
-    const{container}=render(createElement(SharedNodes,{session}));
-    await flush();
-    expect(mock.get).toHaveBeenCalledWith('/workspaces/current/nodes/shared',expect.anything());
-    expect(container.textContent).toContain('node-a');
-    expect(container.textContent).toContain('region=eu');
-    expect(container.textContent).toContain('node-b');
-  });
-
-  it('shows the empty state when nothing is shared',async()=>{
-    const{container}=render(createElement(SharedNodes,{session}));
-    await flush();
-    expect(container.textContent).toContain('shared nodes');
   });
 });
