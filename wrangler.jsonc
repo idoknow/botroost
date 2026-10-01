@@ -1,0 +1,9 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "botroost-docs",
+  "account_id": "1387087a999ab906634a7529b0c0684a",
+  "compatibility_date": "2026-10-01",
+  "assets": { "directory": "./docs/.vitepress/dist", "html_handling": "auto-trailing-slash", "not_found_handling": "404-page" },
+  "routes": [{ "pattern": "botroost.idoknow.top", "custom_domain": true }],
+  "workers_dev": true
+}

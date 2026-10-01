@@ -1,0 +1,22 @@
+[Unit]
+Description=Botroost Node Agent
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=botroost
+Group=botroost
+SupplementaryGroups=docker
+WorkingDirectory=/opt/botroost
+EnvironmentFile=/etc/botroost/agent.env
+ExecStart=/usr/bin/node /opt/botroost/apps/agent/dist/cli.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

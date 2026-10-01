@@ -32,6 +32,11 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends docker.io \
  && rm -rf /var/lib/apt/lists/*
 ENV BOTROOST_PROCESS=agent
+FROM runtime AS agent-kubernetes
+USER node
+ENV AGENT_RUNTIME=kubernetes AGENT_PROVIDER=napcat
+ENTRYPOINT ["node", "apps/agent/dist/cli.js"]
+
 FROM runtime AS bootstrap
 ENV BOTROOST_PROCESS=bootstrap
 

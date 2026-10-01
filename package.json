@@ -15,6 +15,9 @@
     }
   },
   "scripts": {
+    "docs:dev": "vitepress dev docs --host 0.0.0.0",
+    "docs:build": "vitepress build docs",
+    "docs:deploy": "bun run docs:build && wrangler deploy",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
     "test": "vitest run && bun test apps/web/tests",
@@ -37,6 +40,8 @@
     "turbo": "^2.6.1",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.46.4",
-    "vitest": "^3.2.4"
+    "vitepress": "1.6.4",
+    "vitest": "^3.2.4",
+    "wrangler": "^4.145.0"
   }
 }

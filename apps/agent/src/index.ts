@@ -15,6 +15,9 @@ import {
 } from "@botroost/agent-protocol";
 import { applyProxyEnvironment } from "@botroost/agent-protocol";
 import { NapCatTrafficAccumulator } from "./traffic.js";
+import type { RuntimeDriver, RuntimeSpec } from './runtime/types.js';
+import { resolveRuntimeBackend } from './runtime/config.js';
+import { KubernetesRuntimeDriver } from './runtime/kubernetes.js';
 import { inspectedResourceLimits, parseDockerStats, ResourceUsageSampler, RESOURCE_SAMPLE_TIMEOUT_MS, type DockerStatsReader, type ResourceLimits } from "./resource-usage.js";
 
 type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
@@ -407,6 +410,7 @@ export class NapCatRuntime {
   private executionQueue: Promise<unknown> = Promise.resolve();
   constructor(private readonly options: {
     docker?: DockerClient;
+    driver?: RuntimeDriver;
     stateDirectory: string;
     hostStateDirectory?: string;
     containerPrefix?: string;
@@ -425,9 +429,10 @@ export class NapCatRuntime {
     if (!containerPrefixPattern.test(this.containerPrefix)) throw new Error("container prefix is invalid");
     if (!(options.napcatToken ?? process.env.NAPCAT_TOKEN)) throw new Error("NapCat token is required");
     this.fetcher = options.fetcher ?? globalThis.fetch;
-    this.resourceSampler = new ResourceUsageSampler((ids, signal) => this.docker().stats?.(ids, signal) ?? Promise.resolve(new Map()), options.signal);
+    this.resourceSampler = new ResourceUsageSampler((ids, signal) => this.infrastructure().stats?.(ids, signal) ?? Promise.resolve(new Map()), options.signal);
   }
   private docker() { return this.options.docker ?? new DockerCliClient(); }
+  private infrastructure() { return this.options.driver ?? this.docker(); }
   private requestSignal(timeoutMs:number){
     const timeout=AbortSignal.timeout(timeoutMs);
     return AbortSignal.any([timeout,...(this.options.signal?[this.options.signal]:[]),...(runtimeIoSignal.getStore()?[runtimeIoSignal.getStore()!]:[])]);
@@ -501,8 +506,42 @@ export class NapCatRuntime {
     const docker = this.docker();
     const desiredImage = typeof command.metadata.image === "string" ? command.metadata.image : NAPCAT_IMAGE;
     await onProgress({phase:"inspecting-runtime",percent:22,message:"Inspecting container ownership"});
-    const existing = await docker.inspect(name);
+    const existing = await this.infrastructure().inspect(name);
     if(existing&&!this.ownsContainer(existing,command))throw new Error("NapCat container is not owned by this endpoint");
+    const driver = this.options.driver;
+    if (driver) {
+      const spec: RuntimeSpec = {
+        name, image: desiredImage,
+        labels: { 'botroost.provider': 'napcat', 'botroost.workspace_id': command.workspaceId, 'botroost.endpoint_id': command.endpointId, 'botroost.node_id': command.nodeId },
+        environment: { NAPCAT_WEBUI_SECRET_KEY: this.options.napcatToken ?? process.env.NAPCAT_TOKEN ?? '', ...(applyProxyEnvironment((command.metadata.configuration as Record<string,unknown> | undefined)?.proxy ?? null) ?? {}) },
+        volumes: [{ name: 'qq', target: '/app/.config/QQ' }, { name: 'config', target: '/app/napcat/config' }],
+        resources: napcatResourceLimits(command.runtimeRequest.resources),
+      };
+      if (command.action === 'delete') {
+        await driver.delete(name);
+        this.commands.delete(command.endpointId);
+        await this.persistCommands();
+        this.snapshotCache.delete(command.endpointId);
+        this.webCredentials.delete(command.endpointId);
+        return { state: 'stopped', observations: { node: 'online', runtime: 'stopped', provider: 'unavailable', protocol: 'disconnected', convergence: 'converged' }, metadata: { deleted: true } };
+      }
+      const lifecycle = ['start', 'stop', 'restart', 'force-restart', 'update-endpoint-proxy'].includes(command.action);
+      if (lifecycle) {
+        await onProgress({ phase: 'preparing-runtime', percent: 45, message: 'Reconciling runtime' });
+        const stopped = command.action === 'stop' || (command.action === 'update-endpoint-proxy' && (command.metadata.desiredState as {state?:string}|undefined)?.state === 'stopped');
+        if (command.action !== 'stop') await driver.ensure(spec);
+        if (stopped) { if (existing || command.action !== 'stop') await driver.stop(name); }
+        else if (command.action === 'force-restart') await driver.forceRestart(name, _effectId);
+        else if (command.action === 'restart' || command.action === 'update-endpoint-proxy') await driver.restart(name, _effectId);
+        else await driver.start(name);
+        this.commands.set(command.endpointId, command);
+        await this.persistCommands();
+        this.snapshotCache.delete(command.endpointId);
+        this.webCredentials.delete(command.endpointId);
+        const snapshot = await this.snapshot(command);
+        return { state: stopped ? 'stopped' : 'running', observations: { node: 'online', runtime: snapshot.runtime, provider: snapshot.provider, protocol: snapshot.protocol, convergence: snapshot.convergence }, metadata: snapshot.metadata };
+      }
+    }
     if(command.action==="delete"){
       await onProgress({phase:"removing-runtime",percent:55,message:"Removing container and persisted runtime data"});
       if(existing&&(existing.labels["botroost.workspace_id"]!==command.workspaceId||existing.labels["botroost.endpoint_id"]!==command.endpointId||existing.labels["botroost.provider"]!=="napcat"))throw new Error("NapCat container ownership check failed");
@@ -548,7 +587,7 @@ export class NapCatRuntime {
       if(!existing||existing.labels["botroost.workspace_id"]!==command.workspaceId||existing.labels["botroost.endpoint_id"]!==command.endpointId||existing.labels["botroost.provider"]!=="napcat")throw new Error("NapCat container ownership check failed");
       const tail=Number(command.metadata.logTail),sinceSeconds=Number(command.metadata.logSinceSeconds);
       if(!Number.isInteger(tail)||tail<1||tail>1000||!Number.isInteger(sinceSeconds)||sinceSeconds<60||sinceSeconds>86400)throw new Error("NapCat log bounds are invalid");
-      const text=this.redactLogs(await docker.logs(name,{tail,sinceSeconds}));
+      const text=this.redactLogs(await this.infrastructure().logs(name,{tail,sinceSeconds}));
       await onProgress({phase:"probing-provider",percent:95,message:"Runtime diagnostics ready"});
       return{state:existing.state==="running"?"running":"stopped",metadata:{logs:{text,tail,sinceSeconds}}};
     }
@@ -589,7 +628,7 @@ export class NapCatRuntime {
     const resourceDrift=existing?.resources&&(existing.resources.cpuMillis!==desiredResources.cpuMillis||existing.resources.memoryMiB!==desiredResources.memoryMiB||existing.resources.memorySwapMiB!==desiredResources.memorySwapMiB);
     const proxyDrift=existing!==null&&((proxyEnvironment?.HTTP_PROXY??null)!==(existing.proxyEnvironment?.HTTP_PROXY??null));
     let created=false;
-    if (command.action !== "stop" && (!existing || existing.image !== desiredImage || resourceDrift || proxyDrift)) {
+    if (!driver && command.action !== "stop" && (!existing || existing.image !== desiredImage || resourceDrift || proxyDrift)) {
       if (existing){await onProgress({phase:"preparing-runtime",percent:35,message:"Replacing outdated NapCat container"});await docker.remove(name)}
       await onProgress({phase:"preparing-runtime",percent:40,message:"Preparing runtime image and storage"});
       const qq = this.endpointDirectory(command.endpointId, "qq");
@@ -723,7 +762,7 @@ export class NapCatRuntime {
     let status: "ok" | "partial" | "unavailable" = "ok";
     let complete = true;
     try {
-      const logs = await this.docker().logs(this.containerName(endpointId), { tail: 5000, sinceSeconds, timestamps: true, maxBytes });
+      const logs = await this.infrastructure().logs(this.containerName(endpointId), { tail: 5000, sinceSeconds, timestamps: true, maxBytes });
       const lines = logs.split(/\r?\n/).filter(Boolean);
       accumulator.ingest(lines, now);
       complete = lines.length < 5000 && Buffer.byteLength(logs) < maxBytes;
@@ -746,7 +785,7 @@ export class NapCatRuntime {
   }
   async snapshot(command: RuntimeCommand) {
     this.assertAllowed(command);
-    return this.snapshotWithContainer(command, await this.docker().inspect(this.containerName(command.endpointId)));
+    return this.snapshotWithContainer(command, await this.infrastructure().inspect(this.containerName(command.endpointId)));
   }
   private async snapshotWithContainer(command: RuntimeCommand, inspected: DockerInspectResult | null): Promise<{
     endpointId: string;
@@ -883,7 +922,7 @@ export class NapCatRuntime {
     // A bad container cannot suppress observations for the other endpoints.
     const inspections = await Promise.allSettled(commands.map(async command => {
       this.assertAllowed(command);
-      const inspected = await this.docker().inspect(this.containerName(command.endpointId));
+      const inspected = await this.infrastructure().inspect(this.containerName(command.endpointId));
       if (inspected && !this.ownsContainer(inspected, command)) throw new Error("NapCat container is not owned by this endpoint");
       return inspected;
     }));
@@ -1075,6 +1114,7 @@ export async function startAgentFromEnv(signal?:AbortSignal): Promise<DurableFak
   if (!controlPlaneUrl || !nodeStateDir)
     throw new Error("CONTROL_PLANE_URL and NODE_STATE_DIR are required");
   const provider = process.env.AGENT_PROVIDER ?? "fake";
+  const backend = resolveRuntimeBackend(process.env.AGENT_RUNTIME);
   if (!["fake", "napcat"].includes(provider)) throw new Error("AGENT_PROVIDER must be fake or napcat");
   const store = new NodeCredentialStore(nodeStateDir);
   let credential = await store.read();
@@ -1089,6 +1129,7 @@ export async function startAgentFromEnv(signal?:AbortSignal): Promise<DurableFak
     runtime: provider === "napcat"
       ? new NapCatRuntime({
           stateDirectory: join(nodeStateDir, "napcat"),
+          ...(backend === "kubernetes" ? { driver: new KubernetesRuntimeDriver({ namespace: process.env.RUNTIME_NAMESPACE ?? (() => { throw new Error("RUNTIME_NAMESPACE is required"); })(), volumeSize: process.env.RUNTIME_VOLUME_SIZE ?? "2Gi", ...(process.env.RUNTIME_STORAGE_CLASS ? { storageClass: process.env.RUNTIME_STORAGE_CLASS } : {}) }, signal) } : {}),
           hostStateDirectory: join(process.env.NAPCAT_HOST_STATE_DIR ?? nodeStateDir, "napcat"),
           ...(signal === undefined ? {} : { signal }),
           ...(process.env.NAPCAT_TOKEN === undefined ? {} : { napcatToken: process.env.NAPCAT_TOKEN }),

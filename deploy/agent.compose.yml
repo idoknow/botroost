@@ -1,0 +1,15 @@
+services:
+  agent:
+    build:
+      context: ..
+      target: agent
+    restart: unless-stopped
+    env_file: agent.env
+    environment:
+      NODE_STATE_DIR: ${BOTROOST_STATE_DIR:?set absolute state directory}
+      NAPCAT_HOST_STATE_DIR: ${BOTROOST_STATE_DIR}
+      AGENT_PROVIDER: napcat
+      AGENT_RUNTIME: docker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${BOTROOST_STATE_DIR}:${BOTROOST_STATE_DIR}

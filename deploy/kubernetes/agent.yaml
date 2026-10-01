@@ -1,0 +1,151 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: botroost-system
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: botroost-runtime
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: botroost-agent
+  namespace: botroost-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: botroost-agent
+  namespace: botroost-runtime
+rules:
+  - apiGroups: [apps]
+    resources: [statefulsets]
+    verbs: [get, create, patch, delete]
+  - apiGroups: ['']
+    resources: [services, secrets, persistentvolumeclaims]
+    verbs: [get, create, patch, delete]
+  - apiGroups: ['']
+    resources: [pods]
+    verbs: [get, delete]
+  - apiGroups: ['']
+    resources: [pods/log]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: botroost-agent
+  namespace: botroost-runtime
+subjects:
+  - kind: ServiceAccount
+    name: botroost-agent
+    namespace: botroost-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: botroost-agent
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: botroost-agent
+  namespace: botroost-system
+type: Opaque
+stringData:
+  CONTROL_PLANE_URL: https://REPLACE-CONTROL-PLANE
+  ENROLLMENT_TOKEN: REPLACE-ENROLLMENT-TOKEN
+  NAPCAT_TOKEN: REPLACE-RANDOM-SECRET
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: botroost-agent
+  namespace: botroost-system
+spec:
+  clusterIP: None
+  selector:
+    app: botroost-agent
+  ports:
+    - port: 8080
+      name: unused
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: botroost-agent
+  namespace: botroost-system
+spec:
+  serviceName: botroost-agent
+  replicas: 1
+  selector:
+    matchLabels:
+      app: botroost-agent
+  template:
+    metadata:
+      labels:
+        app: botroost-agent
+    spec:
+      serviceAccountName: botroost-agent
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agent
+          image: REPLACE-REGISTRY/botroost-agent:REPLACE-VERSION
+          envFrom:
+            - secretRef:
+                name: botroost-agent
+          env:
+            - name: NODE_STATE_DIR
+              value: /data
+            - name: AGENT_PROVIDER
+              value: napcat
+            - name: AGENT_RUNTIME
+              value: kubernetes
+            - name: RUNTIME_NAMESPACE
+              value: botroost-runtime
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: state
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: state
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: management-agent-only
+  namespace: botroost-runtime
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: botroost-system
+          podSelector:
+            matchLabels:
+              app: botroost-agent
+      ports:
+        - protocol: TCP
+          port: 6099

@@ -73,6 +73,23 @@ class RecordingDocker implements DockerClient {
 }
 
 describe("NapCat runtime", () => {
+  it("reuses NapCat HTTP QR control with a Kubernetes management target and no Docker IO", async () => {
+    const labels={"botroost.workspace_id":baseCommand.workspaceId,"botroost.endpoint_id":baseCommand.endpointId,"botroost.provider":"napcat"};
+    const driver={backend:'kubernetes' as const,inspect:vi.fn(async()=>({id:'pod',name:'runtime',image:NAPCAT_IMAGE,state:'running' as const,ipAddress:'runtime.pool.svc',labels})),ensure:vi.fn(),start:vi.fn(),stop:vi.fn(),restart:vi.fn(),forceRestart:vi.fn(),delete:vi.fn(),logs:vi.fn(async()=> '')};
+    const docker=new RecordingDocker();
+    docker.inspect=async()=>{throw new Error('Docker must not be used')};
+    const paths:string[]=[];
+    const fetcher:FetchLike=async(url)=>{
+      const u=new URL(String(url)); expect(u.hostname).toBe('runtime.pool.svc'); paths.push(u.pathname);
+      const data=u.pathname==='/api/auth/login'?{Credential:'test-credential'}:u.pathname.includes('QQLogin')?{isLogin:false,isOffline:false,qrcodeurl:'https://example.com/qr'}:{};
+      return new Response(JSON.stringify({code:0,data}));
+    };
+    const runtime=new NapCatRuntime({driver,docker,stateDirectory:await mkdtemp(join(tmpdir(),'k8s-qr-')),napcatToken:'test',fetcher});
+    await runtime.apply('qr',{...baseCommand,action:'refresh-login-qr'});
+    expect(paths).toContain('/api/QQLogin/RefreshQRcode');
+    expect(paths).toContain('/api/auth/login');
+    expect(docker.created).toHaveLength(0);
+  });
   it("bounds old provider IO without detaching it before an emergency restart",async()=>{
     const docker=new RecordingDocker();
     docker.inspect=async name=>({id:"owned-id",name,image:NAPCAT_IMAGE,state:"running",ipAddress:"172.18.0.10",labels:{"botroost.workspace_id":baseCommand.workspaceId,"botroost.endpoint_id":baseCommand.endpointId,"botroost.provider":"napcat"}});
