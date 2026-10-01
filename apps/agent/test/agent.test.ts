@@ -9,6 +9,7 @@ import {
   HttpAgentTransport,
   NodeCredentialStore,
   NapCatRuntime,
+  isTransientTransportError,
   type AgentCommandTransport,
 } from "../src/index.js";
 
@@ -26,7 +27,9 @@ class MemoryTransport implements AgentCommandTransport {
     if(this.heartbeatFailure?.at===this.heartbeats)throw this.heartbeatFailure.error;
     return { connectionEpoch: 1 };
   }
+  claimFailure?: Error;
   async claim() {
+    if(this.claimFailure){const error=this.claimFailure;delete this.claimFailure;throw error;}
     const next = this.command;
     this.command = null;
     return next;
@@ -388,5 +391,25 @@ describe("durable fake agent", () => {
     await agent.pollOnce();
     expect(transport.results[1]).toMatchObject({outcome:"failed",error:"fixture runtime failure",attempt:2});
     await agent.close();
+  });
+  it("rethrows transient transport failures instead of journaling a failed outcome", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "botroost-agent-"));
+    const runtime = new FakeRuntime();
+    runtime.apply = async () => { throw new Error("must not execute"); };
+    const transport = new MemoryTransport(command);
+    transport.claimFailure = Object.assign(new TypeError("fetch failed"), { cause: new Error("getaddrinfo EAI_AGAIN botroost.example:443") });
+    const agent = await DurableFakeAgent.open({journalPath:join(dir,"agent-journal.jsonl"),runtime,transport});
+    // pollOnce surfaces the transient error upward (cli loop logs + retries); no result is recorded.
+    await expect(agent.pollOnce()).rejects.toThrow();
+    expect(transport.results).toHaveLength(0);
+    await agent.close();
+  });
+  it("classifies dns/connect blips as transient but keeps business failures terminal", () => {
+    expect(isTransientTransportError(Object.assign(new TypeError("fetch failed"),{cause:new Error("getaddrinfo EAI_AGAIN host:443")}))).toBe(true);
+    expect(isTransientTransportError(Object.assign(new TypeError("fetch failed"),{cause:new Error("Connect Timeout Error (attempted address: host:443, timeout: 10000ms)")}))).toBe(true);
+    expect(isTransientTransportError(Object.assign(new TypeError("fetch failed"),{cause:new Error("UND_ERR_CONNECT_TIMEOUT")}))).toBe(true);
+    expect(isTransientTransportError(new Error("NapCat auth rejected: token is invalid"))).toBe(false);
+    expect(isTransientTransportError(new Error("Runtime generation fence rejected"))).toBe(false);
+    expect(isTransientTransportError(new ControlPlaneRequestError(409))).toBe(false);
   });
 });

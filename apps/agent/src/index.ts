@@ -22,6 +22,16 @@ import { inspectedResourceLimits, parseDockerStats, ResourceUsageSampler, RESOUR
 
 type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
 type JsonObject = { [key: string]: JsonValue };
+/** Detects transient control-plane transport failures that should be retried via the command lease, not recorded as a failed outcome. */
+export function isTransientTransportError(error: unknown): boolean {
+  const cause = (error as { cause?: unknown } | null)?.cause;
+  const texts = [error, cause].map(value => (value instanceof Error ? `${value.message} ${value.name}` : String(value ?? '')));
+  return texts.some(text =>
+    /fetch failed/i.test(text) ||
+    /EAI_AGAIN|ENOTFOUND|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH/.test(text) ||
+    /UND_ERR_CONNECT_TIMEOUT|Connect Timeout Error/i.test(text)
+  );
+}
 function safeRuntimeError(error: unknown): string {
   // Never include child-process command/stderr (may contain environment secrets).
   if(error&&typeof error==="object"&&("stderr" in error||"cmd" in error))return "Runtime process failed or timed out; inspect node diagnostics";
@@ -1081,6 +1091,11 @@ export class DurableFakeAgent {
       }
     } catch(error) {
       if(fenceError||isCommandFenceRejection(error))throw fenceError??error;
+      // Transient transport failures (control-plane reachability: DNS / TCP timeouts)
+      // must not burn the one-shot operation: rethrow instead of recording `failed`.
+      // The command lease expires after 30s and claimAgentCommand re-queues it until
+      // the attempt budget (5) is exhausted, so a brief blip self-heals.
+      if(isTransientTransportError(error))throw error;
       result={...receipt,endpointId:command.endpointId,attempt:command.attempt??1,outcome:"failed",error:safeRuntimeError(error),observations:{node:"online",runtime:"unknown",provider:"unknown",protocol:"unknown",convergence:"failed"}};
       await this.journal.recordResult(command.commandId,result);
     } finally {

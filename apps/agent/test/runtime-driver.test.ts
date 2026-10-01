@@ -39,4 +39,14 @@ describe('Kubernetes resource contract', () => {
   it('rejects unsafe resource names', () => {
     expect(() => kubernetesResources({ ...input, name: '../../bad' }, { namespace: 'test', volumeSize: '2Gi' })).toThrow();
   });
+  it('init container rewrites the persisted webui token from the Secret on every start', () => {
+    const r = kubernetesResources(input, { namespace: 'test', volumeSize: '2Gi' });
+    const init = r.workload.spec.template.spec.initContainers[0]!;
+    const script = init.command!.join(' ');
+    expect(script).toContain('NAPCAT_WEBUI_SECRET_KEY');
+    expect(script).toContain('webui.json');
+    // Drift heal: the script must overwrite an existing token, not only seed a fresh file.
+    expect(script).toMatch(/sed -i/);
+    expect(script).toMatch(/else\b[\s\S]*printf/);
+  });
 });

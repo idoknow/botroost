@@ -15,7 +15,20 @@ export function kubernetesResources(input: RuntimeSpec, profile: KubernetesProfi
       automountServiceAccountToken: false, terminationGracePeriodSeconds: 30,
       ...(profile.nodeSelector ? { nodeSelector: profile.nodeSelector } : {}),
       securityContext: { seccompProfile: { type: 'RuntimeDefault' } },
-      initContainers: [{ name: 'storage', image: input.image, command: ['/bin/sh', '-ec', 'mkdir -p /data/qq /data/config'], securityContext: { allowPrivilegeEscalation: false }, resources, volumeMounts: [{ name: 'data', mountPath: '/data' }] }],
+      initContainers: [{ name: 'storage', image: input.image, command: ['/bin/sh', '-ec', `
+        mkdir -p /data/qq /data/config
+        # Self-heal WebUI token drift: the PVC's webui.json persists the token from the
+        # FIRST boot, so a rotated agent NAPCAT_TOKEN would be rejected forever. Rewrite
+        # the persisted config from the (authoritative) Secret on every start.
+        if [ -n "$NAPCAT_WEBUI_SECRET_KEY" ]; then
+          mkdir -p /data/config
+          if [ -f /data/config/webui.json ]; then
+            sed -i "s/^\\([[:space:]]*\\"token\\"[[:space:]]*:[[:space:]]*\\)[^,}]*/\\1\\"$NAPCAT_WEBUI_SECRET_KEY\\"/" /data/config/webui.json
+          else
+            printf '{"host":"::","port":6099,"token":"%s"}\\n' "$NAPCAT_WEBUI_SECRET_KEY" > /data/config/webui.json
+          fi
+        fi
+      `], securityContext: { allowPrivilegeEscalation: false }, resources, volumeMounts: [{ name: 'data', mountPath: '/data' }] }],
       containers: [{ name: 'protocol', image: input.image, envFrom: [{ secretRef: { name: input.name } }], resources,
         securityContext: { allowPrivilegeEscalation: false },
         ports: [{ name: 'management', containerPort: 6099 }],
