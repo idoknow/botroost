@@ -96,7 +96,7 @@ test.describe('live operator journey',()=>{
     const endpointId=fixture.id;
     cleanupEndpointId=endpointId;
       await page.goto(`/endpoints/${endpointId}`);
-      await page.getByLabel('Name').fill(mutatedName);
+      await page.getByLabel('Name',{exact:true}).fill(mutatedName);
       const renameResponse=page.waitForResponse(response=>response.url().endsWith(`/api/v1/endpoints/${endpointId}`)&&response.request().method()==='PATCH');
       await page.getByRole('button',{name:'Rename'}).click();
       expect((await renameResponse).ok()).toBe(true);
