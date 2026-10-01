@@ -22,6 +22,7 @@ describe('Kubernetes API lifecycle safety', () => {
     try {
       await new KubernetesRuntimeDriver({ namespace: 'test', volumeSize: '2Gi' }, undefined, config).restart('test', 'op');
       expect(remove).toHaveBeenCalledOnce();
+      for (const call of patch.mock.calls) expect(call[4]).toBeUndefined();
       expect(remove.mock.calls[0]?.[6]).toEqual({ preconditions: { uid: 'original', resourceVersion: '2' } });
     } finally { read.mockRestore(); patch.mockRestore(); remove.mockRestore(); }
   }, 2000);

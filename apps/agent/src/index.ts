@@ -527,6 +527,11 @@ export class NapCatRuntime {
       }
       const lifecycle = ['start', 'stop', 'restart', 'force-restart', 'update-endpoint-proxy'].includes(command.action);
       if (lifecycle) {
+        // Persist the accepted fence before IO: failed mutations must not strand
+        // future observations at a generation the control plane rejects.
+        this.commands.set(command.endpointId, command);
+        await this.persistCommands();
+        this.snapshotCache.delete(command.endpointId);
         await onProgress({ phase: 'preparing-runtime', percent: 45, message: 'Reconciling runtime' });
         const stopped = command.action === 'stop' || (command.action === 'update-endpoint-proxy' && (command.metadata.desiredState as {state?:string}|undefined)?.state === 'stopped');
         if (command.action !== 'stop') await driver.ensure(spec);

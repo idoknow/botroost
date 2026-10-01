@@ -35,7 +35,7 @@ export class KubernetesRuntimeDriver implements RuntimeDriver {
     this.owned(old, object.metadata!.labels!);
     if (object.kind === 'PersistentVolumeClaim') return old;
     if (object.kind === 'StatefulSet') object.spec.replicas = old.spec.replicas;
-    return this.objects.patch({ ...object, metadata: { ...object.metadata, resourceVersion: old.metadata!.resourceVersion! } }, undefined, undefined, 'botroost-agent', false, PatchStrategy.MergePatch);
+    return this.objects.patch({ ...object, metadata: { ...object.metadata, resourceVersion: old.metadata!.resourceVersion! } }, undefined, undefined, 'botroost-agent', undefined, PatchStrategy.MergePatch);
   }
   async ensure(spec: RuntimeSpec) {
     const resources = kubernetesResources(spec, this.profile);
@@ -66,7 +66,7 @@ export class KubernetesRuntimeDriver implements RuntimeDriver {
     const old = await this.read('StatefulSet', name);
     if (!old) throw new Error('Runtime not found');
     this.signal?.throwIfAborted();
-    await this.objects.patch({ ...this.ref('StatefulSet', name), metadata: { ...old.metadata }, spec: { replicas } } as ObjectState, undefined, undefined, 'botroost-agent', false, PatchStrategy.MergePatch);
+    await this.objects.patch({ ...this.ref('StatefulSet', name), metadata: { ...old.metadata }, spec: { replicas } } as ObjectState, undefined, undefined, 'botroost-agent', undefined, PatchStrategy.MergePatch);
   }
   async start(name: string) { await this.scale(name, 1); await this.wait(async () => (await this.inspect(name))?.state === 'running'); }
   async stop(name: string) { await this.scale(name, 0); await this.wait(async () => !(await this.read('Pod', `${name}-0`))); }
@@ -84,7 +84,7 @@ export class KubernetesRuntimeDriver implements RuntimeDriver {
     // Durable template marker makes replay after pod deletion idempotent.
     const pod = await this.read('Pod', `${name}-0`);
     const marker = 'botroost.io/restart-operation';
-    await this.objects.patch({ ...this.ref('StatefulSet', name), metadata: workload.metadata, spec: { template: { metadata: { annotations: { [marker]: operation } } } } } as ObjectState, undefined, undefined, 'botroost-agent', false, PatchStrategy.MergePatch);
+    await this.objects.patch({ ...this.ref('StatefulSet', name), metadata: workload.metadata, spec: { template: { metadata: { annotations: { [marker]: operation } } } } } as ObjectState, undefined, undefined, 'botroost-agent', undefined, PatchStrategy.MergePatch);
     if (pod && pod.metadata?.annotations?.[marker] !== operation) { this.owned(pod, workload.metadata!.labels!); await this.remove(pod); }
     await this.start(name);
   }

@@ -73,6 +73,16 @@ class RecordingDocker implements DockerClient {
 }
 
 describe("NapCat runtime", () => {
+  it('keeps the authorized generation observable when Kubernetes ensure fails', async () => {
+    const stateDirectory=await mkdtemp(join(tmpdir(),'napcat-generation-'));
+    const docker=new RecordingDocker();
+    const driver={backend:'kubernetes' as const, inspect:async()=>null, ensure:async()=>{throw new Error('API unavailable')}, start:async()=>{},stop:async()=>{},restart:async()=>{},forceRestart:async()=>{},delete:async()=>{},logs:async()=>''};
+    const runtime=new NapCatRuntime({stateDirectory,napcatToken:'test',docker,driver});
+    await expect(runtime.apply('effect', {...baseCommand,generation:7})).rejects.toThrow('API unavailable');
+    const observations=await runtime.observations();
+    expect(observations).toHaveLength(1);
+    expect(observations[0]?.generation).toBe(7);
+  });
   it("reuses NapCat HTTP QR control with a Kubernetes management target and no Docker IO", async () => {
     const labels={"botroost.workspace_id":baseCommand.workspaceId,"botroost.endpoint_id":baseCommand.endpointId,"botroost.provider":"napcat"};
     const driver={backend:'kubernetes' as const,inspect:vi.fn(async()=>({id:'pod',name:'runtime',image:NAPCAT_IMAGE,state:'running' as const,ipAddress:'runtime.pool.svc',labels})),ensure:vi.fn(),start:vi.fn(),stop:vi.fn(),restart:vi.fn(),forceRestart:vi.fn(),delete:vi.fn(),logs:vi.fn(async()=> '')};
