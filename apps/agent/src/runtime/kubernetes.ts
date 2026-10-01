@@ -1,5 +1,6 @@
-import { CoreV1Api, KubeConfig, KubernetesObjectApi, PatchStrategy, type KubernetesObject } from '@kubernetes/client-node';
+import { CoreV1Api, KubeConfig, KubernetesObjectApi, PatchStrategy, Metrics, type KubernetesObject } from '@kubernetes/client-node';
 import type { DockerInspectResult } from '../index.js';
+import type { DockerResourceSample } from '../resource-usage.js';
 import type { RuntimeDriver, RuntimeSpec } from './types.js';
 import { kubernetesResources, type KubernetesProfile } from './kubernetes-resources.js';
 // Dynamic discovery API spans several resource schemas.
@@ -10,11 +11,13 @@ export class KubernetesRuntimeDriver implements RuntimeDriver {
   readonly backend = 'kubernetes' as const;
   private objects: KubernetesObjectApi;
   private core: CoreV1Api;
+  private metricsApi?: Metrics;
   constructor(private profile: KubernetesProfile, private signal?: AbortSignal, config?: KubeConfig) {
     const kc = config ?? new KubeConfig();
     if (!config) kc.loadFromCluster();
     this.objects = KubernetesObjectApi.makeApiClient(kc);
     this.core = kc.makeApiClient(CoreV1Api);
+    this.metricsApi = new Metrics(kc);
   }
   private ref(kind: string, name: string) {
     if (!/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(name) || name.length > 63) throw new Error('Invalid runtime name');
@@ -102,5 +105,53 @@ export class KubernetesRuntimeDriver implements RuntimeDriver {
   async logs(name: string, options: { tail: number; sinceSeconds: number; timestamps?: boolean; maxBytes?: number }) {
     const text = await this.core.readNamespacedPodLog({ name: `${name}-0`, namespace: this.profile.namespace, container: 'protocol', tailLines: options.tail, sinceSeconds: options.sinceSeconds, timestamps: options.timestamps ?? false, limitBytes: options.maxBytes ?? 1048576 });
     return text;
+  }
+  // Resource telemetry via metrics.k8s.io: keys are pod UIDs, matching inspect()'s `id`.
+  async stats(podUids: string[], signal?: AbortSignal) {
+    const ids = [...new Set(podUids)];
+    if (!ids.length || !this.metricsApi) return new Map();
+    const wanted = new Set(ids);
+    const list = await this.metricsApi.getPodMetrics(this.profile.namespace);
+    signal?.throwIfAborted();
+    const result = new Map<string, DockerResourceSample>();
+    for (const pod of list.items) {
+      // client-node's PodMetric type omits `uid`, but metrics-server always sends it.
+      const uid = (pod.metadata as { uid?: string } | undefined)?.uid;
+      if (!uid || !wanted.has(uid)) continue;
+      let nanoCpus = 0, memoryBytes = 0;
+      for (const container of pod.containers) {
+        nanoCpus += parseKubernetesQuantity(container.usage?.cpu);
+        memoryBytes += parseKubernetesQuantity(container.usage?.memory);
+      }
+      if (nanoCpus > 0 || memoryBytes > 0) result.set(uid, { cpuPercent: nanoCpus / 10_000_000, memoryBytes: Math.round(memoryBytes) });
+    }
+    return result;
+  }
+}
+// Parses Kubernetes resource quantities ("8073539n", "258980Ki", "2G") into base units (nanocores, bytes).
+function parseKubernetesQuantity(value: string | undefined): number {
+  if (!value) return 0;
+  const match = /^(\d+(?:\.\d+)?)(m|u|n|k|M|G|T|P|E|Ki|Mi|Gi|Ti|Pi|Ei)?$/.exec(value.trim());
+  if (!match) return 0;
+  const base = Number(match[1]);
+  if (!Number.isFinite(base)) return 0;
+  switch (match[2]) {
+    case undefined: return base;
+    case 'n': return base;
+    case 'u': return base * 1_000;
+    case 'm': return base * 1_000_000;
+    case 'k': return base * 1e3;
+    case 'M': return base * 1e6;
+    case 'G': return base * 1e9;
+    case 'T': return base * 1e12;
+    case 'P': return base * 1e15;
+    case 'E': return base * 1e18;
+    case 'Ki': return base * 1024;
+    case 'Mi': return base * 1024 ** 2;
+    case 'Gi': return base * 1024 ** 3;
+    case 'Ti': return base * 1024 ** 4;
+    case 'Pi': return base * 1024 ** 5;
+    case 'Ei': return base * 1024 ** 6;
+    default: return 0;
   }
 }

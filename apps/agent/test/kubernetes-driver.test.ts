@@ -26,4 +26,26 @@ describe('Kubernetes API lifecycle safety', () => {
       expect(remove.mock.calls[0]?.[6]).toEqual({ preconditions: { uid: 'original', resourceVersion: '2' } });
     } finally { read.mockRestore(); patch.mockRestore(); remove.mockRestore(); }
   }, 2000);
+  it('maps pod-metric UIDs to resource samples and tolerates unknown quantities', async () => {
+    const { config } = fixture();
+    const driver = new KubernetesRuntimeDriver({ namespace: 'test', volumeSize: '2Gi' }, undefined, config);
+    const metrics = await import('@kubernetes/client-node');
+    // @ts-expect-error: Metrics is constructed with the config; substitute a stub.
+    driver['metricsApi'] = { getPodMetrics: async () => ({
+      kind: 'PodMetricsList', apiVersion: 'metrics.k8s.io/v1beta1', metadata: {},
+      items: [
+        { metadata: { name: 'pod-a', namespace: 'test', uid: 'uid-a', creationTimestamp: '' }, timestamp: '', window: '30s', containers: [{ name: 'protocol', usage: { cpu: '8073539n', memory: '258980Ki' } }] },
+        { metadata: { name: 'pod-b', namespace: 'test', uid: 'uid-b', creationTimestamp: '' }, timestamp: '', window: '30s', containers: [{ name: 'protocol', usage: { cpu: '1000000n', memory: '2Mi' } }, { name: 'sidecar', usage: { cpu: '500000n', memory: '1Mi' } }] },
+        { metadata: { name: 'pod-c', namespace: 'test', uid: 'uid-c', creationTimestamp: '' }, timestamp: '', window: '30s', containers: [{ name: 'protocol', usage: { cpu: 'bogus', memory: '' } }] },
+      ],
+    } as never) };
+    const result = await driver.stats(['uid-a', 'uid-b', 'uid-other']);
+    expect(result.get('uid-a')).toEqual({ cpuPercent: 0.8073539, memoryBytes: 258980 * 1024 });
+    // Multi-container pods sum to a pod-level sample.
+    expect(result.get('uid-b')).toEqual({ cpuPercent: 0.15, memoryBytes: 3 * 1024 * 1024 });
+    // Malformed quantities contribute zero; zero-only pods are omitted.
+    expect(result.has('uid-c')).toBe(false);
+    expect(result.has('uid-other')).toBe(false);
+    expect(metrics).toBeTruthy();
+  });
 });
