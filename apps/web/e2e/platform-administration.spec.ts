@@ -48,7 +48,7 @@ async function mockPlatform(page:Page,{platformOwner=true}:{platformOwner?:boole
  return{invitations,workspaces,nodes,mutations,isRegistrationOpen:()=>registrationOpen};
 }
 
-test('platform owner manages the registration switch, workspaces, and the shared node pool',async({page},testInfo)=>{
+test('platform owner manages the registration switch and workspaces, and sees proxy nodes as platform-maintained',async({page},testInfo)=>{
  const state=await mockPlatform(page);
  await page.setViewportSize({width:320,height:760});
  await page.goto('/platform');
@@ -82,19 +82,14 @@ test('platform owner manages the registration switch, workspaces, and the shared
  await expect(page.getByRole('dialog',{name:'Delete workspace'})).toBeHidden();
  expect(state.mutations[2]).toMatchObject({method:'DELETE',path:'/platform/workspaces/workspace-two'});
 
- await page.getByRole('tab',{name:/Shared node pool/}).click();
+ // Proxy nodes are platform-maintained (D2): the nodes tab lists them with name,
+ // remark, provider and owning workspace, but exposes only the edit entry -- no
+ // shared-pool toggle or workspace grant/revoke UI.
+ await page.getByRole('tab',{name:/Proxy nodes/}).click();
  await expect(page.getByRole('cell',{name:'node-a'})).toBeVisible();
- await expect(page.getByRole('row',{name:/node-a/})).toContainText('Private');
- await page.getByRole('button',{name:'Enable sharing'}).click();
- await expect(page.getByRole('row',{name:/node-a/})).toContainText('Shared');
- expect(state.mutations[3]).toMatchObject({method:'PUT',path:'/platform/nodes/node-id/shared',body:{enabled:true,labels:{region:'eu'}}});
-
- await page.getByLabel('Select workspace').selectOption('workspace-new');
- await expect(page.getByRole('button',{name:'Third ✕'})).toBeVisible();
- expect(state.mutations[4]).toMatchObject({method:'PUT',path:'/platform/workspaces/workspace-new/nodes/node-id'});
- await page.getByRole('button',{name:'Third ✕'}).click();
- await expect(page.getByRole('button',{name:'Third ✕'})).toBeHidden();
- expect(state.mutations[5]).toMatchObject({method:'DELETE',path:'/platform/workspaces/workspace-new/nodes/node-id'});
+ await expect(page.getByRole('row',{name:/node-a/})).toContainText('Primary');
+ await expect(page.getByRole('button',{name:'Enable sharing'})).toHaveCount(0);
+ await expect(page.getByLabel('Select workspace')).toHaveCount(0);
 
  const overflow=await page.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);
  expect(overflow).toBeLessThanOrEqual(0);
@@ -133,11 +128,13 @@ test('workspace manager completes the invitation lifecycle and never sees the st
  await page.screenshot({path:testInfo.outputPath('workspace-invitations.png'),fullPage:true});
 });
 
-test('a member without platform ownership sees only the shared nodes page',async({page})=>{
+test('a member without platform ownership has no platform access and the shared-node page no longer exists',async({page})=>{
  await mockPlatform(page,{platformOwner:false});
  await page.goto('/platform');
  await expect(page.getByRole('heading',{name:'Platform administration'})).toBeHidden();
+ // The shared-node concept is retired (D2): the /shared-nodes page is removed, so a
+ // non-owner lands on the app's NotFound route instead of a Shared nodes listing.
  await page.goto('/shared-nodes');
- await expect(page.getByRole('heading',{name:'Shared nodes'})).toBeVisible();
- await expect(page.getByRole('cell',{name:'shared-node'})).toBeVisible();
+ await expect(page.getByRole('heading',{name:'Shared nodes'})).toBeHidden();
+ await expect(page.getByText('Not found',{exact:false}).first()).toBeVisible();
 });

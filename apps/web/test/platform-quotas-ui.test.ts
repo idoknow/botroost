@@ -285,7 +285,7 @@ describe('node registration name and remark UI',()=>{
     });
     const{container}=render(createElement(Platform,{session}));
     await flush();
-    await activateTab(container,'Shared node pool');
+    await activateTab(container,'Proxy nodes');
 
     await act(async()=>{button(container,'Edit node')!.click()});
     await flush();
@@ -305,7 +305,7 @@ describe('node registration name and remark UI',()=>{
     api.updatePlatformNode!.mockResolvedValue(state.nodes[0]!);
     const{container}=render(createElement(Platform,{session}));
     await flush();
-    await activateTab(container,'Shared node pool');
+    await activateTab(container,'Proxy nodes');
     await act(async()=>{button(container,'Edit node')!.click()});
     await flush();
     await setInput(modalInput('platform-node-form',1),'   ');

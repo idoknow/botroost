@@ -1,11 +1,13 @@
 import {test,expect,type Page} from '@playwright/test';
 const permissions=['workspace:read','endpoint:read','node:read','node:create','provider:read','operation:read'];
-async function fixture(page:Page,allowed=permissions,resources=false){
+async function fixture(page:Page,allowed=permissions,resources=false,platformOwner=true){
  const calls:string[]=[];let failed=false,tokenCount=0;
  await page.route('**/api/v1/**',async route=>{
   const url=new URL(route.request().url()),path=url.pathname.replace('/api/v1','');calls.push(path+url.search);
   const json=(body:unknown,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(body)});
-  if(path==='/auth/session')return json({user:{id:'u',name:'Operator',email:'ops@example.test'},workspace:{id:'w',name:'Primary'},role:'viewer',platformOwner:allowed.includes('node:create'),permissions:allowed,capabilities:{operations:[]}});
+  // Proxy-node provisioning is platform-owner-only (D1): the enrollment button
+  // is gated on session.platformOwner, not the node:create permission.
+  if(path==='/auth/session')return json({user:{id:'u',name:'Operator',email:'ops@example.test'},workspace:{id:'w',name:'Primary'},role:'viewer',platformOwner,permissions:allowed,capabilities:{operations:[]}});
   if(path==='/auth/csrf')return json({csrfToken:'csrf'});
   if(path==='/nodes/enrollment-tokens'){tokenCount++;return json({token:`one-time-secret-${tokenCount}`});}
   if(failed)return json({error:{message:'Status service failed'}},503);
@@ -46,7 +48,7 @@ test('enrollment is permission-gated and the one-time secret clears on close',as
  await dialog.getByRole('button',{name:'Done'}).click();await expect(page.locator('.enrollment-token')).toHaveCount(0);
 });
 test('read-only sections and fetches honor each permission',async({page})=>{
- const f=await fixture(page,['node:read']);await page.goto('/system-status?section=nodes');await expect(page.getByText('Agent 2',{exact:true})).toBeVisible();
+ const f=await fixture(page,['node:read'],false,false);await page.goto('/system-status?section=nodes');await expect(page.getByText('Agent 2',{exact:true})).toBeVisible();
  await expect(page.getByRole('button',{name:'Generate enrollment token'})).toHaveCount(0);await expect(page.getByRole('tab',{name:'Endpoint resources'})).toHaveCount(0);await expect(page.getByRole('tab',{name:'Runtime integrations'})).toHaveCount(0);
  expect(f.calls.filter(p=>/endpoints|providers|summary/.test(p))).toEqual([]);
 });
