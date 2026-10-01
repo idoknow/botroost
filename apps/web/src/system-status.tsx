@@ -56,7 +56,7 @@ export function SystemStatus({session,path,endpoints}:{session:Session;path:stri
     })}/>}</Collection>
    </TabsContent>
    <TabsContent value="nodes" className="system-panel">
-    {can('node:create')?<div className="system-section-actions"><Button variant="outline" busy={enrolling} onClick={()=>void enroll()}>{t('nodes.generateToken')}</Button></div>:null}
+    {session.platformOwner?<div className="system-section-actions"><Button variant="outline" busy={enrolling} onClick={()=>void enroll()}>{t('nodes.generateToken')}</Button></div>:null}
     {enrollError?<Failure error={enrollError}/>:null}
     {nodeError?<Failure error={nodeError} focus title={t('platform.nodeFailed')}/>:null}
     {nodeSaved?<p className="success-message" role="status">{t('platform.nodeUpdated')}</p>:null}
@@ -66,7 +66,7 @@ export function SystemStatus({session,path,endpoints}:{session:Session;path:stri
      node.provider,
      <Badge good={!nodes.error&&nodeConnectionStatus(node)==='online'}>{nodes.error?t('sidebar.statusUnknown'):nodeConnectionStatus(node)}</Badge>,
      time(node.lastHeartbeatAt),
-     can('manage-nodes')||session.permissions.includes('node:create')?<Button variant="outline" size="sm" onClick={()=>{setEditingNode(node);setNodeName(node.name);setNodeRemark(node.remark??'');setNodeError(undefined)}}>{t('platform.editNode')}</Button>:'—'
+     session.platformOwner?<Button variant="outline" size="sm" onClick={()=>{setEditingNode(node);setNodeName(node.name);setNodeRemark(node.remark??'');setNodeError(undefined)}}>{t('platform.editNode')}</Button>:'—'
     ])}/>}</Collection>
    </TabsContent>
    <TabsContent value="integrations" className="system-panel">
