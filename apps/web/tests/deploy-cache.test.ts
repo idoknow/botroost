@@ -8,4 +8,11 @@ describe('web deployment cache policy',()=>{
   expect(nginx).toMatch(/map \$uri \$botroost_cache_control[\s\S]*~\^\/assets\/[^\n]*immutable/);
   expect(nginx).toContain('add_header Cache-Control $botroost_cache_control always;');
  });
+ it('serves a true 404 for missing fingerprinted assets instead of the SPA fallback',()=>{
+  expect(nginx).toMatch(/location \/assets\/[\s\S]*?try_files \$uri =404;/);
+  // a missing asset must never resolve to index.html (HTML-as-JS-module black screen)
+  const assets = nginx.split('location /assets/')[1] ?? '';
+  const assetsBlock = assets.split('location /')[0];
+  expect(assetsBlock).not.toContain('/index.html');
+ });
 });
