@@ -792,7 +792,8 @@ export class NapCatRuntime {
     this.assertAllowed(command);
     return this.snapshotWithContainer(command, await this.infrastructure().inspect(this.containerName(command.endpointId)));
   }
-  private async snapshotWithContainer(command: RuntimeCommand, inspected: DockerInspectResult | null): Promise<{
+  private readonly enrichmentFlights = new Set<string>();
+  private async snapshotWithContainer(command: RuntimeCommand, inspected: DockerInspectResult | null, healthOnly = false): Promise<{
     endpointId: string;
     generation: number;
     runtime: "ready" | "stopped" | "failed" | "unknown";
@@ -807,7 +808,7 @@ export class NapCatRuntime {
       return { endpointId: command.endpointId, generation: command.generation, runtime: "stopped", provider: "unknown", protocol: "disconnected", convergence: "reconciling", metadata: {} };
     }
     const base = new URL(`http://${inspected.ipAddress}:6099`);
-    const traffic = await this.protocolTraffic(command.endpointId);
+    const traffic = healthOnly ? this.trafficCache.get(command.endpointId)?.summary ?? null : await this.protocolTraffic(command.endpointId);
     const webToken=await this.webCredential(command.endpointId,base);
     const objectData = (value: JsonObject): JsonObject => {
       const data = value.data;
@@ -831,6 +832,18 @@ export class NapCatRuntime {
       }
     }
     const qq:JsonObject={...rawQq,online};
+    if (healthOnly) {
+      const cached = this.snapshotCache.get(command.endpointId);
+      const metadata = cached?.value.generation === command.generation ? cached.value.metadata : {};
+      if (!this.enrichmentFlights.has(command.endpointId) && (!cached || Date.now() - cached.at >= 60_000)) {
+        this.enrichmentFlights.add(command.endpointId);
+        void this.snapshotWithContainer(command, inspected).then(value => {
+          if (this.commands.get(command.endpointId)?.generation === command.generation)
+            this.snapshotCache.set(command.endpointId, { at: Date.now(), value });
+        }).catch(() => {}).finally(() => this.enrichmentFlights.delete(command.endpointId));
+      }
+      return { endpointId: command.endpointId, generation: command.generation, runtime: 'ready', provider: 'available', protocol: online === true ? 'connected' : online === false ? 'disconnected' : 'unknown', convergence: online === true ? 'converged' : 'reconciling', metadata: { ...metadata, qq, traffic, healthObservedAt: new Date().toISOString() } };
+    }
     if(online!==true){
       let qrcode:JsonObject;
       try {
@@ -941,20 +954,11 @@ export class NapCatRuntime {
         const result = inspections[index]!;
         if (result.status === "rejected") throw result.reason;
         const inspected = result.value;
-        const cached = this.snapshotCache.get(command.endpointId);
-        if (cached && Date.now() - cached.at < 15_000 && inspected?.state === "running" && inspected.ipAddress) {
-          const metadata = cached.value.runtime === "ready"
-            ? { ...cached.value.metadata, traffic: await this.protocolTraffic(command.endpointId) }
-            : cached.value.metadata;
-          return { ...cached.value, metadata };
-        }
-        const snapshot = await this.snapshotWithContainer(command, inspected);
-        this.snapshotCache.set(command.endpointId, { at: Date.now(), value: snapshot });
-        return snapshot;
+        return await this.snapshotWithContainer(command, inspected, true);
       } catch (error) {
         this.snapshotCache.delete(command.endpointId);
         const inspection=inspections[index]!;
-        const runtime=inspection.status==="fulfilled"?(inspection.value?.state==="running"?"ready" as const:"stopped" as const):"failed" as const;
+        const runtime=inspection.status==="fulfilled"?(inspection.value?.state==="running"?"ready" as const:"stopped" as const):error instanceof Error && error.message.includes('not owned by this endpoint') ? "failed" as const : "unknown" as const;
         return { endpointId:command.endpointId,generation:command.generation,runtime,provider:"degraded" as const,protocol:"unknown" as const,convergence:"reconciling" as const,metadata:{error:safeRuntimeError(error)} };
       }
     }));

@@ -5,7 +5,7 @@ async function fixture(page:Page,allowed=permissions,resources=false){
  await page.route('**/api/v1/**',async route=>{
   const url=new URL(route.request().url()),path=url.pathname.replace('/api/v1','');calls.push(path+url.search);
   const json=(body:unknown,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(body)});
-  if(path==='/auth/session')return json({user:{id:'u',name:'Operator',email:'ops@example.test'},workspace:{id:'w',name:'Primary'},role:'viewer',permissions:allowed,capabilities:{operations:[]}});
+  if(path==='/auth/session')return json({user:{id:'u',name:'Operator',email:'ops@example.test'},workspace:{id:'w',name:'Primary'},role:'viewer',platformOwner:allowed.includes('node:create'),permissions:allowed,capabilities:{operations:[]}});
   if(path==='/auth/csrf')return json({csrfToken:'csrf'});
   if(path==='/nodes/enrollment-tokens'){tokenCount++;return json({token:`one-time-secret-${tokenCount}`});}
   if(failed)return json({error:{message:'Status service failed'}},503);

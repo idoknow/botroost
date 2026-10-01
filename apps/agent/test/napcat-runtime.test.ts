@@ -79,6 +79,8 @@ describe("NapCat runtime", () => {
     const driver={backend:'kubernetes' as const, inspect:async()=>null, ensure:async()=>{throw new Error('API unavailable')}, start:async()=>{},stop:async()=>{},restart:async()=>{},forceRestart:async()=>{},delete:async()=>{},logs:async()=>''};
     const runtime=new NapCatRuntime({stateDirectory,napcatToken:'test',docker,driver});
     await expect(runtime.apply('effect', {...baseCommand,generation:7})).rejects.toThrow('API unavailable');
+    driver.inspect = async () => { throw new Error('Kubernetes temporarily unavailable'); };
+    await expect(runtime.observations()).resolves.toMatchObject([{runtime:'unknown',protocol:'unknown'}]);
     const observations=await runtime.observations();
     expect(observations).toHaveLength(1);
     expect(observations[0]?.generation).toBe(7);
@@ -242,6 +244,7 @@ describe("NapCat runtime", () => {
     const runtime=new NapCatRuntime({docker,stateDirectory:await mkdtemp(join(tmpdir(),"botroost-napcat-cached-ownership-")),napcatToken:"operator-token",fetcher:fetcher });
     await runtime.apply("runtime:cached-ownership",baseCommand);
     expect((await runtime.observations())[0]?.runtime).toBe("ready");
+    await new Promise(resolve => setImmediate(resolve));
     foreign=true;
     docker.logRequests.length=0;
     const calls=fetcher.mock.calls.length;
@@ -758,6 +761,7 @@ describe("NapCat runtime", () => {
       },
     });
     await runtime.apply("runtime:heartbeat", baseCommand);
+    docker.logs = async () => { throw new Error('telemetry unavailable'); };
     const observations = await runtime.observations();
     expect(observations).toHaveLength(1);
     expect(observations[0]).toMatchObject({ endpointId: baseCommand.endpointId, protocol: "connected" });
@@ -780,6 +784,7 @@ describe("NapCat runtime", () => {
     };
     await new NapCatRuntime({ docker, stateDirectory, napcatToken: "operator-token", fetcher }).apply("runtime:first", baseCommand);
     const restarted = new NapCatRuntime({ docker, stateDirectory, napcatToken: "operator-token", fetcher });
-    await expect(restarted.observations()).resolves.toMatchObject([{ endpointId: baseCommand.endpointId, protocol: "connected" }]);
+    docker.logs = async () => new Promise<string>(() => {});
+    await expect(Promise.race([restarted.observations(), new Promise((_, reject) => setTimeout(() => reject(new Error('health blocked by telemetry')), 100))])).resolves.toMatchObject([{ endpointId: baseCommand.endpointId, protocol: "connected" }]);
   });
 });

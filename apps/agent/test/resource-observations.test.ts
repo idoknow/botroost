@@ -32,7 +32,7 @@ it("serializes real stats with actual limits in observations independently of he
   expect(f.stats).toHaveBeenCalledTimes(1);
   now += 4000;
   expect((await f.runtime.observations())[0]?.metadata?.resourceUsage).toMatchObject({ observedAt: "2026-09-05T00:00:05.000Z" });
-  expect(f.stats).toHaveBeenCalledTimes(2); expect(f.fetcher).toHaveBeenCalledTimes(calls);
+  expect(f.stats).toHaveBeenCalledTimes(2); expect(f.fetcher.mock.calls.length).toBeGreaterThan(calls);
   for (const action of [f.docker.create, f.docker.start, f.docker.stop, f.docker.restart, f.docker.remove]) expect(action).not.toHaveBeenCalled();
 });
 it("keeps healthy observations on stats errors and makes stopped/foreign/missing containers unsampled", async () => {
@@ -52,6 +52,6 @@ it("isolates one endpoint inspection failure from other health and usage observa
   const f = await fixture(); await f.runtime.observations();
   vi.mocked(f.docker.inspect).mockImplementation(async name => { if (name.endsWith(endpointIds[0]!)) throw new Error("inspection failed"); return f.containers.get(name) ?? null; });
   const observations = await f.runtime.observations();
-  expect(observations[0]).toMatchObject({ runtime: "failed", metadata: { resourceUsage: { status: "unavailable", observedAt: null } } });
+  expect(observations[0]).toMatchObject({ runtime: "unknown", metadata: { resourceUsage: { status: "unavailable", observedAt: null } } });
   expect(observations[1]).toMatchObject({ runtime: "ready", metadata: { resourceUsage: { status: "ok", cpuPercent: 0, memoryBytes: 0 } } });
 });
