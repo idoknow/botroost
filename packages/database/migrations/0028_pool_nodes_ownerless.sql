@@ -2,6 +2,9 @@ BEGIN;
 -- Shared-pool nodes belong to no workspace: usage is authorized exclusively
 -- through workspace_node_pool_grants while the pool entry stays enabled.
 ALTER TABLE nodes ALTER COLUMN workspace_id DROP NOT NULL;
+-- The 0024 owner guard trigger lists owner_workspace_id in its column list;
+-- drop it first so the column can be dropped, then recreate it below.
+DROP TRIGGER IF EXISTS platform_node_pool_owner_guard ON platform_node_pool;
 ALTER TABLE platform_node_pool DROP CONSTRAINT IF EXISTS platform_node_pool_workspace_node_fkey;
 ALTER TABLE platform_node_pool DROP COLUMN IF EXISTS owner_workspace_id;
 -- Preserve the previous owner's access: grant before nulling ownership.
@@ -87,4 +90,6 @@ BEGIN
   RETURN NEW;
 END;
 $$;
+DROP TRIGGER IF EXISTS platform_node_pool_owner_guard ON platform_node_pool;
+CREATE TRIGGER platform_node_pool_owner_guard BEFORE INSERT OR UPDATE OF node_id,enabled ON platform_node_pool FOR EACH ROW EXECUTE FUNCTION enforce_shared_node_pool_grant();
 COMMIT;
