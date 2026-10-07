@@ -6,6 +6,7 @@ import {
   open,
   readFile,
   rmdir,
+  truncate,
   unlink,
   writeFile,
   type FileHandle,
@@ -124,6 +125,8 @@ export class FileAgentJournal {
         throw new Error("journal lock ownership changed");
       await unlink(lockOwnerPath);
       await rmdir(lockPath);
+      // Windows rejects fsync on directory handles (EPERM).
+      if (process.platform === "win32") return;
       const parent = await open(directory, constants.O_RDONLY);
       try {
         await parent.sync();
@@ -140,7 +143,7 @@ export class FileAgentJournal {
       });
       const lockDirectory = await open(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW);
       try {
-        await lockDirectory.sync();
+        if (process.platform !== "win32") await lockDirectory.sync();
       } finally {
         await lockDirectory.close();
       }
@@ -166,18 +169,23 @@ export class FileAgentJournal {
       );
       await chmod(path, 0o600);
       if (created) {
-        const parent = await open(directory, constants.O_RDONLY);
-        try {
-          await parent.sync();
-        } finally {
-          await parent.close();
+        // Windows rejects fsync on directory handles (EPERM).
+        if (process.platform !== "win32") {
+          const parent = await open(directory, constants.O_RDONLY);
+          try {
+            await parent.sync();
+          } finally {
+            await parent.close();
+          }
         }
       }
       const bytes = await file.readFile();
       const hasFinalNewline = bytes.length === 0 || bytes.at(-1) === 0x0a;
       if (!hasFinalNewline) {
         const boundary = bytes.lastIndexOf(0x0a) + 1;
-        await file.truncate(boundary);
+        // Windows rejects ftruncate on append-mode handles (EPERM); a path-based truncate opens its own handle.
+        if (process.platform === "win32") await truncate(path, boundary);
+        else await file.truncate(boundary);
         await file.sync();
       }
       const replayBytes = hasFinalNewline

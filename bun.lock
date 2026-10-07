@@ -206,6 +206,19 @@
         "vitest": "^3.2.4",
       },
     },
+    "packages/provider-snowluma": {
+      "name": "@botroost/provider-snowluma",
+      "version": "0.0.0",
+      "dependencies": {
+        "@botroost/contracts": "workspace:*",
+        "@botroost/provider-sdk": "workspace:*",
+        "@botroost/runtime-sdk": "workspace:*",
+        "zod": "catalog:",
+      },
+      "devDependencies": {
+        "vitest": "^3.2.4",
+      },
+    },
     "packages/reconciler": {
       "name": "@botroost/reconciler",
       "version": "0.0.0",
@@ -362,6 +375,8 @@
     "@botroost/provider-napcat": ["@botroost/provider-napcat@workspace:packages/provider-napcat"],
 
     "@botroost/provider-sdk": ["@botroost/provider-sdk@workspace:packages/provider-sdk"],
+
+    "@botroost/provider-snowluma": ["@botroost/provider-snowluma@workspace:packages/provider-snowluma"],
 
     "@botroost/reconciler": ["@botroost/reconciler@workspace:packages/reconciler"],
 

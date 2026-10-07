@@ -10,3 +10,4 @@ test-results/
 docs/.vitepress/cache/
 .wrangler/
 deploy/agent.env
+.trae/

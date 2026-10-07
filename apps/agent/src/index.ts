@@ -15,6 +15,7 @@ import {
 } from "@botroost/agent-protocol";
 import { applyProxyEnvironment } from "@botroost/agent-protocol";
 import { NapCatTrafficAccumulator } from "./traffic.js";
+import { SnowLumaRuntime, SNOWLUMA_IMAGE } from "./snowluma-runtime.js";
 import type { RuntimeDriver, RuntimeSpec } from './runtime/types.js';
 import { resolveRuntimeBackend } from './runtime/config.js';
 import { KubernetesRuntimeDriver } from './runtime/kubernetes.js';
@@ -88,6 +89,11 @@ export interface DockerCreateInput {
   mounts: { type: "bind"; source: string; target: string }[];
   hostConfig: { networkMode: string; portBindings: Record<string, never> };
   resources: { cpuMillis: number; memoryMiB: number; memorySwapMiB: number };
+  /** Optional extras consumed only by providers that require them (e.g. SnowLuma). NapCat passes none. */
+  capAdd?: string[];
+  securityOpt?: string[];
+  shmBytes?: number;
+  publishedPorts?: { hostPort: string; containerPort: string }[];
 }
 export interface DockerInspectResult {
   id: string;
@@ -142,6 +148,10 @@ export function dockerCreateArguments(input:DockerCreateInput):string[]{
   for(const [key,value] of Object.entries(input.labels))args.push("--label",`${key}=${value}`);
   for(const [key,value] of Object.entries(input.environment??{}))args.push("--env",`${key}=${value}`);
   for(const mount of input.mounts)args.push("--mount",`type=bind,src=${mount.source},dst=${mount.target}`);
+  for(const port of input.publishedPorts??[])args.push("-p",`${port.hostPort}:${port.containerPort}`);
+  for(const capability of input.capAdd??[])args.push("--cap-add",capability);
+  for(const option of input.securityOpt??[])args.push("--security-opt",option);
+  if(input.shmBytes)args.push("--shm-size",`${input.shmBytes}`);
   args.push(input.image);
   return args;
 }
@@ -198,7 +208,7 @@ export class DockerCliClient implements DockerClient {
     const source=resolve(root);
     if(source===sep||!source.startsWith(sep)||/[\0,\r\n]/.test(source))throw new Error("host state root is invalid");
     if(!endpointIdPattern.test(endpointId))throw new Error("endpoint identifier is invalid");
-    if(image!==NAPCAT_IMAGE)throw new Error("cleanup image is not allowlisted");
+    if(image!==NAPCAT_IMAGE&&image!==SNOWLUMA_IMAGE)throw new Error("cleanup image is not allowlisted");
     await this.docker([
       "run","--rm","--network","none","--read-only","--security-opt","no-new-privileges",
       "--cap-drop","ALL","--cap-add","DAC_OVERRIDE","--pids-limit","32","--memory","64m","--cpus","0.25",
@@ -262,8 +272,11 @@ export class NodeCredentialStore {
       }
       await chmod(temporary, 0o600);
       await rename(temporary, this.path);
-      const directory = await open(this.directory, constants.O_RDONLY | constants.O_DIRECTORY);
-      try { await directory.sync(); } finally { await directory.close(); }
+      // Windows rejects fsync on directory handles (EPERM); durability there relies on the file sync above.
+      if (process.platform !== "win32") {
+        const directory = await open(this.directory, constants.O_RDONLY | constants.O_DIRECTORY);
+        try { await directory.sync(); } finally { await directory.close(); }
+      }
     } catch (error) {
       await unlink(temporary).catch(() => undefined);
       throw error;
@@ -982,12 +995,12 @@ export class DurableFakeAgent {
   private lastObservationHeartbeatAt=Number.NEGATIVE_INFINITY;
   private constructor(
     private readonly journal: FileAgentJournal,
-    private readonly runtime: FakeRuntime | NapCatRuntime,
+    private readonly runtime: FakeRuntime | NapCatRuntime | SnowLumaRuntime,
     private readonly transport: AgentCommandTransport,
   ) {}
   static async open(options: {
     journalPath: string;
-    runtime?: FakeRuntime | NapCatRuntime;
+    runtime?: FakeRuntime | NapCatRuntime | SnowLumaRuntime;
     transport: AgentCommandTransport;
   }) {
     return new DurableFakeAgent(
@@ -1006,7 +1019,7 @@ export class DurableFakeAgent {
     }
     const command = await this.transport.claim();
     if (!command) {
-      if(observationDue&&this.runtime instanceof NapCatRuntime){
+      if(observationDue&&(this.runtime instanceof NapCatRuntime||this.runtime instanceof SnowLumaRuntime)){
         const observations=await this.runtime.observations();
         await this.transport.heartbeat(observations);
       }
@@ -1063,9 +1076,9 @@ export class DurableFakeAgent {
     try {
       if (!result) {
         const effectId=`runtime:${command.commandId}`;
-        let applied = this.journal.get(command.commandId)?.effects[effectId] as Awaited<ReturnType<NapCatRuntime["apply"]>> | undefined;
+        let applied = this.journal.get(command.commandId)?.effects[effectId] as Awaited<ReturnType<NapCatRuntime["apply"] | SnowLumaRuntime["apply"]>> | undefined;
         if (!applied)
-          applied = this.runtime instanceof NapCatRuntime
+          applied = this.runtime instanceof NapCatRuntime || this.runtime instanceof SnowLumaRuntime
             ? await this.runtime.apply(effectId,command,report,commandAbort.signal)
             : await this.runtime.apply(effectId,command,report);
         if(fenceError)throw fenceError;
@@ -1139,7 +1152,7 @@ export async function startAgentFromEnv(signal?:AbortSignal): Promise<DurableFak
     throw new Error("CONTROL_PLANE_URL and NODE_STATE_DIR are required");
   const provider = process.env.AGENT_PROVIDER ?? "fake";
   const backend = resolveRuntimeBackend(process.env.AGENT_RUNTIME);
-  if (!["fake", "napcat"].includes(provider)) throw new Error("AGENT_PROVIDER must be fake or napcat");
+  if (!["fake", "napcat", "snowluma"].includes(provider)) throw new Error("AGENT_PROVIDER must be fake, napcat or snowluma");
   const store = new NodeCredentialStore(nodeStateDir);
   let credential = await store.read();
   if (!credential) {
@@ -1157,6 +1170,14 @@ export async function startAgentFromEnv(signal?:AbortSignal): Promise<DurableFak
           hostStateDirectory: join(process.env.NAPCAT_HOST_STATE_DIR ?? nodeStateDir, "napcat"),
           ...(signal === undefined ? {} : { signal }),
           ...(process.env.NAPCAT_TOKEN === undefined ? {} : { napcatToken: process.env.NAPCAT_TOKEN }),
+        })
+      : provider === "snowluma"
+      ? new SnowLumaRuntime({
+          docker: new DockerCliClient(),
+          stateDirectory: join(nodeStateDir, "snowluma"),
+          hostStateDirectory: join(process.env.SNOWLUMA_HOST_STATE_DIR ?? nodeStateDir, "snowluma"),
+          ...(signal === undefined ? {} : { signal }),
+          ...(process.env.SNOWLUMA_ONEBOT_ACCESS_TOKEN === undefined ? {} : { onebotAccessToken: process.env.SNOWLUMA_ONEBOT_ACCESS_TOKEN }),
         })
       : await FakeRuntime.open(join(nodeStateDir,"runtime-effects.json")),
     transport: new HttpAgentTransport(controlPlaneUrl, credential.nodeSecret,signal?{signal}:{}),

@@ -26,7 +26,7 @@ export interface ProtocolTrafficWindow {
 }
 
 export interface ProtocolTrafficSummary {
-  source: "napcat.container_logs";
+  source: "napcat.container_logs" | "snowluma.container_logs";
   privacy: "aggregate_only";
   observedAt: string;
   oneMinute: ProtocolTrafficWindow;
@@ -97,16 +97,68 @@ export function parseNapCatConnectionLine(line: string): ProtocolConnectionEvent
   };
 }
 
+/** SnowLuma logs each OneBot event as `[Event] 群/私聊 ...`; self-originated messages carry `[自身]`. */
+export function parseSnowlumaTrafficLine(line: string): ProtocolTrafficEvent | null {
+  const matched = dockerTimestamp.exec(line.trim());
+  if (!matched) return null;
+  const [, rawTimestamp, message = ""] = matched;
+  const eventIndex = message.indexOf("[Event]");
+  if (eventIndex < 0) return null;
+  const timestamp = new Date(rawTimestamp!);
+  if (!Number.isFinite(timestamp.getTime())) return null;
+  return {
+    id: createHash("sha256").update(line).digest("hex"),
+    at: timestamp.toISOString(),
+    direction: message.includes("[自身]") ? "outbound" : "inbound",
+    scope: message.includes("群") ? "group" : message.includes("私聊") ? "private" : "unknown",
+    bytes: Buffer.byteLength(message.slice(eventIndex), "utf8"),
+  };
+}
+
+/** SnowLuma adapter lifecycle lines, e.g. `[OneBot.WS-Client] [WebSocket 客户端] connected wss://…`
+ *  and `[OneBot.WS-Server] [ws-default] listening 0.0.0.0:3001/`. */
+export function parseSnowlumaConnectionLine(line: string): ProtocolConnectionEvent | null {
+  const matched = dockerTimestamp.exec(line.trim());
+  if (!matched) return null;
+  const [, rawTimestamp, rawMessage = ""] = matched;
+  const message = stripAnsiColor(rawMessage);
+  const client = message.includes("[OneBot.WS-Client]");
+  const server = message.includes("[OneBot.WS-Server]");
+  if (!client && !server) return null;
+  const timestamp = new Date(rawTimestamp!);
+  if (!Number.isFinite(timestamp.getTime())) return null;
+  const status = /reconnect|重新连接/i.test(message)
+    ? "reconnecting"
+    : /disconnect|断开|关闭/i.test(message)
+      ? "disconnected"
+      : /error|失败|错误/i.test(message)
+        ? "error"
+        : /connected|连接成功|已连接/i.test(message)
+          ? "connected"
+          : /listening|已启动/i.test(message)
+            ? "listening"
+            : null;
+  if (!status) return null;
+  return {
+    id: createHash("sha256").update(line).digest("hex"),
+    at: timestamp.toISOString(),
+    transport: client ? "websocket-client" : "websocket-server",
+    status,
+  };
+}
+
 export class NapCatTrafficAccumulator {
   private readonly seen = new Map<string, number>();
   private events: ProtocolTrafficEvent[] = [];
   private connections: ProtocolConnectionEvent[] = [];
 
+  constructor(private readonly parseEvent: (line: string) => ProtocolTrafficEvent | null = parseNapCatTrafficLine, private readonly parseConnection: (line: string) => ProtocolConnectionEvent | null = parseNapCatConnectionLine, private readonly source: ProtocolTrafficSummary["source"] = "napcat.container_logs") {}
+
   ingest(lines: string[], now = Date.now()) {
     this.prune(now);
     for (const line of lines) {
-      const event = parseNapCatTrafficLine(line);
-      const connection = parseNapCatConnectionLine(line);
+      const event = this.parseEvent(line);
+      const connection = this.parseConnection(line);
       const parsed = event ?? connection;
       if (!parsed || this.seen.has(parsed.id)) continue;
       const at = new Date(parsed.at).getTime();
@@ -139,7 +191,7 @@ export class NapCatTrafficAccumulator {
       return { startedAt: new Date(startedAt).toISOString(), inbound, outbound: events.length - inbound, total: events.length };
     });
     return {
-      source: "napcat.container_logs",
+      source: this.source,
       privacy: "aggregate_only",
       observedAt: new Date(now).toISOString(),
       oneMinute: window(60_000),
