@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { randomBytes } from "node:crypto";
 import { request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
 import { request as httpsRequest } from "node:https";
 import websocket from "@fastify/websocket";
@@ -45,6 +46,8 @@ export interface RuntimeProxyOptions {
   route(workspaceId: string, endpointId: string, port: number): Promise<RuntimeRoute | null>;
   /** Upstream dial deadline in milliseconds; defaults to UPSTREAM_TIMEOUT_MS. */
   timeoutMs?: number;
+  /** Lifetime of a mount ticket in milliseconds; defaults to TICKET_TTL_MS. */
+  ticketTtlMs?: number;
 }
 
 /**
@@ -56,11 +59,78 @@ export interface RuntimeProxyOptions {
  * ClusterIP, which no browser can dial, so the console proxies instead.
  *
  * The proxy is a content channel, not a console: the runtime's pages run in a sandboxed,
- * opaque-origin frame with a policy that forbids them any script (see sandboxDocument), so a
- * compromised runtime UI cannot call the console's API with the operator's session.
+ * opaque-origin frame whose scripts cannot carry the console's session (see frameDocument), so
+ * a compromised runtime UI cannot call the console's API as the operator. Sub-resource
+ * authentication therefore rides on a mount ticket (see TicketStore) rather than on a cookie.
  */
+/** How long a minted mount ticket stays usable. */
+export const TICKET_TTL_MS = 45 * 60_000;
+/** Ceiling on live tickets: the store is a convenience cache, not a database. */
+const TICKET_LIMIT = 512;
+/** `/t/<32 hex>` right after the mount prefix, or nothing. */
+const TICKET_PATH = /^\/t\/([0-9a-f]{32})(?=[/?#]|$)/;
+
+interface RuntimeTicket {
+  endpointId: string;
+  port: number;
+  workspaceId: string;
+  expiresAt: number;
+}
+
+/**
+ * Short-lived proof that the console opened this mount, carried in the URL path.
+ *
+ * The proxied document is served with a CSP `sandbox` that leaves it in an opaque origin, and
+ * a browser treats such a frame as third-party: its `<script>`, CSS and XHR requests do not
+ * carry the console's `SameSite=Lax` session cookie. Without a ticket every one of them would
+ * come back 404 from `authorize` and noVNC would show "encountered an error" over a blank
+ * canvas. So the first (cookie-bearing) document navigation mints a ticket and redirects the
+ * frame into `<mount>/t/<ticket>/…`; the injected `<base>` puts every later request under the
+ * same path, which is what authorises them.
+ *
+ * Tickets live in this process only: they cannot be forged, they are bound to one endpoint and
+ * one published port, and a restart merely costs the operator a reload.
+ */
+class TicketStore {
+  private readonly entries = new Map<string, RuntimeTicket>();
+  private readonly ttlMs: number;
+
+  constructor(ttlMs: number) {
+    this.ttlMs = ttlMs;
+  }
+
+  mint(endpointId: string, port: number, workspaceId: string) {
+    const now = Date.now();
+    this.sweep(now);
+    if (this.entries.size >= TICKET_LIMIT) {
+      const oldest = this.entries.keys().next();
+      if (!oldest.done) this.entries.delete(oldest.value);
+    }
+    const token = randomBytes(16).toString("hex");
+    this.entries.set(token, { endpointId, port, workspaceId, expiresAt: now + this.ttlMs });
+    return token;
+  }
+
+  /** The workspace the ticket was minted for, or null when it is stale or for another mount. */
+  redeem(token: string, endpointId: string, port: number) {
+    const entry = this.entries.get(token);
+    if (!entry) return null;
+    if (entry.expiresAt <= Date.now()) {
+      this.entries.delete(token);
+      return null;
+    }
+    if (entry.endpointId !== endpointId || entry.port !== port) return null;
+    return entry.workspaceId;
+  }
+
+  private sweep(now: number) {
+    for (const [token, entry] of this.entries) if (entry.expiresAt <= now) this.entries.delete(token);
+  }
+}
+
 export function registerRuntimeProxy(app: FastifyInstance, options: RuntimeProxyOptions) {
   const mount = (id: string, port: number) => `/api/v1/endpoints/${id}/runtime/${port}`;
+  const tickets = new TicketStore(options.ticketTtlMs ?? TICKET_TTL_MS);
 
   // Encapsulated so the websocket plugin is always loaded before the route that needs it,
   // whichever order the caller registers things in.
@@ -73,14 +143,14 @@ export function registerRuntimeProxy(app: FastifyInstance, options: RuntimeProxy
     scope.route({
       method: "GET",
       url: "/api/v1/endpoints/:id/runtime/:port/*",
-      wsHandler: (socket, request) => { void bridgeWebSocket(socket, request, options); },
-      handler: async (request, reply) => { await bridgeHttp(request, reply, options); },
+      wsHandler: (socket, request) => { void bridgeWebSocket(socket, request, options, tickets); },
+      handler: async (request, reply) => { await bridgeHttp(request, reply, options, tickets); },
     });
 
     scope.route({
       method: ["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
       url: "/api/v1/endpoints/:id/runtime/:port/*",
-      handler: async (request, reply) => { await bridgeHttp(request, reply, options); },
+      handler: async (request, reply) => { await bridgeHttp(request, reply, options, tickets); },
     });
 
     scope.get("/api/v1/endpoints/:id/runtime/:port", async (request, reply) => {
@@ -175,22 +245,36 @@ export function runtimeDialHost(value: string | undefined): string | null {
 }
 
 /** Resolves the dial target, or answers with the reason there is none. */
-async function resolveTarget(request: FastifyRequest, options: RuntimeProxyOptions) {
+async function resolveTarget(request: FastifyRequest, options: RuntimeProxyOptions, tickets: TicketStore) {
   const { id, port } = mountParams(request);
   if (!id) return { error: { status: 400, body: { error: "bad_request", message: "endpoint is required" } } } as const;
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     return { error: { status: 400, body: { error: "bad_request", message: "invalid runtime port" } } } as const;
   }
-  if (!fromConsole(request)) {
+  const base = `/api/v1/endpoints/${id}/runtime/${port}`;
+  const ticket = TICKET_PATH.exec(upstreamPath(request, base))?.[1] ?? null;
+  // A ticket is the console's own capability for this mount, so it covers what the frame does
+  // with it — including the form posts a WebUI login needs from an opaque origin.
+  if (!ticket && !fromConsole(request)) {
     return { error: { status: 403, body: { error: "forbidden", message: "runtime proxy requests must come from the console" } } } as const;
   }
   let workspaceId: string;
-  try {
-    ({ workspaceId } = await options.authorize(request, id, port));
-  } catch {
-    // An endpoint that is not the caller's must look non-existent, not forbidden: the
-    // console shows one message for "gone" and another for "not yours".
-    return { error: { status: 404, body: { error: "not_found", message: "endpoint not found" } } } as const;
+  if (ticket) {
+    // Inside a ticketed mount a request presents no cookie: the ticket is the credential, and
+    // it is only good for this endpoint and this published port.
+    const owner = tickets.redeem(ticket, id, port);
+    if (!owner) {
+      return { error: { status: 404, body: { error: "not_found", message: "endpoint not found" } } } as const;
+    }
+    workspaceId = owner;
+  } else {
+    try {
+      ({ workspaceId } = await options.authorize(request, id, port));
+    } catch {
+      // An endpoint that is not the caller's must look non-existent, not forbidden: the
+      // console shows one message for "gone" and another for "not yours".
+      return { error: { status: 404, body: { error: "not_found", message: "endpoint not found" } } } as const;
+    }
   }
   // The route lookup is also the SSRF guard: it maps the console's port to a host and port
   // the agent actually published, so the caller can never choose an address.
@@ -207,7 +291,7 @@ async function resolveTarget(request: FastifyRequest, options: RuntimeProxyOptio
     // runtime yet, or the workload is stopped.
     return { error: { status: 409, body: { error: "runtime_unreachable", message: "the runtime UI for this endpoint is not reachable yet" } } } as const;
   }
-  return { target: route, prefix: `/api/v1/endpoints/${id}/runtime/${port}` } as const;
+  return { target: route, prefix: ticket ? `${base}/t/${ticket}` : base, workspaceId, ticketed: Boolean(ticket) } as const;
 }
 
 /** Browser header for the authority: IPv6 literals need brackets in a URL. */
@@ -228,10 +312,27 @@ export function targetUrl(target: RuntimeRoute, request: FastifyRequest, prefix:
   return new URL(`${scheme}//${authority(target.host, target.port)}${base}${rest}${search}`);
 }
 
-async function bridgeHttp(request: FastifyRequest, reply: FastifyReply, options: RuntimeProxyOptions) {
-  const resolved = await resolveTarget(request, options);
+/**
+ * Whether a request is the frame's own document navigation, i.e. the one request a sandboxed
+ * runtime UI still makes with the console's session cookie attached.
+ */
+function wantsDocument(request: FastifyRequest) {
+  return String(request.headers.accept ?? "").includes("text/html");
+}
+
+async function bridgeHttp(request: FastifyRequest, reply: FastifyReply, options: RuntimeProxyOptions, tickets: TicketStore) {
+  const resolved = await resolveTarget(request, options, tickets);
   if ("error" in resolved) return reply.code(resolved.error.status).send(resolved.error.body);
   const { target, prefix } = resolved;
+  // The document navigation is the only request the browser sends with the console's session;
+  // hand the frame a ticket so the scripts, styles and `websockify` it asks for next are
+  // authenticated too — a sandboxed frame's own requests carry no cookie at all.
+  if (!resolved.ticketed && request.method === "GET" && wantsDocument(request)) {
+    const { id, port } = mountParams(request);
+    const token = tickets.mint(id, port, resolved.workspaceId);
+    const rest = upstreamPath(request, `/api/v1/endpoints/${id}/runtime/${port}`);
+    return reply.redirect(`${prefix}/t/${token}${rest}`, 307);
+  }
   const incoming = request.raw;
   const url = targetUrl(target, request, prefix);
 
@@ -377,12 +478,12 @@ export function frameDocument(html: string, prefix: string) {
 /** The policy every proxied document goes out with. */
 export const FRAME_CSP = "sandbox allow-scripts allow-forms allow-popups allow-modals allow-downloads allow-pointer-lock";
 
-async function bridgeWebSocket(socket: WebSocket, request: FastifyRequest, options: RuntimeProxyOptions) {
+async function bridgeWebSocket(socket: WebSocket, request: FastifyRequest, options: RuntimeProxyOptions, tickets: TicketStore) {
   if (!fromSameOrigin(request)) {
     socket.close(1008, "cross-origin runtime socket refused");
     return;
   }
-  const resolved = await resolveTarget(request, options);
+  const resolved = await resolveTarget(request, options, tickets);
   if ("error" in resolved) {
     socket.close(1011, resolved.error.body.error);
     return;
