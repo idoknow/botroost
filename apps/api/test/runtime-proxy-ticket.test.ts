@@ -149,18 +149,37 @@ describe("runtime mount ticket", () => {
     const { base, session } = await build(runtime.port);
     const mount = (await ticketFor(base, runtime.port)).replace(/\/vnc\.html$/, "");
 
-    const ticketed = await fetch(`${base}${mount}/app/ui.js`);
+    // `Origin: null` is what a sandboxed frame sends: the response has to be readable from an
+    // opaque origin, which is the only kind of caller that ever presents a ticket.
+    const ticketed = await fetch(`${base}${mount}/app/ui.js`, { headers: { origin: "null" } });
+    expect(ticketed.status).toBe(200);
     expect(ticketed.headers.get("access-control-allow-origin")).toBe("*");
     expect(ticketed.headers.get("cross-origin-resource-policy")).toBe("cross-origin");
 
     // Outside the ticket the console session is the credential: a wildcard there would let any
     // page read a response fetched with an operator's cookie.
     const plain = await fetch(`${base}/api/v1/endpoints/${endpointId}/runtime/${runtime.port}/app/ui.js`, {
-      headers: { "x-botroost-runtime-proxy": "1" },
+      headers: { "x-botroost-runtime-proxy": "1", origin: "null" },
     });
     expect(plain.status).toBe(200);
     expect(plain.headers.get("access-control-allow-origin")).toBeNull();
     expect(session.alive).toBe(true);
+  });
+
+  it("lets the frame read a refusal, so a 404 is not just a network error", async () => {
+    const runtime = await fakeRuntime();
+    servers.push(runtime.server);
+    const { base, session } = await build(runtime.port);
+    session.alive = false;
+
+    const response = await fetch(`${base}/api/v1/endpoints/${endpointId}/runtime/${runtime.port}/t/${"0".repeat(32)}/app/ui.js`, {
+      headers: { origin: "null" },
+    });
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get("access-control-allow-origin")).toBe("*");
+    expect(await response.json()).toEqual({ error: "not_found", message: "endpoint not found" });
+    expect(runtime.seen).toHaveLength(0);
   });
 
   it("answers the frame's CORS preflight itself, which the runtime could not", async () => {
@@ -172,7 +191,11 @@ describe("runtime mount ticket", () => {
 
     const response = await fetch(`${base}${mount}/api/login`, {
       method: "OPTIONS",
-      headers: { "access-control-request-method": "POST", "access-control-request-headers": "content-type" },
+      headers: {
+        origin: "null",
+        "access-control-request-method": "POST",
+        "access-control-request-headers": "content-type",
+      },
     });
 
     expect(response.status).toBe(204);
