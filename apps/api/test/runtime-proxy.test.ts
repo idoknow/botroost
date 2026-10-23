@@ -2,7 +2,7 @@ import Fastify from "fastify";
 import WebSocket, { WebSocketServer } from "ws";
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
-import { registerRuntimeProxy, rewriteAbsolutePaths, SAME_ORIGIN_HEADER } from "../src/runtime-proxy.js";
+import { registerRuntimeProxy, rewriteCssAbsolutePaths, rewriteHtmlAbsolutePaths, SAME_ORIGIN_HEADER } from "../src/runtime-proxy.js";
 
 /** A stand-in for the runtime UI inside the pod: records what the proxy sends it. */
 async function fakeRuntime(handler?: (url: string, res: import("node:http").ServerResponse) => void) {
@@ -139,14 +139,35 @@ describe("runtime proxy", () => {
   });
 });
 
-describe("rewriteAbsolutePaths", () => {
+describe("rewriteHtmlAbsolutePaths", () => {
   it("leaves protocol-relative and absolute URLs alone", () => {
     const body = 'src="//cdn.example.com/a.js" href="http://x/y" src="/app.js"';
-    expect(rewriteAbsolutePaths(body, "/p")).toBe('src="//cdn.example.com/a.js" href="http://x/y" src="/p/app.js"');
+    expect(rewriteHtmlAbsolutePaths(body, "/p")).toBe('src="//cdn.example.com/a.js" href="http://x/y" src="/p/app.js"');
   });
 
-  it("rewrites single quotes, parens and nested paths", () => {
-    expect(rewriteAbsolutePaths("url('/a/b.css') fetch(\"/api/x\")", "/p")).toBe("url('/p/a/b.css') fetch(\"/p/api/x\")");
+  it("rewrites absolute attribute values in either quote style", () => {
+    const body = "<link href='/a/b.css'><form action=\"/api/x\"><img data-x=\"/no\">";
+    expect(rewriteHtmlAbsolutePaths(body, "/p")).toBe("<link href='/p/a/b.css'><form action=\"/p/api/x\"><img data-x=\"/no\">");
+  });
+
+  it("never touches inline script bodies, where / starts a regex or a division", () => {
+    const body = '<script>const m = href.match(/[?&]logging=([a-z]*)/); const r = a / b;</script><script src="/app/ui.js"></script>';
+    expect(rewriteHtmlAbsolutePaths(body, "/p")).toBe('<script>const m = href.match(/[?&]logging=([a-z]*)/); const r = a / b;</script><script src="/p/app/ui.js"></script>');
+  });
+});
+
+describe("rewriteCssAbsolutePaths", () => {
+  it("rewrites absolute url() and @import, leaving relative ones alone", () => {
+    const body = "a{background:url(/img/x.svg)} b{background:url('../y.png')} @import \"/base.css\";";
+    expect(rewriteCssAbsolutePaths(body, "/p")).toBe("a{background:url(/p/img/x.svg)} b{background:url('../y.png')} @import \"/p/base.css\";");
+  });
+});
+
+describe("script bodies", () => {
+  it("leaves a bundle untouched, regex literals and all", () => {
+    const bundle = 'export const p = d => d.match(/[?&]logging=([A-Za-z0-9._-]*)/);\nconst r = a / b;\n';
+    expect(rewriteHtmlAbsolutePaths(bundle, "/p")).toBe(bundle);
+    expect(rewriteCssAbsolutePaths(bundle, "/p")).toBe(bundle);
   });
 });
 

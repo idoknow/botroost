@@ -5,8 +5,15 @@ import { request as httpsRequest } from "node:https";
 import websocket from "@fastify/websocket";
 import WebSocket from "ws";
 
-/** Body types whose absolute paths have to be rewritten for the sub-path mount. */
-const REWRITABLE = /^(?:text\/html|text\/css|application\/javascript|text\/javascript|application\/x-javascript)/;
+/**
+ * Body types whose absolute paths may need rewriting for the sub-path mount.
+ *
+ * Scripts are deliberately absent: a runtime bundle is executed as written, and rewriting it
+ * as text corrupts every regex literal and division expression that happens to follow a quote
+ * or bracket (`match(/[?&]logging=/` became `match(/<ticket>/[?&]logging=/` once). Bundles use
+ * relative specifiers and resolve them against the document's `<base>` instead.
+ */
+const REWRITABLE = /^(?:text\/html|text\/css)/;
 /** Bodies that may embed absolute paths but must never be rewritten: JSON is an API payload. */
 const STRUCTURED = /^(?:application\/json|[^;]*\+json)/;
 
@@ -336,6 +343,22 @@ async function bridgeHttp(request: FastifyRequest, reply: FastifyReply, options:
   const incoming = request.raw;
   const url = targetUrl(target, request, prefix);
 
+  // A preflight from the sandboxed frame is a cross-origin request the runtime itself never
+  // sees: it has no CORS answer of its own, so a `fetch(..., {headers: {"content-type":
+  // "application/json"}})` would die before it was ever sent upstream. Answer it here instead.
+  if (resolved.ticketed && request.method === "OPTIONS" && incoming.headers["access-control-request-method"]) {
+    return reply
+      .code(204)
+      .headers({
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS",
+        "access-control-allow-headers": String(incoming.headers["access-control-request-headers"] ?? "content-type"),
+        "access-control-max-age": "600",
+        "cross-origin-resource-policy": "cross-origin",
+      })
+      .send();
+  }
+
   reply.hijack();
   const response = reply.raw;
   const headers: Record<string, string | string[] | undefined> = {};
@@ -364,7 +387,7 @@ async function bridgeHttp(request: FastifyRequest, reply: FastifyReply, options:
       headers: headers as Record<string, string | string[]>,
       timeout: options.timeoutMs ?? UPSTREAM_TIMEOUT_MS,
     },
-    result => { void pipeResponse(result, response, prefix, target); },
+    result => { void pipeResponse(result, response, prefix, target, resolved.ticketed); },
   );
   upstream.on("timeout", () => {
     upstream.destroy(new Error("runtime timed out"));
@@ -392,12 +415,21 @@ function cookiesFor(request: FastifyRequest) {
   return runtime.length ? runtime.map(([name, value]) => `${name}=${value}`).join("; ") : null;
 }
 
-async function pipeResponse(upstream: IncomingMessage, response: ServerResponse, prefix: string, target: RuntimeRoute) {
+async function pipeResponse(upstream: IncomingMessage, response: ServerResponse, prefix: string, target: RuntimeRoute, ticketed: boolean) {
   const status = upstream.statusCode ?? 502;
   const headers: Record<string, string | string[]> = {};
   for (const [name, value] of Object.entries(upstream.headers)) {
     if (value === undefined || DROPPED_HEADERS.has(name)) continue;
     headers[name] = value as string | string[];
+  }
+  if (ticketed) {
+    // A sandboxed frame has an opaque origin, so even its own `/app/ui.js` is a cross-origin
+    // request: ES modules are fetched in CORS mode and stay unexecuted without this header
+    // (the frame just hangs on the loading spinner). `*` is safe here — the ticket in the path
+    // is the credential, and the frame's requests are made in `anonymous` credentials mode, so
+    // no cookie travels with them and there is nothing for a wildcard to leak.
+    headers["access-control-allow-origin"] = "*";
+    headers["cross-origin-resource-policy"] = "cross-origin";
   }
   const location = upstream.headers.location;
   if (location) headers.location = rewriteLocation(location, prefix, target);
@@ -422,7 +454,9 @@ async function pipeResponse(upstream: IncomingMessage, response: ServerResponse,
   for await (const chunk of upstream) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   const body = Buffer.concat(chunks).toString("utf8");
   const isDocument = /^text\/html/.test(type);
-  const piped = isDocument ? frameDocument(rewriteAbsolutePaths(body, prefix), prefix) : rewriteAbsolutePaths(body, prefix);
+  const piped = isDocument
+    ? frameDocument(rewriteHtmlAbsolutePaths(body, prefix), prefix)
+    : rewriteCssAbsolutePaths(body, prefix);
   if (isDocument) headers["content-security-policy"] = FRAME_CSP;
   headers["content-length"] = String(Buffer.byteLength(piped));
   response.writeHead(status, headers);
@@ -443,15 +477,29 @@ export function rewriteLocation(location: string, prefix: string, target: Runtim
 }
 
 /**
- * Keeps a runtime's own absolute paths inside the console mount.
+ * Keeps a runtime's own absolute paths inside the console mount — markup only.
  *
- * The runtime UIs are built to be served from `/`, so their markup and bundles reference
- * `/assets/...`, `/vnc.html`, `/websockify`. Mounted under a prefix those requests would hit
- * the console instead, so `"/…` becomes `"<prefix>/…` (same for `'/…` and `(/…`). Protocol
- * relative `//host` and absolute `http://` URLs are left alone.
+ * Runtime UIs are built to be served from `/`, so their markup may reference `/assets/...`,
+ * `/vnc.html`, `/websockify`. Mounted under a prefix those requests would hit the console, so
+ * an attribute value that starts with `/` gains the prefix. Only attribute values are touched,
+ * so inline script and style bodies (where `/` also begins a regex or a division) survive
+ * byte for byte. Protocol-relative `//host` and absolute `http://` URLs are left alone.
  */
-export function rewriteAbsolutePaths(body: string, prefix: string) {
-  return body.replace(/(["'(])\/(?![/\\])/g, (_match, quote: string) => `${quote}${prefix}/`);
+export function rewriteHtmlAbsolutePaths(body: string, prefix: string) {
+  return body.replace(
+    /\b(src|href|action|poster|formaction)\s*=\s*(["'])\/(?![/\\])/gi,
+    (_match, attribute: string, quote: string) => `${attribute}=${quote}${prefix}/`,
+  );
+}
+
+/**
+ * Same idea for stylesheets: `url(/…)` and `@import "/…"` resolve against the sheet's own
+ * location, so relative ones already land inside the mount and only absolute ones need help.
+ */
+export function rewriteCssAbsolutePaths(body: string, prefix: string) {
+  return body
+    .replace(/url\(\s*(["']?)\/(?![/\\])/gi, (_match, quote: string) => `url(${quote}${prefix}/`)
+    .replace(/@import\s+(["'])\/(?![/\\])/gi, (_match, quote: string) => `@import ${quote}${prefix}/`);
 }
 
 /**
