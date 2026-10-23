@@ -12,9 +12,11 @@ import {
   isTransientTransportError,
   type AgentCommandTransport,
 } from "../src/index.js";
+import { SnowLumaRuntime } from "../src/snowluma-runtime.js";
 
 class MemoryTransport implements AgentCommandTransport {
   heartbeats = 0;
+  heartbeatPayloads: unknown[][] = [];
   heartbeatFailure?:{at:number;error:Error};
   receipts: string[] = [];
   progresses: unknown[] = [];
@@ -22,8 +24,9 @@ class MemoryTransport implements AgentCommandTransport {
   resultFailure?:Error;
   results: unknown[] = [];
   constructor(public command: Awaited<ReturnType<AgentCommandTransport["claim"]>>) {}
-  async heartbeat() {
+  async heartbeat(runtimes: unknown[] = []) {
     this.heartbeats++;
+    this.heartbeatPayloads.push(runtimes);
     if(this.heartbeatFailure?.at===this.heartbeats)throw this.heartbeatFailure.error;
     return { connectionEpoch: 1 };
   }
@@ -100,6 +103,40 @@ describe("durable fake agent", () => {
     const transport=new MemoryTransport(command);
     const agent=await DurableFakeAgent.open({journalPath:join(dir,"journal"),runtime:napcat,runtimeFactory:factory,transport});
     try{await agent.pollOnce();expect(factory).not.toHaveBeenCalled();expect(napcatApply).toHaveBeenCalled();expect(transport.results[0]).toMatchObject({outcome:"succeeded"})}finally{await agent.close()}
+  });
+  it("warms the providers a restart dropped so their endpoints keep reporting",async()=>{
+    const dir=await mkdtemp(join(tmpdir(),"agent-warm-providers-"));
+    const napcat=new FakeRuntime();
+    const snowluma=new SnowLumaRuntime({
+      docker:{inspect:async()=>null} as never,
+      stateDirectory:join(dir,"snowluma"),
+      storage:{read:async()=>null,write:async()=>undefined} as never,
+    });
+    vi.spyOn(snowluma,"observations").mockResolvedValue([{
+      endpointId:"endpoint-snow",generation:2,runtime:"ready",provider:"available",protocol:"disconnected",convergence:"converged",
+    }]);
+    const factory=vi.fn(async(provider:string)=>provider==="snowluma"?snowluma:null);
+    const transport=new MemoryTransport(null);
+    const agent=await DurableFakeAgent.open({journalPath:join(dir,"journal"),runtime:napcat,runtimeFactory:factory,defaultProvider:"napcat",transport});
+    try{
+      await agent.warm(["napcat","snowluma"]);
+      await agent.warm(["napcat","snowluma"]);
+      expect(factory).toHaveBeenCalledTimes(1);
+      await agent.pollOnce();
+      expect(JSON.stringify(transport.heartbeatPayloads.at(-1))).toContain("endpoint-snow");
+    }finally{await agent.close()}
+  });
+  it("keeps starting when a provider cannot be warmed",async()=>{
+    const quiet=vi.spyOn(console,"error").mockImplementation(()=>{});
+    const dir=await mkdtemp(join(tmpdir(),"agent-warm-failure-"));
+    const factory=vi.fn(async(provider:string)=>{if(provider==="snowluma")throw new Error("docker backend down");return null;});
+    const transport=new MemoryTransport(null);
+    const agent=await DurableFakeAgent.open({journalPath:join(dir,"journal"),runtime:new FakeRuntime(),runtimeFactory:factory,transport});
+    try{
+      await expect(agent.warm(["napcat","snowluma","llbot"])).resolves.toBeUndefined();
+      expect(factory).toHaveBeenCalledWith("snowluma");
+      expect(factory).toHaveBeenCalledWith("llbot");
+    }finally{await agent.close();quiet.mockRestore()}
   });
   it("redacts process invocation secrets from persisted terminal failures",async()=>{
     const dir=await mkdtemp(join(tmpdir(),"agent-failure-redaction-")),runtime=new FakeRuntime();

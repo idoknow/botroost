@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { cpus, totalmem } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -1086,6 +1086,9 @@ export class DurableFakeAgent {
   private async runtimeFor(command: RuntimeCommand): Promise<AgentRuntime> {
     const raw = command.metadata?.provider;
     const provider = typeof raw === "string" && (knownProviders as readonly string[]).includes(raw) ? raw : this.defaultProvider;
+    return this.runtimeByProvider(provider);
+  }
+  private async runtimeByProvider(provider: string): Promise<AgentRuntime> {
     const cached = this.runtimes.get(provider);
     if (cached) return cached;
     if (!this.runtimeFactory) {
@@ -1097,6 +1100,19 @@ export class DurableFakeAgent {
     if (!created) throw new Error(`agent runtime for provider ${provider} is not available`);
     this.runtimes.set(provider, created);
     return created;
+  }
+  /** Commands used to be the only thing that created a runtime, so a restart silently dropped
+   *  every provider except the prewarmed default one: their endpoints were already at the desired
+   *  generation, the control plane therefore sent nothing, and `collectObservations` never saw
+   *  them again (the panel then renders stale telemetry, e.g. a login guide that predates the
+   *  restart). Warming the providers this node has already handled puts them back in the heartbeat;
+   *  each runtime rebuilds its endpoint list from the state it persisted on the node. */
+  async warm(providers: readonly string[]): Promise<void> {
+    for (const provider of providers) {
+      if (provider === this.defaultProvider || !(knownProviders as readonly string[]).includes(provider)) continue;
+      try { await this.runtimeByProvider(provider); }
+      catch (error) { console.error(`runtime "${provider}" could not be warmed, its endpoints keep reporting stale telemetry`, error); }
+    }
   }
   private async collectObservations(): Promise<NonNullable<Parameters<AgentCommandTransport["heartbeat"]>[0]>> {
     const active = [...this.runtimes.values()].filter(runtime => runtime instanceof NapCatRuntime || runtime instanceof SnowLumaRuntime || runtime instanceof LLBotRuntime);
@@ -1345,13 +1361,29 @@ const consoleNamespaces = () => (process.env.RUNTIME_CONSOLE_NAMESPACES ?? "")
     // for that provider fail with an explicit error while other providers keep working.
     console.error(`primary runtime "${provider}" is unavailable, commands for it will fail until the configuration is fixed`, error);
   }
-  return DurableFakeAgent.open({
+  const agent = await DurableFakeAgent.open({
     journalPath: join(nodeStateDir, "agent-journal.jsonl"),
     ...(primary ? { runtime: primary } : {}),
     runtimeFactory,
     defaultProvider: provider,
     transport: new HttpAgentTransport(controlPlaneUrl, credential.nodeSecret,signal?{signal}:{}),
   });
+  await agent.warm(await providersWithStateOnNode(nodeStateDir, provider));
+  return agent;
+}
+
+/** Providers whose state directory is still on this node's volume: they ran here before, so their
+ *  endpoints must keep reporting. Without this a restart leaves every non-default provider
+ *  unobserved — the control plane sends no command while an endpoint already sits at its desired
+ *  generation, and observations only cover runtimes instantiated in memory. */
+async function providersWithStateOnNode(nodeStateDir: string, primary: string): Promise<string[]> {
+  const present = [primary];
+  for (const provider of knownProviders) {
+    if (provider === "fake" || provider === primary) continue;
+    try { await access(join(nodeStateDir, provider), constants.F_OK); present.push(provider); }
+    catch { /* provider never ran on this node */ }
+  }
+  return present;
 }
 
 AgentHeartbeatRequestSchema.parse({
