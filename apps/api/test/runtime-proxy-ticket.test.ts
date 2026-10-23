@@ -143,6 +143,88 @@ describe("runtime mount ticket", () => {
     expect(runtime.seen.at(-1)?.url).toBe("/api/login");
   });
 
+  it("hands the sandboxed frame CORS headers, without which its ES modules never execute", async () => {
+    const runtime = await fakeRuntime();
+    servers.push(runtime.server);
+    const { base, session } = await build(runtime.port);
+    const mount = (await ticketFor(base, runtime.port)).replace(/\/vnc\.html$/, "");
+
+    // `Origin: null` is what a sandboxed frame sends: the response has to be readable from an
+    // opaque origin, which is the only kind of caller that ever presents a ticket.
+    const ticketed = await fetch(`${base}${mount}/app/ui.js`, { headers: { origin: "null" } });
+    expect(ticketed.status).toBe(200);
+    expect(ticketed.headers.get("access-control-allow-origin")).toBe("*");
+    expect(ticketed.headers.get("cross-origin-resource-policy")).toBe("cross-origin");
+
+    // Outside the ticket the console session is the credential: a wildcard there would let any
+    // page read a response fetched with an operator's cookie.
+    const plain = await fetch(`${base}/api/v1/endpoints/${endpointId}/runtime/${runtime.port}/app/ui.js`, {
+      headers: { "x-botroost-runtime-proxy": "1", origin: "null" },
+    });
+    expect(plain.status).toBe(200);
+    expect(plain.headers.get("access-control-allow-origin")).toBeNull();
+    expect(session.alive).toBe(true);
+  });
+
+  it("lets the frame read a refusal, so a 404 is not just a network error", async () => {
+    const runtime = await fakeRuntime();
+    servers.push(runtime.server);
+    const { base, session } = await build(runtime.port);
+    session.alive = false;
+
+    const response = await fetch(`${base}/api/v1/endpoints/${endpointId}/runtime/${runtime.port}/t/${"0".repeat(32)}/app/ui.js`, {
+      headers: { origin: "null" },
+    });
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get("access-control-allow-origin")).toBe("*");
+    expect(await response.json()).toEqual({ error: "not_found", message: "endpoint not found" });
+    expect(runtime.seen).toHaveLength(0);
+  });
+
+  it("answers the frame's CORS preflight itself, which the runtime could not", async () => {
+    const runtime = await fakeRuntime();
+    servers.push(runtime.server);
+    const { base, session } = await build(runtime.port);
+    const mount = (await ticketFor(base, runtime.port)).replace(/\/vnc\.html$/, "");
+    session.alive = false;
+
+    const response = await fetch(`${base}${mount}/api/login`, {
+      method: "OPTIONS",
+      headers: {
+        origin: "null",
+        "access-control-request-method": "POST",
+        "access-control-request-headers": "content-type",
+      },
+    });
+
+    expect(response.status).toBe(204);
+    expect(response.headers.get("access-control-allow-origin")).toBe("*");
+    expect(response.headers.get("access-control-allow-methods")).toContain("POST");
+    expect(response.headers.get("access-control-allow-headers")).toBe("content-type");
+    expect(runtime.seen).toHaveLength(0);
+  });
+
+  it("forwards a runtime bundle byte for byte", async () => {
+    const bundle = 'export const p = d => d.match(/[?&]logging=([A-Za-z0-9._-]*)/);\nconst r = a / b;\n';
+    const server: Server = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "text/javascript" });
+      response.end(bundle);
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    servers.push(server);
+    const address = server.address();
+    const runtimePort = typeof address === "object" && address ? address.port : 0;
+    const { base, session } = await build(runtimePort);
+    const mount = (await ticketFor(base, runtimePort)).replace(/\/vnc\.html$/, "");
+    session.alive = false;
+
+    const response = await fetch(`${base}${mount}/app/webutil.js`);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(bundle);
+  });
+
   it("accepts noVNC's websockify inside the ticketed mount without a cookie", async () => {
     const runtime = await fakeRuntime();
     servers.push(runtime.server);

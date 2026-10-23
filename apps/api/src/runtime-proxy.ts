@@ -5,10 +5,17 @@ import { request as httpsRequest } from "node:https";
 import websocket from "@fastify/websocket";
 import WebSocket from "ws";
 
-/** Body types whose absolute paths have to be rewritten for the sub-path mount. */
-const REWRITABLE = /^(?:text\/html|text\/css|application\/javascript|text\/javascript|application\/x-javascript)/;
+/**
+ * Body types whose absolute paths may need rewriting for the sub-path mount.
+ *
+ * Scripts are deliberately absent: a runtime bundle is executed as written, and rewriting it
+ * as text corrupts every regex literal and division expression that happens to follow a quote
+ * or bracket (`match(/[?&]logging=/` became `match(/<ticket>/[?&]logging=/` once). Bundles use
+ * relative specifiers and resolve them against the document's `<base>` instead.
+ */
+const REWRITABLE = /^(?:text\/html|text\/css)/i;
 /** Bodies that may embed absolute paths but must never be rewritten: JSON is an API payload. */
-const STRUCTURED = /^(?:application\/json|[^;]*\+json)/;
+const STRUCTURED = /^(?:application\/json|[^;]*\+json)/i;
 
 /** Methods that only read. Everything else has to prove it came from the console. */
 const SAFE = new Set(["GET", "HEAD", "OPTIONS"]);
@@ -25,6 +32,27 @@ const DROPPED_HEADERS = new Set([
   "cross-origin-opener-policy", "cross-origin-embedder-policy", "cross-origin-resource-policy",
   "permissions-policy", "strict-transport-security",
 ]);
+
+/**
+ * CORS and embedding headers a runtime ships for its own origin. Reaching the console's origin
+ * they would widen or narrow the frame's policy behind the proxy's back, so they are dropped and
+ * re-derived: only a ticketed response carries `FRAME_CORS`.
+ */
+const UPSTREAM_CORS = /^(?:access-control-|cross-origin-(?:resource|embedder|opener)-policy$)/;
+
+/**
+ * Headers a sandboxed frame needs on the requests it makes for its own assets.
+ *
+ * Such a frame has an opaque origin, so even its own `/app/ui.js` is a cross-origin request and
+ * an ES module stays unexecuted without `Access-Control-Allow-Origin` (the UI just hangs on its
+ * loading spinner, with nothing in the console). `*` is safe here and only here: the ticket in
+ * the path is the credential, and the frame's requests use `anonymous` credentials mode, so no
+ * cookie travels with them and there is nothing for a wildcard to leak.
+ */
+const FRAME_CORS: Record<string, string> = {
+  "access-control-allow-origin": "*",
+  "cross-origin-resource-policy": "cross-origin",
+};
 
 export interface RuntimeRoute {
   /** Host the API dials, e.g. `10.43.12.7` or `snowluma-x.runtime.svc`. */
@@ -173,6 +201,17 @@ function upstreamPath(request: FastifyRequest, prefix: string) {
   return rest.startsWith("/") ? rest : `/${rest}`;
 }
 
+/** The mount prefix for this request, before any ticket is known. */
+function mountBase(request: FastifyRequest) {
+  const { id, port } = mountParams(request);
+  return `/api/v1/endpoints/${id}/runtime/${port}`;
+}
+
+/** The ticket this request carries in its path, if any — readable before the mount is resolved. */
+function mountTicket(request: FastifyRequest) {
+  return TICKET_PATH.exec(upstreamPath(request, mountBase(request)))?.[1] ?? null;
+}
+
 /**
  * The console's own marker on a mutation.
  *
@@ -251,8 +290,8 @@ async function resolveTarget(request: FastifyRequest, options: RuntimeProxyOptio
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     return { error: { status: 400, body: { error: "bad_request", message: "invalid runtime port" } } } as const;
   }
-  const base = `/api/v1/endpoints/${id}/runtime/${port}`;
-  const ticket = TICKET_PATH.exec(upstreamPath(request, base))?.[1] ?? null;
+  const base = mountBase(request);
+  const ticket = mountTicket(request);
   // A ticket is the console's own capability for this mount, so it covers what the frame does
   // with it — including the form posts a WebUI login needs from an opaque origin.
   if (!ticket && !fromConsole(request)) {
@@ -321,8 +360,15 @@ function wantsDocument(request: FastifyRequest) {
 }
 
 async function bridgeHttp(request: FastifyRequest, reply: FastifyReply, options: RuntimeProxyOptions, tickets: TicketStore) {
+  // A ticketed request comes from a sandboxed frame, so even a refusal has to be readable by it:
+  // without ACAO the frame only sees a generic network error instead of the 404/409/503 behind it.
+  const ticketedRequest = Boolean(mountTicket(request));
   const resolved = await resolveTarget(request, options, tickets);
-  if ("error" in resolved) return reply.code(resolved.error.status).send(resolved.error.body);
+  if ("error" in resolved) {
+    const refusal = reply.code(resolved.error.status);
+    if (ticketedRequest) refusal.headers(FRAME_CORS);
+    return refusal.send(resolved.error.body);
+  }
   const { target, prefix } = resolved;
   // The document navigation is the only request the browser sends with the console's session;
   // hand the frame a ticket so the scripts, styles and `websockify` it asks for next are
@@ -335,6 +381,21 @@ async function bridgeHttp(request: FastifyRequest, reply: FastifyReply, options:
   }
   const incoming = request.raw;
   const url = targetUrl(target, request, prefix);
+
+  // A preflight from the sandboxed frame is a cross-origin request the runtime itself never
+  // sees: it has no CORS answer of its own, so a `fetch(..., {headers: {"content-type":
+  // "application/json"}})` would die before it was ever sent upstream. Answer it here instead.
+  if (resolved.ticketed && request.method === "OPTIONS" && incoming.headers["access-control-request-method"]) {
+    return reply
+      .code(204)
+      .headers({
+        ...FRAME_CORS,
+        "access-control-allow-methods": "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS",
+        "access-control-allow-headers": String(incoming.headers["access-control-request-headers"] ?? "content-type"),
+        "access-control-max-age": "600",
+      })
+      .send();
+  }
 
   reply.hijack();
   const response = reply.raw;
@@ -364,7 +425,7 @@ async function bridgeHttp(request: FastifyRequest, reply: FastifyReply, options:
       headers: headers as Record<string, string | string[]>,
       timeout: options.timeoutMs ?? UPSTREAM_TIMEOUT_MS,
     },
-    result => { void pipeResponse(result, response, prefix, target); },
+    result => { void pipeResponse(result, response, prefix, target, resolved.ticketed); },
   );
   upstream.on("timeout", () => {
     upstream.destroy(new Error("runtime timed out"));
@@ -392,13 +453,16 @@ function cookiesFor(request: FastifyRequest) {
   return runtime.length ? runtime.map(([name, value]) => `${name}=${value}`).join("; ") : null;
 }
 
-async function pipeResponse(upstream: IncomingMessage, response: ServerResponse, prefix: string, target: RuntimeRoute) {
+async function pipeResponse(upstream: IncomingMessage, response: ServerResponse, prefix: string, target: RuntimeRoute, ticketed: boolean) {
   const status = upstream.statusCode ?? 502;
   const headers: Record<string, string | string[]> = {};
   for (const [name, value] of Object.entries(upstream.headers)) {
-    if (value === undefined || DROPPED_HEADERS.has(name)) continue;
+    // A runtime's own CORS/embedding policy is meaningless on the console's origin, and on a
+    // non-ticketed response a wildcard would let any page read what an operator's cookie fetched.
+    if (value === undefined || DROPPED_HEADERS.has(name) || UPSTREAM_CORS.test(name)) continue;
     headers[name] = value as string | string[];
   }
+  if (ticketed) Object.assign(headers, FRAME_CORS);
   const location = upstream.headers.location;
   if (location) headers.location = rewriteLocation(location, prefix, target);
   const cookies = upstream.headers["set-cookie"];
@@ -411,7 +475,9 @@ async function pipeResponse(upstream: IncomingMessage, response: ServerResponse,
       .concat(`; Path=${prefix}; HttpOnly; SameSite=Lax`));
   }
 
-  const type = String(upstream.headers["content-type"] ?? "");
+  // Media types are case-insensitive: a runtime that answers `Text/HTML` must still be
+  // sandboxed and rewritten, and treating it as opaque would render it unsandboxed.
+  const type = String(upstream.headers["content-type"] ?? "").toLowerCase();
   const encoded = Boolean(upstream.headers["content-encoding"]);
   if (encoded || STRUCTURED.test(type) || !REWRITABLE.test(type)) {
     response.writeHead(status, headers);
@@ -422,7 +488,9 @@ async function pipeResponse(upstream: IncomingMessage, response: ServerResponse,
   for await (const chunk of upstream) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   const body = Buffer.concat(chunks).toString("utf8");
   const isDocument = /^text\/html/.test(type);
-  const piped = isDocument ? frameDocument(rewriteAbsolutePaths(body, prefix), prefix) : rewriteAbsolutePaths(body, prefix);
+  const piped = isDocument
+    ? frameDocument(rewriteHtmlAbsolutePaths(body, prefix), prefix)
+    : rewriteCssAbsolutePaths(body, prefix);
   if (isDocument) headers["content-security-policy"] = FRAME_CSP;
   headers["content-length"] = String(Buffer.byteLength(piped));
   response.writeHead(status, headers);
@@ -443,15 +511,153 @@ export function rewriteLocation(location: string, prefix: string, target: Runtim
 }
 
 /**
- * Keeps a runtime's own absolute paths inside the console mount.
+ * Keeps a runtime's own absolute paths inside the console mount — markup only.
  *
- * The runtime UIs are built to be served from `/`, so their markup and bundles reference
- * `/assets/...`, `/vnc.html`, `/websockify`. Mounted under a prefix those requests would hit
- * the console instead, so `"/…` becomes `"<prefix>/…` (same for `'/…` and `(/…`). Protocol
- * relative `//host` and absolute `http://` URLs are left alone.
+ * Runtime UIs are built to be served from `/`, so their markup may reference `/assets/...`,
+ * `/vnc.html`, `/websockify`. Mounted under a prefix, every URL starting with a single `/`
+ * gains the prefix.
+ *
+ * The document is scanned as markup rather than substituted as text: attribute names and
+ * quoting are honoured (unquoted values and `srcset` candidate lists included), `<script>`
+ * bodies are copied byte for byte — `/` starts a regex or a division there, which is exactly
+ * how this proxy once corrupted noVNC's `webutil.js` — and CSS in `<style>` blocks or `style`
+ * attributes is rewritten as CSS. Protocol-relative `//host` and `http://` URLs are left alone.
  */
-export function rewriteAbsolutePaths(body: string, prefix: string) {
-  return body.replace(/(["'(])\/(?![/\\])/g, (_match, quote: string) => `${quote}${prefix}/`);
+export function rewriteHtmlAbsolutePaths(body: string, prefix: string) {
+  const edits: Edit[] = [];
+  const lower = body.toLowerCase();
+  let index = 0;
+  while (index < body.length) {
+    const open = body.indexOf("<", index);
+    if (open === -1) break;
+    if (body.startsWith("<!--", open)) {
+      const close = body.indexOf("-->", open + 4);
+      index = close === -1 ? body.length : close + 3;
+      continue;
+    }
+    const next = body[open + 1] ?? "";
+    // A bare `<` in text (or the tail of a truncated document) opens nothing.
+    if (!/[a-zA-Z]/.test(next) && next !== "!") { index = open + 1; continue; }
+    if (next === "!" || next === "?") {
+      const close = body.indexOf(">", open + 1);
+      index = close === -1 ? body.length : close + 1;
+      continue;
+    }
+    const tag = parseTag(body, open);
+    for (const attribute of tag.attributes) {
+      if (attribute.value === null) continue;
+      const rewritten = rewriteAttribute(attribute, prefix);
+      if (rewritten !== null && rewritten !== attribute.value) {
+        edits.push({ start: attribute.start, end: attribute.end, text: rewritten });
+      }
+    }
+    index = tag.end;
+    if (!tag.selfClosing && RAW_TEXT.test(tag.name)) {
+      const close = lower.indexOf(`</${tag.name}`, index);
+      const stop = close === -1 ? body.length : close;
+      if (tag.name === "style") {
+        const css = body.slice(index, stop);
+        const rewritten = rewriteCssAbsolutePaths(css, prefix);
+        if (rewritten !== css) edits.push({ start: index, end: stop, text: rewritten });
+      }
+      index = stop;
+    }
+  }
+  return applyEdits(body, edits);
+}
+
+interface ParsedAttribute { name: string; value: string | null; start: number; end: number }
+interface ParsedTag { name: string; attributes: ParsedAttribute[]; end: number; selfClosing: boolean }
+interface Edit { start: number; end: number; text: string }
+
+/** Elements whose content is text, not markup: `<` inside them is literal. */
+const RAW_TEXT = /^(?:script|style|textarea|title|xmp|plaintext|noscript|noembed|noframes|iframe)$/;
+
+/** Attributes whose value is one URL. */
+const URL_ATTRIBUTES = new Set(["src", "href", "action", "poster", "formaction", "data", "background"]);
+
+/** Attributes whose value is a comma-separated list of `url [descriptor]` candidates. */
+const SRCSET_ATTRIBUTES = new Set(["srcset", "imagesrcset"]);
+
+/** Reads one start tag, recording where each value sits so it can be replaced in place. */
+function parseTag(html: string, open: number): ParsedTag {
+  let index = open + 1;
+  const nameStart = index;
+  while (index < html.length && !/[\s/>]/.test(html[index] ?? "")) index += 1;
+  const name = html.slice(nameStart, index).toLowerCase();
+  const attributes: ParsedAttribute[] = [];
+  let selfClosing = false;
+  while (index < html.length) {
+    while (index < html.length && /\s/.test(html[index] ?? "")) index += 1;
+    const char = html[index] ?? "";
+    if (!char) break;
+    if (char === ">") { index += 1; break; }
+    if (char === "/") {
+      selfClosing = html[index + 1] === ">";
+      index += selfClosing ? 2 : 1;
+      if (selfClosing) break;
+      continue;
+    }
+    const attributeStart = index;
+    while (index < html.length && !/[\s/>=]/.test(html[index] ?? "")) index += 1;
+    const attributeName = html.slice(attributeStart, index).toLowerCase();
+    while (index < html.length && /\s/.test(html[index] ?? "")) index += 1;
+    let value: string | null = null;
+    let start = index;
+    let end = index;
+    if (html[index] === "=") {
+      index += 1;
+      while (index < html.length && /\s/.test(html[index] ?? "")) index += 1;
+      const quote = html[index] ?? "";
+      if (quote === '"' || quote === "'") {
+        start = index + 1;
+        const close = html.indexOf(quote, start);
+        end = close === -1 ? html.length : close;
+        index = close === -1 ? html.length : close + 1;
+      } else {
+        start = index;
+        while (index < html.length && !/[\s>]/.test(html[index] ?? "")) index += 1;
+        end = index;
+      }
+      value = html.slice(start, end);
+    }
+    if (attributeName) attributes.push({ name: attributeName, value, start, end });
+  }
+  return { name, attributes, end: index, selfClosing };
+}
+
+function rewriteAttribute(attribute: ParsedAttribute, prefix: string): string | null {
+  const value = attribute.value;
+  if (value === null) return null;
+  if (URL_ATTRIBUTES.has(attribute.name)) {
+    return value.startsWith("/") && !value.startsWith("//") ? `${prefix}${value}` : value;
+  }
+  if (SRCSET_ATTRIBUTES.has(attribute.name)) {
+    // Only candidates that are themselves root-relative move; descriptors and data: URLs stay.
+    return value.replace(/(^|,)(\s*)(\/[^\s,]*)/g, (_match, separator: string, space: string, url: string) => `${separator}${space}${prefix}${url}`);
+  }
+  if (attribute.name === "style") return rewriteCssAbsolutePaths(value, prefix);
+  return null;
+}
+
+function applyEdits(body: string, edits: Edit[]) {
+  let out = "";
+  let cursor = 0;
+  for (const edit of edits) {
+    out += body.slice(cursor, edit.start) + edit.text;
+    cursor = edit.end;
+  }
+  return out + body.slice(cursor);
+}
+
+/**
+ * Same idea for stylesheets: `url(/…)` and `@import "/…"` resolve against the sheet's own
+ * location, so relative ones already land inside the mount and only absolute ones need help.
+ */
+export function rewriteCssAbsolutePaths(body: string, prefix: string) {
+  return body
+    .replace(/url\(\s*(["']?)\/(?![/\\])/gi, (_match, quote: string) => `url(${quote}${prefix}/`)
+    .replace(/@import\s+(["'])\/(?![/\\])/gi, (_match, quote: string) => `@import ${quote}${prefix}/`);
 }
 
 /**
