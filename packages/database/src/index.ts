@@ -36,10 +36,10 @@ const migrationBody=(sql:string)=>sql.replace(/^\s*BEGIN;\s*/i,"").replace(/\s*C
 const nodeStatus=(r:Record<string,unknown>)=>{if(!r.node_id)return"unassigned";const last=r.node_last_heartbeat_at?new Date(String(r.node_last_heartbeat_at)).getTime():0;return last&&Date.now()-last<=nodeFreshMs?"online":"offline"};
 const napcatImage="mlikiowa/napcat-docker@sha256:1336a777f9a4f1f8cb89fef42f7548deacd3645919a067a50df5b66b5e77390e";
 const napcatArtifact="artifact:napcat:mlikiowa.napcat-docker.sha256.1336a777f9a4f1f8cb89fef42f7548deacd3645919a067a50df5b66b5e77390e";
-// The image is pinned to the immutable content digest of motricseven7/snowluma:v1.14.22, and
+// The image is pinned to the immutable content digest of motricseven7/snowluma:v1.14.20, and
 // the approved artifact id derives from the same digest: a re-pointed mutable tag must not be
 // able to pass admission, and the two allowlist strings can never drift apart.
-const snowlumaDigest="f75698eeaa06a3aed6b42e88975fff6b0313a960f7e7093b2329455310fd6eee";
+const snowlumaDigest="72d9d31597df0741e84747282e979642405d1afb6c2f83b53add601bafdb4a99";
 const snowlumaImage=`motricseven7/snowluma@sha256:${snowlumaDigest}`;
 const snowlumaArtifact=`artifact:snowluma:motricseven7.snowluma.sha256.${snowlumaDigest}`;
 const llbotImage="linyuchen/llbot@sha256:6f10ce9c8848cc6a1157b4bda878d7485e25602b719448f3907de87f1bd30014";

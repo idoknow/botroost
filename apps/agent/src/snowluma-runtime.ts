@@ -29,7 +29,7 @@ type JsonObject = { [key: string]: JsonValue };
 // compromised publisher or registry account re-point the version at arbitrary code that still
 // passes assertAllowed, which can only compare strings. The artifact id derives from the same
 // digest, so the allowlisted image and the approved artifact can never drift apart.
-const SNOWLUMA_DIGEST = "f75698eeaa06a3aed6b42e88975fff6b0313a960f7e7093b2329455310fd6eee";
+const SNOWLUMA_DIGEST = "72d9d31597df0741e84747282e979642405d1afb6c2f83b53add601bafdb4a99";
 export const SNOWLUMA_IMAGE = `motricseven7/snowluma@sha256:${SNOWLUMA_DIGEST}`;
 export const SNOWLUMA_ARTIFACT = `artifact:snowluma:motricseven7.snowluma.sha256.${SNOWLUMA_DIGEST}`;
 const ONEBOT_HTTP_PORT = 3000;
