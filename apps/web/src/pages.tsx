@@ -35,7 +35,7 @@ type ProtocolTraffic={status:'ok'|'partial'|'unavailable';complete?:boolean;sour
 type NapCatStatus={qq:null|Record<string,unknown>;onebot:null|{status?:Record<string,unknown>;loginInfo?:Record<string,unknown>;version?:Record<string,unknown>;probes?:Record<string,OneBotProbe>;directory?:{friends:OneBotDirectoryCollection;groups:OneBotDirectoryCollection};config?:{websocketClients?:WsClient[];websocketServers?:WsServer[]}};traffic?:ProtocolTraffic;freshness?:TrafficFreshness};
 type LLBotLoginGuide={webuiPort?:number;webuiHost?:string};
 type LLBotStatus={qq:null|Record<string,unknown>;login:null|Record<string,unknown>;onebot:NapCatStatus['onebot'];traffic?:ProtocolTraffic|null;loginGuide?:null|LLBotLoginGuide;freshness?:TrafficFreshness};
-type SnowlumaLoginGuide={novncPort?:number;webuiPort?:number;webuiHost?:string;webuiUsername?:string;webuiPassword?:string};
+type SnowlumaLoginGuide={novncPort?:number;webuiPort?:number;webuiHost?:string;webuiUsername?:string;webuiPassword?:string;novncPassword?:string};
 type SnowlumaStatus={qq:null|Record<string,unknown>;login:null|Record<string,unknown>;onebot:NapCatStatus['onebot'];traffic?:ProtocolTraffic|null;loginGuide?:null|SnowlumaLoginGuide;freshness?:TrafficFreshness};
 const titleCase=(value:string)=>value.charAt(0).toUpperCase()+value.slice(1).replaceAll('-',' ');
 const eventTime=(value:string,locale:string)=>new Date(value).toLocaleTimeString(locale,{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
@@ -262,7 +262,10 @@ function SnowlumaLoginPanel({endpointId,guide}:{endpointId:string;guide?:Snowlum
   // Reach noVNC through the console: either the published port on the console host, or the
   // API's proxy when the runtime only has a ClusterIP. noVNC derives its websocket from the
   // page path, so it follows the proxy prefix without extra configuration.
-  const novncUrl=`${runtimeUiBase(endpointId,novncPort,Boolean(guide?.webuiHost))}/vnc.html?autoconnect=1&resize=scale&password=vncpasswd`;
+  // SnowLuma >= 1.14 generates a random VNC password per container and reports it through the
+  // login guide; older releases kept the historical "vncpasswd" default.
+  const novncPassword=guide?.novncPassword?.trim()||'vncpasswd';
+  const novncUrl=`${runtimeUiBase(endpointId,novncPort,Boolean(guide?.webuiHost))}/vnc.html?autoconnect=1&resize=scale&password=${encodeURIComponent(novncPassword)}`;
   // Lock page scrolling while the expanded view is open so the wheel/keyboard
   // only reaches the remote desktop, and close it with Escape.
   useEffect(()=>{
