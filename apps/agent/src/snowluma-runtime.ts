@@ -48,6 +48,9 @@ const SNOWLUMA_RELEASES = new Map<string, string>(
   ]),
 );
 const ONEBOT_HTTP_PORT = 3000;
+/** SnowLuma 1.14+ writes its live configuration here; the mounted volume at
+ *  /app/snowluma-data only carries the legacy layout. */
+const SNOWLUMA_LIVE_DATA_DIRECTORY = "/app/data";
 const NOVNC_CONTAINER_PORT = "6081";
 const WEBUI_CONTAINER_PORT = "5099";
 const endpointIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -459,20 +462,23 @@ export class SnowLumaRuntime {
     all[endpointId] = { password, updatedAt: new Date().toISOString() };
     await writeFile(this.webuiCredentialsPath(), `${JSON.stringify(all, null, 2)}\n`, { mode: 0o600 });
   }
+  /** SnowLuma >= 1.14 keeps its live configuration under /app/data instead of the mounted
+   *  /app/snowluma-data, so reads have to look at the live directory first and fall back to the
+   *  mount for the older releases. The live directory only exists inside the workload, which is
+   *  why it is listed for the pod backend alone. */
+  private configDirectories(endpointId: string): string[] {
+    const mountDirectory = this.containerMounts.config ?? this.hostEndpointDirectory(endpointId, "config");
+    const mounted = [join(mountDirectory, "config"), mountDirectory];
+    return this.kubernetes ? [...new Set([join(SNOWLUMA_LIVE_DATA_DIRECTORY, "config"), ...mounted])] : mounted;
+  }
   /** SnowLuma 1.14+ generates a random VNC password per container and keeps it in its data
    *  directory; the console has to hand that value to noVNC instead of the historical
    *  "vncpasswd" default, which only the older releases used. */
   private async novncPassword(endpointId: string): Promise<string | undefined> {
-    const configMount = this.containerMounts.config ?? this.hostEndpointDirectory(endpointId, "config");
-    const candidates = [
-      // SnowLuma >= 1.14 keeps its live configuration under /app/data.
-      "/app/data/config/vnc-password",
-      join(configMount, "config", "vnc-password"),
-    ];
     const storage = this.storage.for(this.containerName(endpointId));
-    for (const path of candidates) {
+    for (const directory of this.configDirectories(endpointId)) {
       try {
-        const value = (await storage.readFile(path)).trim();
+        const value = (await storage.readFile(join(directory, "vnc-password"))).trim();
         if (value) return value;
       } catch { /* absent in this release; try the next known location */ }
     }
@@ -492,15 +498,17 @@ export class SnowLumaRuntime {
     return undefined;
   }
   private async findOneBotConfig(endpointId: string): Promise<{ path: string; qq: string; config: JsonObject } | null> {
-    // The config directory is bind-mounted at /app/snowluma-data and SnowLuma keeps its
-    // files under a "config" subdirectory, so scan both locations.
-    const mountDirectory = this.containerMounts.config ?? this.hostEndpointDirectory(endpointId, "config");
-    for (const directory of [join(mountDirectory, "config"), mountDirectory]) {
-      for (const entry of await this.storage.for(this.containerName(endpointId)).readdir(directory)) {
+    // SnowLuma keeps its OneBot files in the configuration directory: /app/data/config on 1.14+,
+    // the bind-mounted /app/snowluma-data (with a "config" subdirectory) on older releases. The
+    // live copy wins — the mount still holds the pre-upgrade tokens, and reading those made every
+    // OneBot probe fail with 401 after a 1.14 endpoint logged in.
+    const storage = this.storage.for(this.containerName(endpointId));
+    for (const directory of this.configDirectories(endpointId)) {
+      for (const entry of await storage.readdir(directory)) {
         const match = /^onebot_(.+)\.json$/.exec(entry);
         if (!match?.[1]) continue;
         const path = join(directory, entry);
-        const config = asJsonObject(JSON.parse(await this.storage.for(this.containerName(endpointId)).readFile(path)) as JsonValue);
+        const config = asJsonObject(JSON.parse(await storage.readFile(path)) as JsonValue);
         return { path, qq: match[1], config };
       }
     }

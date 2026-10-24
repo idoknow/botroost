@@ -208,6 +208,7 @@ describe("SnowLuma runtime", () => {
       stateDirectory: await mkdtemp(join(tmpdir(), "snowluma-vnc-")),
       fetcher: oneBotFetcher(false),
       storage,
+      kubernetes: true,
       containerMounts: { qq: "/app/.config", config: "/app/snowluma-data" },
     });
     const result = await runtime.apply("effect-1", baseCommand);
@@ -221,6 +222,7 @@ describe("SnowLuma runtime", () => {
       stateDirectory: await mkdtemp(join(tmpdir(), "snowluma-vnc-legacy-")),
       fetcher: oneBotFetcher(false),
       storage: memoryStorage({ "/app/snowluma-data/config/vnc-password": "legacypass\n" }),
+      kubernetes: true,
       containerMounts: { qq: "/app/.config", config: "/app/snowluma-data" },
     });
     const legacyMetadata = (await legacy.apply("effect-1", baseCommand)).metadata as { loginGuide: { novncPassword?: string } };
@@ -231,11 +233,41 @@ describe("SnowLuma runtime", () => {
       stateDirectory: await mkdtemp(join(tmpdir(), "snowluma-vnc-missing-")),
       fetcher: oneBotFetcher(false),
       storage: memoryStorage({}),
+      kubernetes: true,
       containerMounts: { qq: "/app/.config", config: "/app/snowluma-data" },
     });
     const missingMetadata = (await missing.apply("effect-1", baseCommand)).metadata as { loginGuide: Record<string, unknown> };
     expect(missingMetadata.loginGuide.novncPassword).toBeUndefined();
     expect(missingMetadata.loginGuide.novncPort).toEqual(expect.any(Number));
+  });
+
+  it("probes OneBot with the live 1.14 token, not the stale copy on the mounted volume", async () => {
+    const docker = new RecordingDocker();
+    docker.inspect = async () => ownedContainer();
+    const authorizations: string[] = [];
+    const base = oneBotFetcher(true);
+    const fetcher: FetchLike = async (url, init) => {
+      if (String(url).endsWith("/get_status")) authorizations.push(new Headers(init?.headers).get("authorization") ?? "");
+      return base(url, init);
+    };
+    // After an upgrade the mount still holds the pre-1.14 onebot_<qq>.json with its old token;
+    // probing with that token returned 401 and the console never recognised the QQ login.
+    const runtime = new SnowLumaRuntime({
+      docker,
+      stateDirectory: await mkdtemp(join(tmpdir(), "snowluma-token-")),
+      fetcher,
+      storage: memoryStorage({
+        "/app/data/config/onebot_10001.json": JSON.stringify({ networks: { httpServers: [{ host: "0.0.0.0", port: 3000, accessToken: "live-token" }] } }),
+        "/app/snowluma-data/config/onebot_10001.json": JSON.stringify({ networks: { httpServers: [{ host: "0.0.0.0", port: 3000, accessToken: "stale-token" }] } }),
+      }),
+      kubernetes: true,
+      containerMounts: { qq: "/app/.config", config: "/app/snowluma-data" },
+    });
+    const result = await runtime.apply("effect-1", baseCommand);
+    const metadata = result.metadata as { qq: { online: boolean } };
+    expect(authorizations).toContain("Bearer live-token");
+    expect(authorizations).not.toContain("Bearer stale-token");
+    expect(metadata.qq.online).toBe(true);
   });
 
   it("reports a connected protocol with directory probes and log-derived traffic telemetry after login", async () => {
