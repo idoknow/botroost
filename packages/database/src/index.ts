@@ -36,8 +36,8 @@ const migrationBody=(sql:string)=>sql.replace(/^\s*BEGIN;\s*/i,"").replace(/\s*C
 const nodeStatus=(r:Record<string,unknown>)=>{if(!r.node_id)return"unassigned";const last=r.node_last_heartbeat_at?new Date(String(r.node_last_heartbeat_at)).getTime():0;return last&&Date.now()-last<=nodeFreshMs?"online":"offline"};
 const napcatImage="mlikiowa/napcat-docker@sha256:1336a777f9a4f1f8cb89fef42f7548deacd3645919a067a50df5b66b5e77390e";
 const napcatArtifact="artifact:napcat:mlikiowa.napcat-docker.sha256.1336a777f9a4f1f8cb89fef42f7548deacd3645919a067a50df5b66b5e77390e";
-const snowlumaImage="motricseven7/snowluma:v1.10.0";
-const snowlumaArtifact="artifact:snowluma:motricseven7.snowluma.v1.10.0";
+const snowlumaImage="motricseven7/snowluma:v1.14.22";
+const snowlumaArtifact="artifact:snowluma:motricseven7.snowluma.v1.14.22";
 const llbotImage="linyuchen/llbot@sha256:6f10ce9c8848cc6a1157b4bda878d7485e25602b719448f3907de87f1bd30014";
 const llbotArtifact="artifact:llbot:linyuchen.llbot.sha256.6f10ce9c8848cc6a1157b4bda878d7485e25602b719448f3907de87f1bd30014";
 // Per-provider size of a runtime workload. Requests equal limits, so a node must reserve the

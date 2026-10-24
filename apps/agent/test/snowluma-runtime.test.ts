@@ -82,7 +82,7 @@ const oneBotFetcher = (online: boolean): FetchLike => async url => {
     : action === "get_login_info"
       ? online ? { user_id: 10001, nickname: "tester" } : null
       : action === "get_version_info"
-        ? { app_name: "SnowLuma", app_version: "1.10.0" }
+        ? { app_name: "SnowLuma", app_version: "1.14.22" }
         : action === "get_friend_list"
           ? [{ user_id: 10001, nickname: "tester", remark: "self" }]
           : action === "get_group_list"

@@ -25,8 +25,8 @@ import type {
 type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
 type JsonObject = { [key: string]: JsonValue };
 
-export const SNOWLUMA_IMAGE = "motricseven7/snowluma:v1.10.0";
-export const SNOWLUMA_ARTIFACT = "artifact:snowluma:motricseven7.snowluma.v1.10.0";
+export const SNOWLUMA_IMAGE = "motricseven7/snowluma:v1.14.22";
+export const SNOWLUMA_ARTIFACT = "artifact:snowluma:motricseven7.snowluma.v1.14.22";
 const ONEBOT_HTTP_PORT = 3000;
 const NOVNC_CONTAINER_PORT = "6081";
 const WEBUI_CONTAINER_PORT = "5099";
