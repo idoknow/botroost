@@ -57,6 +57,10 @@ export const ClaimCommandRequestSchema = z.strictObject({
   /** New agents advertise command-level provider routing so the control plane can
    *  safely dispatch cross-provider endpoints; legacy agents omit this field. */
   providerRouting: z.boolean().optional(),
+  /** The SnowLuma artifact id this agent's allowlist accepts. The control plane holds
+   *  new-runtime dispatches until every connected agent reports the exact artifact, so a
+   *  rolling agent upgrade cannot turn operations into terminal allowlist rejections. */
+  snowlumaArtifact: z.string().min(1).max(300).optional(),
 });
 export const RuntimeCommandSchema = z.strictObject({
   commandId: id,

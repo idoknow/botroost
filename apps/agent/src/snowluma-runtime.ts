@@ -25,8 +25,13 @@ import type {
 type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
 type JsonObject = { [key: string]: JsonValue };
 
-export const SNOWLUMA_IMAGE = "motricseven7/snowluma:v1.10.0";
-export const SNOWLUMA_ARTIFACT = "artifact:snowluma:motricseven7.snowluma.v1.10.0";
+// The approved runtime is pinned to an immutable content digest: a mutable tag would let a
+// compromised publisher or registry account re-point the version at arbitrary code that still
+// passes assertAllowed, which can only compare strings. The artifact id derives from the same
+// digest, so the allowlisted image and the approved artifact can never drift apart.
+const SNOWLUMA_DIGEST = "f75698eeaa06a3aed6b42e88975fff6b0313a960f7e7093b2329455310fd6eee";
+export const SNOWLUMA_IMAGE = `motricseven7/snowluma@sha256:${SNOWLUMA_DIGEST}`;
+export const SNOWLUMA_ARTIFACT = `artifact:snowluma:motricseven7.snowluma.sha256.${SNOWLUMA_DIGEST}`;
 const ONEBOT_HTTP_PORT = 3000;
 const NOVNC_CONTAINER_PORT = "6081";
 const WEBUI_CONTAINER_PORT = "5099";
@@ -282,6 +287,13 @@ export class SnowLumaRuntime {
     const resourceDrift = existing?.resources && (existing.resources.cpuMillis !== desiredResources.cpuMillis || existing.resources.memoryMiB !== desiredResources.memoryMiB || existing.resources.memorySwapMiB !== desiredResources.memorySwapMiB);
     const proxyDrift = existing !== null && ((proxyEnvironment?.HTTP_PROXY ?? null) !== (existing.proxyEnvironment?.HTTP_PROXY ?? null));
     if (command.action !== "stop" && (!existing || existing.image !== SNOWLUMA_IMAGE || resourceDrift || proxyDrift)) {
+      // The replacement image must be present (or proven pullable) before the old runtime is
+      // given up: removing first would turn a registry outage into an unavailable endpoint
+      // instead of a deferred replacement that retries on the next reconcile.
+      if (docker.pull) {
+        await onProgress({ phase: "preparing-runtime", percent: 30, message: existing ? "Fetching the replacement SnowLuma image before removing the old runtime" : "Fetching the SnowLuma runtime image" });
+        await docker.pull(SNOWLUMA_IMAGE);
+      }
       if (existing) { await onProgress({ phase: "preparing-runtime", percent: 35, message: "Replacing outdated SnowLuma container" }); await docker.remove(name); }
       await onProgress({ phase: "preparing-runtime", percent: 40, message: "Preparing runtime image and storage" });
       // On Docker these are host directories handed to the container as bind mounts; on

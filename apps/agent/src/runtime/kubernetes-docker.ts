@@ -1,4 +1,5 @@
-import { CoreV1Api, Exec, KubeConfig, KubernetesObjectApi, Metrics, type V1Status } from '@kubernetes/client-node';
+import { CoreV1Api, Exec, KubeConfig, KubernetesObjectApi, Metrics, type KubernetesObject, type V1Status } from '@kubernetes/client-node';
+import { randomUUID } from 'node:crypto';
 import { PassThrough } from 'node:stream';
 import type { DockerClient, DockerCreateInput, DockerInspectResult } from '../index.js';
 import type { DockerResourceSample } from '../resource-usage.js';
@@ -107,6 +108,41 @@ export class KubernetesDockerClient implements DockerClient {
     await this.driver.ensure(spec);
     const inspected = await this.driver.inspect(input.name);
     return { id: inspected?.id ?? input.name };
+  }
+  /** Verifies the registry actually serves `image` before the caller removes the workload it
+   *  replaces: with the old StatefulSet already gone, a node-side pull failure would leave the
+   *  endpoint down for the whole outage. Runs a throwaway pod with the same placement as the
+   *  runtimes and only treats a definitive image-pull failure as evidence; every other check
+   *  problem fails open, because the checker must never become a second way to lose the runtime. */
+  async pull(image: string, timeoutMs = 90_000): Promise<void> {
+    this.signal?.throwIfAborted();
+    const name = `pull-verify-${randomUUID().slice(0, 8)}`;
+    const pod = {
+      apiVersion: 'v1', kind: 'Pod',
+      metadata: { name, namespace: this.profile.namespace },
+      spec: {
+        restartPolicy: 'Never',
+        ...(this.profile.nodeSelector ? { nodeSelector: this.profile.nodeSelector } : {}),
+        containers: [{ name: 'verify', image, command: ['/bin/sh', '-c', 'exit 0'], resources: { requests: { cpu: '10m', memory: '16Mi' }, limits: { cpu: '100m', memory: '64Mi' } } }],
+      },
+    } as KubernetesObject;
+    try { await this.objects.create(pod); } catch { return; }
+    const deadline = Date.now() + timeoutMs;
+    let pullFailed = false;
+    try {
+      while (Date.now() < deadline) {
+        this.signal?.throwIfAborted();
+        const current = await this.core.readNamespacedPod({ name, namespace: this.profile.namespace }).catch(() => null);
+        const state = (current?.status?.containerStatuses as { name: string; state?: { running?: object; terminated?: object; waiting?: { reason?: string } } }[] | undefined)?.find(entry => entry.name === 'verify')?.state;
+        // The container ran (or ran to completion): the node has the image.
+        if (state?.running || state?.terminated || current?.status?.phase === 'Succeeded') return;
+        if (state?.waiting?.reason === 'ErrImagePull' || state?.waiting?.reason === 'ImagePullBackOff') { pullFailed = true; break; }
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    } finally {
+      await this.objects.delete({ apiVersion: 'v1', kind: 'Pod', metadata: { name, namespace: this.profile.namespace } }).catch(() => undefined);
+    }
+    if (pullFailed) throw new Error(`the registry does not currently serve ${image}; the existing runtime keeps serving until it does`);
   }
   inspect(name: string): Promise<DockerInspectResult | null> { return this.driver.inspect(name); }
   // Providers legitimately call lifecycle methods with either the container name or the id

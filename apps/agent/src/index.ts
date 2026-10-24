@@ -16,7 +16,7 @@ import {
 } from "@botroost/agent-protocol";
 import { applyProxyEnvironment } from "@botroost/agent-protocol";
 import { NapCatTrafficAccumulator } from "./traffic.js";
-import { SnowLumaRuntime, SNOWLUMA_IMAGE } from "./snowluma-runtime.js";
+import { SnowLumaRuntime, SNOWLUMA_IMAGE, SNOWLUMA_ARTIFACT } from "./snowluma-runtime.js";
 import { LLBotRuntime } from "./llbot-runtime.js";
 import type { RuntimeDriver, RuntimeOwner, RuntimeSpec } from './runtime/types.js';
 import { resolveRuntimeBackend } from './runtime/config.js';
@@ -126,6 +126,10 @@ export interface DockerClient {
   stats?: DockerStatsReader;
   inspect(name: string): Promise<DockerInspectResult | null>;
   create(input: DockerCreateInput): Promise<{ id: string }>;
+  /** Verifies the image is present locally or pullable BEFORE the caller removes the
+   *  workload it replaces, so a registry outage defers a replacement instead of costing
+   *  the endpoint its runtime. Drivers that cannot verify omit this. */
+  pull?(image: string): Promise<void>;
   /** `discardData` is only set on explicit endpoint deletion; replacement keeps durable state. */
   remove(name: string, options?: { discardData?: boolean; owner?: RuntimeOwner }): Promise<void>;
   removeHostEndpoint(root: string, endpointId: string, image: string): Promise<void>;
@@ -139,7 +143,8 @@ export interface DockerClient {
 
 export function isDockerObjectMissingError(error: unknown): boolean {
   const stderr = (error as { stderr?: unknown } | null)?.stderr;
-  return /no such object/i.test(String(stderr ?? ""));
+  // Container lookups answer "No such object"; image lookups answer "No such image".
+  return /no such (object|image)/i.test(String(stderr ?? ""));
 }
 
 const proxyEnvKeys = ["HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","NO_PROXY","http_proxy","https_proxy","all_proxy","no_proxy"] as const;
@@ -219,6 +224,15 @@ export class DockerCliClient implements DockerClient {
     const args = dockerCreateArguments(input);
     const { stdout } = await this.docker(args);
     return { id: stdout.trim() };
+  }
+  async pull(image: string) {
+    // A cached digest-pinned image is already the exact approved content, so the local
+    // check needs no registry; only a cache miss reaches one. A pull failure here aborts
+    // the replacement while the old container is still running instead of after.
+    try { await this.docker(["image", "inspect", image]); return; }
+    catch (error) { if (!isDockerObjectMissingError(error)) throw error; }
+    // A cold pull can legitimately take minutes; the runtime IO signal still fences it.
+    await this.docker(["pull", image], 1024 * 1024, { timeout: 600_000, killSignal: "SIGKILL" });
   }
   async remove(name: string) { await this.docker(["rm", "-f", name]); }
   async removeHostEndpoint(root: string, endpointId: string, image: string) {
@@ -327,9 +341,11 @@ export class ControlPlaneRequestError extends Error {
 
 const isCommandFenceRejection=(error:unknown):error is ControlPlaneRequestError=>error instanceof ControlPlaneRequestError&&(error.status===401||error.status===403||error.status===409);
 const isLegacyProgressUnsupported=(error:unknown)=>error instanceof ControlPlaneRequestError&&error.status===404;
+const isLegacyClaimUnsupported=(error:unknown)=>error instanceof ControlPlaneRequestError&&(error.status===400||error.status===404);
 
 export class HttpAgentTransport implements AgentCommandTransport {
   private readonly sessionId=crypto.randomUUID();
+  private advertiseSnowlumaArtifact=true;
   constructor(
     private readonly controlPlaneUrl: string,
     private readonly nodeSecret: string,
@@ -361,6 +377,19 @@ export class HttpAgentTransport implements AgentCommandTransport {
     });
   }
   async claim() {
+    // The artifact advertisement is what lets the control plane hold new-runtime dispatches
+    // until this agent (and every other connected one) actually upgraded its allowlist. A
+    // control plane older than this agent rejects the unknown field, so remember the failure
+    // and keep claiming with the legacy body until it is upgraded in turn.
+    if (this.advertiseSnowlumaArtifact) {
+      try {
+        const response = await this.request<{ command: unknown }>("/api/v1/agent/commands/claim", { limit: 1, providerRouting: true, snowlumaArtifact: SNOWLUMA_ARTIFACT });
+        return response.command ? RuntimeCommandSchema.parse(response.command) : null;
+      } catch (error) {
+        if (!isLegacyClaimUnsupported(error)) throw error;
+        this.advertiseSnowlumaArtifact = false;
+      }
+    }
     const response = await this.request<{ command: unknown }>("/api/v1/agent/commands/claim", { limit: 1, providerRouting: true });
     return response.command ? RuntimeCommandSchema.parse(response.command) : null;
   }
