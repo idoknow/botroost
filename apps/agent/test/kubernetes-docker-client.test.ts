@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { KubeConfig } from '@kubernetes/client-node';
+import { CoreV1Api, KubeConfig, KubernetesObjectApi } from '@kubernetes/client-node';
 import { KubernetesDockerClient } from '../src/runtime/kubernetes-docker.js';
 import { PodRuntimeStorage, LocalRuntimeStorage, StorageFileMissing } from '../src/runtime/storage.js';
 import type { RuntimeDriver, RuntimeSpec } from '../src/runtime/types.js';
@@ -137,6 +137,48 @@ describe('KubernetesDockerClient', () => {
     expect(deletes).toEqual(['workload:snowluma-e5']);
     await client.remove('snowluma-e5', { discardData: true });
     expect(deletes).toEqual(['workload:snowluma-e5', 'workload:snowluma-e5', 'data:snowluma-e5']);
+  });
+
+  it('verifies a replacement image with a throwaway pod and cleans it up', async () => {
+    const { driver } = fakeDriver();
+    const client = new KubernetesDockerClient(driver, { namespace: 'rt', volumeSize: '2Gi' }, undefined, kubeConfig());
+    const created: unknown[] = [];
+    const create = vi.spyOn(KubernetesObjectApi.prototype, 'create').mockImplementation(async object => { created.push(object); return object as never; });
+    const read = vi.spyOn(CoreV1Api.prototype, 'readNamespacedPod').mockResolvedValue({
+      status: { phase: 'Running', containerStatuses: [{ name: 'verify', state: { running: {} } }] },
+    } as never);
+    const remove = vi.spyOn(KubernetesObjectApi.prototype, 'delete').mockResolvedValue({} as never);
+    try {
+      await client.pull('example/snowluma@sha256:f75698eeaa06a3aed6b42e88975fff6b0313a960f7e7093b2329455310fd6eee');
+      expect(created[0]).toMatchObject({ kind: 'Pod', metadata: { namespace: 'rt' } });
+      expect((created[0] as { spec?: { containers?: { image?: string; resources?: object }[] } }).spec?.containers?.[0]?.image).toContain('@sha256:');
+      expect(remove).toHaveBeenCalledOnce();
+    } finally { create.mockRestore(); read.mockRestore(); remove.mockRestore(); }
+  });
+
+  it('blocks the replacement while the registry reports the image unpullable', async () => {
+    const { driver } = fakeDriver();
+    const client = new KubernetesDockerClient(driver, { namespace: 'rt', volumeSize: '2Gi' }, undefined, kubeConfig());
+    const create = vi.spyOn(KubernetesObjectApi.prototype, 'create').mockResolvedValue({} as never);
+    const read = vi.spyOn(CoreV1Api.prototype, 'readNamespacedPod').mockResolvedValue({
+      status: { phase: 'Pending', containerStatuses: [{ name: 'verify', state: { waiting: { reason: 'ErrImagePull' } } }] },
+    } as never);
+    const remove = vi.spyOn(KubernetesObjectApi.prototype, 'delete').mockResolvedValue({} as never);
+    try {
+      await expect(client.pull('example/snowluma:v1.14.22')).rejects.toThrow(/registry does not currently serve/);
+      // The verify pod is always cleaned up, including on the failure path.
+      expect(remove).toHaveBeenCalledOnce();
+    } finally { create.mockRestore(); read.mockRestore(); remove.mockRestore(); }
+  });
+
+  it('fails open when the verification pod cannot run at all', async () => {
+    const { driver } = fakeDriver();
+    const client = new KubernetesDockerClient(driver, { namespace: 'rt', volumeSize: '2Gi' }, undefined, kubeConfig());
+    const create = vi.spyOn(KubernetesObjectApi.prototype, 'create').mockRejectedValue(new Error('quota exceeded'));
+    try {
+      // The checker is best-effort: a broken check must not become a second way to lose the runtime.
+      await expect(client.pull('example/snowluma:v1.14.22')).resolves.toBeUndefined();
+    } finally { create.mockRestore(); }
   });
 });
 

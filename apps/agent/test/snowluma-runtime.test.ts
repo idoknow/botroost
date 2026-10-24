@@ -75,6 +75,21 @@ const ownedContainer = (): DockerInspectResult => ({
   },
 });
 
+/** Records the pull-before-remove ordering the replace path must keep. */
+class PullRecordingDocker extends RecordingDocker {
+  pulls: string[] = [];
+  events: string[] = [];
+  pullError: Error | null = null;
+  async pull(image: string) {
+    this.events.push("pull");
+    if (this.pullError) throw this.pullError;
+    this.pulls.push(image);
+  }
+  override async remove(name: string) { this.events.push("remove"); await super.remove(name); }
+  override async create(input: Parameters<DockerClient["create"]>[0]) { this.events.push("create"); return super.create(input); }
+  override async start(name: string) { this.events.push("start"); await super.start(name); }
+}
+
 const oneBotFetcher = (online: boolean): FetchLike => async url => {
   const action = new URL(String(url)).pathname.replace("/", "");
   const data = action === "get_status"
@@ -193,6 +208,36 @@ describe("SnowLuma runtime", () => {
     const runtime = new SnowLumaRuntime({ docker, stateDirectory: await mkdtemp(join(tmpdir(), "snowluma-fence-")) });
     await expect(runtime.apply("effect-1", { ...baseCommand, metadata: { ...baseCommand.metadata, image: NAPCAT_IMAGE } })).rejects.toThrow("not allowlisted");
     expect(docker.created).toHaveLength(0);
+  });
+
+  it("pins the runtime to an immutable digest and derives the artifact id from it", () => {
+    const digest = /@sha256:([0-9a-f]{64})$/.exec(SNOWLUMA_IMAGE)?.[1];
+    expect(digest).toBeTruthy();
+    expect(SNOWLUMA_IMAGE).not.toContain(":v");
+    expect(SNOWLUMA_ARTIFACT).toBe(`artifact:snowluma:motricseven7.snowluma.sha256.${digest}`);
+  });
+
+  it("fetches the replacement image before removing the outdated container", async () => {
+    const docker = new PullRecordingDocker();
+    docker.inspect = async () => ({ ...ownedContainer(), image: "motricseven7/snowluma:v1.10.0" });
+    const runtime = new SnowLumaRuntime({ docker, stateDirectory: await mkdtemp(join(tmpdir(), "snowluma-replace-")), fetcher: oneBotFetcher(true) });
+    await runtime.apply("effect-1", baseCommand);
+    expect(docker.pulls).toEqual([SNOWLUMA_IMAGE]);
+    // The pull is verified while the old container still runs; only then is it replaced.
+    expect(docker.events).toEqual(["pull", "remove", "create", "start"]);
+    expect(docker.created[0]!.image).toBe(SNOWLUMA_IMAGE);
+  });
+
+  it("keeps the old runtime serving when the replacement image cannot be fetched", async () => {
+    const docker = new PullRecordingDocker();
+    docker.inspect = async () => ({ ...ownedContainer(), image: "motricseven7/snowluma:v1.10.0" });
+    docker.pullError = new Error("registry unreachable");
+    const runtime = new SnowLumaRuntime({ docker, stateDirectory: await mkdtemp(join(tmpdir(), "snowluma-pullfail-")) });
+    await expect(runtime.apply("effect-1", baseCommand)).rejects.toThrow("registry unreachable");
+    expect(docker.events).toEqual(["pull"]);
+    expect(docker.removes).toEqual([]);
+    expect(docker.created).toHaveLength(0);
+    expect(docker.started).toEqual([]);
   });
 
   it("refuses NapCat-only actions", async () => {

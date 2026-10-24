@@ -12,7 +12,7 @@ import {
   isTransientTransportError,
   type AgentCommandTransport,
 } from "../src/index.js";
-import { SnowLumaRuntime } from "../src/snowluma-runtime.js";
+import { SnowLumaRuntime, SNOWLUMA_ARTIFACT } from "../src/snowluma-runtime.js";
 
 class MemoryTransport implements AgentCommandTransport {
   heartbeats = 0;
@@ -175,6 +175,29 @@ describe("durable fake agent", () => {
       expect(signals[0]).toBeInstanceOf(AbortSignal);
       controller.abort();
       expect(signals[0]!.aborted).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("claims with the artifact advertisement and falls back when an older control plane rejects it", async () => {
+    const originalFetch = globalThis.fetch;
+    const bodies: Array<{ snowlumaArtifact?: string }> = [];
+    globalThis.fetch = ((_url: URL | RequestInfo, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { snowlumaArtifact?: string };
+      bodies.push(body);
+      if (body.snowlumaArtifact) return Promise.resolve(new Response("{}", { status: 400 }));
+      return Promise.resolve(new Response(JSON.stringify({ command: null }), { status: 200, headers: { "content-type": "application/json" } }));
+    }) as typeof fetch;
+    try {
+      const transport = new HttpAgentTransport("https://control.test", "secret");
+      expect(await transport.claim()).toBeNull();
+      expect(bodies[0]).toMatchObject({ snowlumaArtifact: SNOWLUMA_ARTIFACT });
+      expect(bodies[1]).not.toHaveProperty("snowlumaArtifact");
+      // The fallback sticks: the next claim does not retry the rejected field.
+      await transport.claim();
+      expect(bodies).toHaveLength(3);
+      expect(bodies[2]).not.toHaveProperty("snowlumaArtifact");
     } finally {
       globalThis.fetch = originalFetch;
     }
