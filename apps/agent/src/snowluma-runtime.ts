@@ -29,9 +29,24 @@ type JsonObject = { [key: string]: JsonValue };
 // compromised publisher or registry account re-point the version at arbitrary code that still
 // passes assertAllowed, which can only compare strings. The artifact id derives from the same
 // digest, so the allowlisted image and the approved artifact can never drift apart.
-const SNOWLUMA_DIGEST = "f75698eeaa06a3aed6b42e88975fff6b0313a960f7e7093b2329455310fd6eee";
+const SNOWLUMA_DIGEST = "72d9d31597df0741e84747282e979642405d1afb6c2f83b53add601bafdb4a99";
 export const SNOWLUMA_IMAGE = `motricseven7/snowluma@sha256:${SNOWLUMA_DIGEST}`;
 export const SNOWLUMA_ARTIFACT = `artifact:snowluma:motricseven7.snowluma.sha256.${SNOWLUMA_DIGEST}`;
+// A rolling upgrade replaces this agent before every endpoint has been re-applied, so commands
+// that the control plane queued (or is still retrying) against the release being replaced are
+// in flight while the new allowlist is already live. Rejecting them fails the operation and
+// leaves the endpoint degraded until someone applies it by hand, so the immediately previous
+// release stays admissible while it drains. Each entry is a matched image/artifact pair, so a
+// command can never mix one release's image with another's artifact, and anything unlisted is
+// still refused. apply() always converges the endpoint onto SNOWLUMA_IMAGE, so an admitted
+// older command upgrades the endpoint rather than pinning it back.
+const SNOWLUMA_PREVIOUS_DIGESTS = ["f75698eeaa06a3aed6b42e88975fff6b0313a960f7e7093b2329455310fd6eee"] as const;
+const SNOWLUMA_RELEASES = new Map<string, string>(
+  [SNOWLUMA_DIGEST, ...SNOWLUMA_PREVIOUS_DIGESTS].map(digest => [
+    `motricseven7/snowluma@sha256:${digest}`,
+    `artifact:snowluma:motricseven7.snowluma.sha256.${digest}`,
+  ]),
+);
 const ONEBOT_HTTP_PORT = 3000;
 const NOVNC_CONTAINER_PORT = "6081";
 const WEBUI_CONTAINER_PORT = "5099";
@@ -188,7 +203,9 @@ export class SnowLumaRuntime {
   }
   private assertAllowed(command: RuntimeCommand) {
     const image = typeof command.metadata.image === "string" ? command.metadata.image : "";
-    if (image !== SNOWLUMA_IMAGE || command.runtimeRequest.approvedArtifactId !== SNOWLUMA_ARTIFACT)
+    // The image and the artifact id must both belong to the same admissible release: pairing them
+    // stops a command from pairing one release's image with another release's approval.
+    if (SNOWLUMA_RELEASES.get(image) !== command.runtimeRequest.approvedArtifactId)
       throw new Error("SnowLuma image is not allowlisted");
   }
   private ownsContainer(container: Pick<DockerInspectResult, "labels">, command: RuntimeCommand) {
