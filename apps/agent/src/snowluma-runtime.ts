@@ -459,6 +459,25 @@ export class SnowLumaRuntime {
     all[endpointId] = { password, updatedAt: new Date().toISOString() };
     await writeFile(this.webuiCredentialsPath(), `${JSON.stringify(all, null, 2)}\n`, { mode: 0o600 });
   }
+  /** SnowLuma 1.14+ generates a random VNC password per container and keeps it in its data
+   *  directory; the console has to hand that value to noVNC instead of the historical
+   *  "vncpasswd" default, which only the older releases used. */
+  private async novncPassword(endpointId: string): Promise<string | undefined> {
+    const configMount = this.containerMounts.config ?? this.hostEndpointDirectory(endpointId, "config");
+    const candidates = [
+      // SnowLuma >= 1.14 keeps its live configuration under /app/data.
+      "/app/data/config/vnc-password",
+      join(configMount, "config", "vnc-password"),
+    ];
+    const storage = this.storage.for(this.containerName(endpointId));
+    for (const path of candidates) {
+      try {
+        const value = (await storage.readFile(path)).trim();
+        if (value) return value;
+      } catch { /* absent in this release; try the next known location */ }
+    }
+    return undefined;
+  }
   private async readOneBotToken(endpointId: string): Promise<string | undefined> {
     // SnowLuma generates its own OneBot access tokens on first start and stores them in
     // onebot_<qq>.json.
@@ -648,6 +667,7 @@ export class SnowLumaRuntime {
     ]);
     const ports = snowlumaLoginPorts(command.endpointId);
     const webui = await this.webuiCredentials(command.endpointId);
+    const novncPassword = await this.novncPassword(command.endpointId);
     const webuiUrl = loginUrl(ports.webuiPort), novncUrl = loginUrl(ports.novncPort);
     // Kubernetes cannot publish host ports, so the browser needs the cluster entry point; when
     // none is configured the ports are still reported for an operator with port-forward access.
@@ -658,6 +678,7 @@ export class SnowLumaRuntime {
       novncDialPort: runtimeDialPort(ports.novncPort, NOVNC_CONTAINER_PORT, inspected.serviceHost),
       webuiDialPort: runtimeDialPort(ports.webuiPort, WEBUI_CONTAINER_PORT, inspected.serviceHost),
       ...(webuiHost ? { webuiHost } : {}), ...(webuiUrl ? { webuiUrl } : {}), ...(novncUrl ? { novncUrl } : {}), ...webui,
+      ...(novncPassword ? { novncPassword } : {}),
     };
     if (statusSettled.status === "rejected") {
       // SnowLuma only starts its OneBot HTTP server (container port 3000) after QQ

@@ -5,7 +5,27 @@ import { describe, expect, it } from "vitest";
 import { dockerCreateArguments, NAPCAT_IMAGE, type DockerClient, type DockerInspectResult, type FetchLike } from "../src/index.js";
 import { SNOWLUMA_ARTIFACT, SNOWLUMA_IMAGE, SnowLumaRuntime, snowlumaLoginPorts } from "../src/snowluma-runtime.js";
 import { WORKLOAD_NAME_LIMIT } from "../src/runtime/kubernetes-resources.js";
+import type { RuntimeStorage } from "../src/runtime/storage.js";
 import type { RuntimeCommand } from "@botroost/agent-protocol";
+
+/** Minimal RuntimeStorage backed by an in-memory file map, for asserting on the files the agent
+ *  reads out of an endpoint's data volume. */
+const memoryStorage = (files: Record<string, string>): RuntimeStorage => ({
+  kind: "local",
+  for: () => ({
+    readdir: async (directory: string) => [...new Set(Object.keys(files)
+      .filter(path => path.startsWith(`${directory}/`))
+      .map(path => path.slice(directory.length + 1).split("/")[0]!))],
+    readFile: async (path: string) => {
+      const content = files[path];
+      if (content === undefined) throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
+      return content;
+    },
+    writeFile: async () => {},
+    ensureDirectory: async () => {},
+    remove: async () => {},
+  }),
+});
 
 const baseCommand: RuntimeCommand = {
   commandId: "cmd-1",
@@ -174,6 +194,48 @@ describe("SnowLuma runtime", () => {
     expect(metadata.loginGuide.webuiUsername).toBe("admin");
     expect(metadata.loginGuide.webuiPassword).toBe("07f3c18cc36ed2b8");
     expect(metadata.error).toContain("Unable to connect");
+  });
+
+  it("publishes the container's generated VNC password so noVNC can authenticate", async () => {
+    const docker = new RecordingDocker();
+    docker.inspect = async () => ownedContainer();
+    // SnowLuma >= 1.14 keeps its live configuration under /app/data and randomises the VNC
+    // password per container; the console used to send the hard-coded "vncpasswd" and the
+    // VNC server rejected it ("password check failed").
+    const storage = memoryStorage({ "/app/data/config/vnc-password": "At_gZVtU7Sm7p99HAlyV\n" });
+    const runtime = new SnowLumaRuntime({
+      docker,
+      stateDirectory: await mkdtemp(join(tmpdir(), "snowluma-vnc-")),
+      fetcher: oneBotFetcher(false),
+      storage,
+      containerMounts: { qq: "/app/.config", config: "/app/snowluma-data" },
+    });
+    const result = await runtime.apply("effect-1", baseCommand);
+    const metadata = result.metadata as { loginGuide: { novncPassword?: string } };
+    expect(metadata.loginGuide.novncPassword).toBe("At_gZVtU7Sm7p99HAlyV");
+  });
+
+  it("reads the VNC password from the legacy config mount and omits it when absent", async () => {
+    const legacy = new SnowLumaRuntime({
+      docker: Object.assign(new RecordingDocker(), { inspect: async () => ownedContainer() }),
+      stateDirectory: await mkdtemp(join(tmpdir(), "snowluma-vnc-legacy-")),
+      fetcher: oneBotFetcher(false),
+      storage: memoryStorage({ "/app/snowluma-data/config/vnc-password": "legacypass\n" }),
+      containerMounts: { qq: "/app/.config", config: "/app/snowluma-data" },
+    });
+    const legacyMetadata = (await legacy.apply("effect-1", baseCommand)).metadata as { loginGuide: { novncPassword?: string } };
+    expect(legacyMetadata.loginGuide.novncPassword).toBe("legacypass");
+
+    const missing = new SnowLumaRuntime({
+      docker: Object.assign(new RecordingDocker(), { inspect: async () => ownedContainer() }),
+      stateDirectory: await mkdtemp(join(tmpdir(), "snowluma-vnc-missing-")),
+      fetcher: oneBotFetcher(false),
+      storage: memoryStorage({}),
+      containerMounts: { qq: "/app/.config", config: "/app/snowluma-data" },
+    });
+    const missingMetadata = (await missing.apply("effect-1", baseCommand)).metadata as { loginGuide: Record<string, unknown> };
+    expect(missingMetadata.loginGuide.novncPassword).toBeUndefined();
+    expect(missingMetadata.loginGuide.novncPort).toEqual(expect.any(Number));
   });
 
   it("reports a connected protocol with directory probes and log-derived traffic telemetry after login", async () => {
