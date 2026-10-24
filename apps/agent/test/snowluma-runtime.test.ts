@@ -210,6 +210,42 @@ describe("SnowLuma runtime", () => {
     expect(docker.created).toHaveLength(0);
   });
 
+  // A rolling upgrade installs this agent before every endpoint has been re-applied, so the
+  // control plane can still be queueing or retrying a command that was approved against the
+  // release being replaced. Those commands must still run, and must leave the endpoint on the
+  // current release rather than pinning it back to the superseded one.
+  const previousDigest = "f75698eeaa06a3aed6b42e88975fff6b0313a960f7e7093b2329455310fd6eee";
+  const previousImage = `motricseven7/snowluma@sha256:${previousDigest}`;
+  const previousArtifact = `artifact:snowluma:motricseven7.snowluma.sha256.${previousDigest}`;
+
+  it("runs a command still carrying the previous release and converges it onto the current one", async () => {
+    const docker = new RecordingDocker();
+    const runtime = new SnowLumaRuntime({ docker, stateDirectory: await mkdtemp(join(tmpdir(), "snowluma-drain-")) });
+    const drained: RuntimeCommand = {
+      ...baseCommand,
+      runtimeRequest: { ...baseCommand.runtimeRequest, approvedArtifactId: previousArtifact },
+      metadata: { ...baseCommand.metadata, image: previousImage },
+    };
+    await expect(runtime.apply("effect-1", drained)).resolves.toBeDefined();
+    expect(docker.created).toHaveLength(1);
+    expect(docker.created[0]!.image).toBe(SNOWLUMA_IMAGE);
+  });
+
+  it("refuses a command that pairs one release's image with another release's approval", async () => {
+    const docker = new RecordingDocker();
+    const runtime = new SnowLumaRuntime({ docker, stateDirectory: await mkdtemp(join(tmpdir(), "snowluma-pair-")) });
+    await expect(runtime.apply("effect-1", { ...baseCommand, metadata: { ...baseCommand.metadata, image: previousImage } })).rejects.toThrow("not allowlisted");
+    await expect(runtime.apply("effect-1", { ...baseCommand, runtimeRequest: { ...baseCommand.runtimeRequest, approvedArtifactId: previousArtifact } })).rejects.toThrow("not allowlisted");
+    expect(docker.created).toHaveLength(0);
+  });
+
+  it("refuses an unpinned image tag even when the artifact id matches", async () => {
+    const docker = new RecordingDocker();
+    const runtime = new SnowLumaRuntime({ docker, stateDirectory: await mkdtemp(join(tmpdir(), "snowluma-tag-")) });
+    await expect(runtime.apply("effect-1", { ...baseCommand, metadata: { ...baseCommand.metadata, image: "motricseven7/snowluma:v1.14.20" } })).rejects.toThrow("not allowlisted");
+    expect(docker.created).toHaveLength(0);
+  });
+
   it("pins the runtime to an immutable digest and derives the artifact id from it", () => {
     const digest = /@sha256:([0-9a-f]{64})$/.exec(SNOWLUMA_IMAGE)?.[1];
     expect(digest).toBeTruthy();
