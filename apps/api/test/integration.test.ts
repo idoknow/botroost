@@ -45,6 +45,11 @@ describe("real PostgreSQL API/auth/worker vertical slice",()=>{
   expect(await db.reconcileEndpointNotifications()).toBe(0);
   expect((await db.pool.query("SELECT event_type FROM notification_outbox WHERE endpoint_id=$1",[endpoint.id])).rows).toEqual([]);
   await db.pool.query("INSERT INTO observations(id,workspace_id,endpoint_id,generation,state) VALUES(gen_random_uuid(),$1,$2,1,$3::jsonb)",[me!.workspaceId,endpoint.id,JSON.stringify({runtime:"ready",provider:"available",protocol:"connected",metadata:{qq:{online:false}}})]);
+  // A single offline sample only arms the incident: it has to survive the workspace grace window
+  // (alerts.graceSeconds, 180s by default) before the operator is paged.
+  expect(await db.reconcileEndpointNotifications()).toBe(0);
+  expect((await db.pool.query("SELECT state,incident_open FROM qq_login_notification_state WHERE endpoint_id=$1",[endpoint.id])).rows[0]).toEqual({state:"offline-pending",incident_open:false});
+  await db.pool.query("UPDATE qq_login_notification_state SET offline_since=now()-interval '10 minutes' WHERE endpoint_id=$1",[endpoint.id]);
   expect(await db.reconcileEndpointNotifications()).toBe(1);
   expect(await db.reconcileEndpointNotifications()).toBe(0);
   expect((await db.pool.query("SELECT event_type,recipient,subject,html FROM notification_outbox WHERE endpoint_id=$1 ORDER BY created_at",[endpoint.id])).rows).toEqual([expect.objectContaining({event_type:"endpoint.offline",recipient:target.email,subject:`${suffix} QQ offline`,html:expect.stringContaining("risk control")})]);
