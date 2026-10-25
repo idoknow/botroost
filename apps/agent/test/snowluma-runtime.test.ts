@@ -187,13 +187,100 @@ describe("SnowLuma runtime", () => {
     });
     const result = await runtime.apply("effect-1", baseCommand);
     expect(result.observations).toEqual({ node: "online", runtime: "ready", provider: "available", protocol: "disconnected", convergence: "reconciling" });
-    const metadata = result.metadata as { qq: { online: boolean }; loginGuide: { novncPort: number; webuiPort: number; webuiUsername?: string; webuiPassword?: string }; error: string };
-    expect(metadata.qq.online).toBe(false);
+    const metadata = result.metadata as { qq: { online: boolean | null }; loginGuide: { novncPort: number; webuiPort: number; webuiUsername?: string; webuiPassword?: string }; error: string };
+    // A single failed probe is not a logout: it also happens while the OneBot server is still
+    // starting or when the probe merely times out, and claiming "offline" there paged the operator
+    // for endpoints that answered seconds later.
+    expect(metadata.qq.online).toBeNull();
     expect(metadata.loginGuide.novncPort).toBe(snowlumaLoginPorts(baseCommand.endpointId).novncPort);
     expect(metadata.loginGuide.webuiPort).toBe(snowlumaLoginPorts(baseCommand.endpointId).webuiPort);
     expect(metadata.loginGuide.webuiUsername).toBe("admin");
     expect(metadata.loginGuide.webuiPassword).toBe("07f3c18cc36ed2b8");
     expect(metadata.error).toContain("Unable to connect");
+  });
+
+  it("reports offline once the OneBot endpoint stays unreachable for the whole grace window", async () => {
+    const docker = new RecordingDocker();
+    docker.inspect = async () => ownedContainer();
+    const previous = process.env.SNOWLUMA_PROVIDER_UNREACHABLE_GRACE_MS;
+    process.env.SNOWLUMA_PROVIDER_UNREACHABLE_GRACE_MS = "0";
+    try {
+      const runtime = new SnowLumaRuntime({
+        docker,
+        stateDirectory: await mkdtemp(join(tmpdir(), "snowluma-unreach-sustained-")),
+        fetcher: async () => { throw new Error("Unable to connect. Is the computer able to access the url?"); },
+      });
+      const result = await runtime.apply("effect-1", baseCommand);
+      expect((result.metadata as { qq: { online: boolean | null } }).qq.online).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.SNOWLUMA_PROVIDER_UNREACHABLE_GRACE_MS;
+      else process.env.SNOWLUMA_PROVIDER_UNREACHABLE_GRACE_MS = previous;
+    }
+  });
+
+  it("keeps QQ online when get_status answers but the login probe fails", async () => {
+    const docker = new RecordingDocker();
+    docker.inspect = async () => ownedContainer();
+    const healthy = oneBotFetcher(true);
+    const runtime = new SnowLumaRuntime({
+      docker,
+      stateDirectory: await mkdtemp(join(tmpdir(), "snowluma-login-probe-")),
+      // get_login_info timing out used to look like "no account" and reported QQ as offline even
+      // though get_status still said online.
+      fetcher: async (url, init) => {
+        if (new URL(String(url)).pathname === "/get_login_info") throw new Error("The operation was aborted due to timeout");
+        return healthy(url, init);
+      },
+    });
+    const result = await runtime.apply("effect-1", baseCommand);
+    expect(result.observations?.protocol).toBe("connected");
+    const metadata = result.metadata as { qq: { online: boolean | null }; onebot: { probes: Record<string, { ok: boolean }> } };
+    expect(metadata.qq.online).toBe(true);
+    expect(metadata.onebot.probes.get_login_info?.ok).toBe(false);
+  });
+
+  it("keeps QQ online when get_login_info answers but get_status is rejected", async () => {
+    const docker = new RecordingDocker();
+    docker.inspect = async () => ownedContainer();
+    const healthy = oneBotFetcher(true);
+    const runtime = new SnowLumaRuntime({
+      docker,
+      stateDirectory: await mkdtemp(join(tmpdir(), "snowluma-status-401-")),
+      // get_status 401ing while get_login_info still returns the account means the credential is
+      // only half broken; the account itself proves QQ is logged in.
+      fetcher: async (url, init) => new URL(String(url)).pathname === "/get_status"
+        ? new Response("unauthorized", { status: 401 })
+        : healthy(url, init),
+    });
+    const result = await runtime.apply("effect-1", baseCommand);
+    expect(result.observations?.protocol).toBe("connected");
+    const metadata = result.metadata as { qq: { online: boolean | null; nickname?: string }; onebot: { probes: Record<string, { ok: boolean }> } };
+    expect(metadata.qq.online).toBe(true);
+    expect(metadata.qq.nickname).toBe("tester");
+    expect(metadata.onebot.probes.get_status?.ok).toBe(false);
+  });
+
+  it("treats a rejected OneBot request as a reachable server instead of a logout", async () => {
+    const docker = new RecordingDocker();
+    docker.inspect = async () => ownedContainer();
+    const previous = process.env.SNOWLUMA_PROVIDER_UNREACHABLE_GRACE_MS;
+    // Even with the whole grace window elapsed a 401 must not become "QQ offline": the provider
+    // answered, so the only thing broken is the access token.
+    process.env.SNOWLUMA_PROVIDER_UNREACHABLE_GRACE_MS = "0";
+    try {
+      const runtime = new SnowLumaRuntime({
+        docker,
+        stateDirectory: await mkdtemp(join(tmpdir(), "snowluma-token-401-")),
+        fetcher: async () => new Response("unauthorized", { status: 401 }),
+      });
+      const result = await runtime.apply("effect-1", baseCommand);
+      const metadata = result.metadata as { qq: { online: boolean | null }; error: string };
+      expect(metadata.qq.online).toBeNull();
+      expect(metadata.error).toContain("401");
+    } finally {
+      if (previous === undefined) delete process.env.SNOWLUMA_PROVIDER_UNREACHABLE_GRACE_MS;
+      else process.env.SNOWLUMA_PROVIDER_UNREACHABLE_GRACE_MS = previous;
+    }
   });
 
   it("publishes the container's generated VNC password so noVNC can authenticate", async () => {

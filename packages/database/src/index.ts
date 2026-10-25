@@ -16,12 +16,21 @@ export interface NodeCredential { nodeId: string; workspaceId: string; nodeSecre
 export interface AuthenticatedNode { id: string; workspaceId: string; name: string; connectionEpoch: number }
 export interface AgentCommand { commandId: string; operationId: string; workspaceId: string; nodeId: string; endpointId: string; generation: number; connectionEpoch: number; attempt: number; action: Action; runtimeRequest: unknown; metadata: Record<string, unknown> }
 export type AlertEventType="endpoint.offline"|"endpoint.recovery";
-export type QqLoginAlertState="unknown"|"online"|"offline";
-export function evaluateQqLoginAlertTransition(input:{incidentOpen:boolean;observedAt:Date|null;qqOnline:boolean|null;now:Date;graceSeconds:number}):{state:QqLoginAlertState;incidentOpen:boolean;event:AlertEventType|null}{
+export type QqLoginAlertState="unknown"|"online"|"offline"|"offline-pending";
+export function evaluateQqLoginAlertTransition(input:{incidentOpen:boolean;observedAt:Date|null;qqOnline:boolean|null;offlineSince:Date|null;now:Date;graceSeconds:number}):{state:QqLoginAlertState;incidentOpen:boolean;offlineSince:Date|null;event:AlertEventType|null}{
   const fresh=input.observedAt!==null&&input.now.getTime()-input.observedAt.getTime()<=input.graceSeconds*1000&&input.observedAt.getTime()<=input.now.getTime();
-  if(!fresh||input.qqOnline===null)return{state:"unknown",incidentOpen:input.incidentOpen,event:null};
-  if(!input.qqOnline)return{state:"offline",incidentOpen:true,event:input.incidentOpen?null:"endpoint.offline"};
-  return{state:"online",incidentOpen:false,event:input.incidentOpen?"endpoint.recovery":null};
+  // A stale or unknown sample proves nothing about the current QQ state, so it also disarms any
+  // pending offline timer: the offline run has to be continuous, otherwise a timer armed hours ago
+  // would page immediately on the next single offline sample after an observation gap.
+  if(!fresh||input.qqOnline===null)return{state:"unknown",incidentOpen:input.incidentOpen,offlineSince:null,event:null};
+  if(input.qqOnline)return{state:"online",incidentOpen:false,offlineSince:null,event:input.incidentOpen?"endpoint.recovery":null};
+  // One "QQ offline" sample is not enough to page: the observation has to stay offline for the
+  // whole grace window first. Agents report a provider that merely stopped answering as unknown,
+  // so this guards against a single false sample (probe timeout, token rotation, a restart in
+  // flight) opening an incident that resolves seconds later.
+  const offlineSince=input.offlineSince??input.now;
+  if(input.now.getTime()-offlineSince.getTime()<input.graceSeconds*1000)return{state:"offline-pending",incidentOpen:input.incidentOpen,offlineSince,event:null};
+  return{state:"offline",incidentOpen:true,offlineSince,event:input.incidentOpen?null:"endpoint.offline"};
 }
 export interface AlertSubscriptionInput {endpointId:string;offlineTargetIds:string[];recoveryTargetIds:string[]}
 export class DatabaseError extends Error { constructor(public code: "not_found"|"conflict"|"idempotency_mismatch"|"already_bootstrapped"|"unauthorized"|"forbidden", message:string=code){super(message)} }
@@ -108,12 +117,12 @@ export class PostgresDatabase {
       const rows=(await c.query(`SELECT e.id,e.workspace_id,e.name,e.provider_id,e.desired_state,o.state observation_state,o.created_at observed_at,w.settings->'alerts' config FROM endpoints e JOIN workspaces w ON w.id=e.workspace_id LEFT JOIN LATERAL (SELECT state,created_at FROM observations WHERE endpoint_id=e.id AND generation=e.generation ORDER BY created_at DESC LIMIT 1) o ON true WHERE e.deleted_at IS NULL AND e.provider_id IN ('napcat','snowluma','llbot') FOR UPDATE OF e`)).rows;
       let queued=0;
       for(const row of rows){
-        const lockedState=(await c.query("SELECT state,incident_open FROM qq_login_notification_state WHERE endpoint_id=$1 FOR UPDATE",[row.id])).rows[0];
+        const lockedState=(await c.query("SELECT state,incident_open,offline_since FROM qq_login_notification_state WHERE endpoint_id=$1 FOR UPDATE",[row.id])).rows[0];
         const config=(row.config??{}) as Record<string,unknown>,grace=typeof config.graceSeconds==="number"?config.graceSeconds:180,incidentOpen=lockedState?.incident_open===true,observation=(row.observation_state as Record<string,unknown>|null)??null,desired=(row.desired_state as Record<string,unknown>|null)?.state;
-        if(desired!=="running"){await c.query("INSERT INTO qq_login_notification_state(endpoint_id,workspace_id,state,incident_open) VALUES($1,$2,'unknown',false) ON CONFLICT(endpoint_id) DO UPDATE SET state='unknown',incident_open=false,updated_at=now()",[row.id,row.workspace_id]);continue}
+        if(desired!=="running"){await c.query("INSERT INTO qq_login_notification_state(endpoint_id,workspace_id,state,incident_open,offline_since) VALUES($1,$2,'unknown',false,NULL) ON CONFLICT(endpoint_id) DO UPDATE SET state='unknown',incident_open=false,offline_since=NULL,updated_at=now()",[row.id,row.workspace_id]);continue}
         const metadata=observation?.metadata,qq=metadata!==null&&typeof metadata==="object"&&!Array.isArray(metadata)?(metadata as Record<string,unknown>).qq:null,online=qq!==null&&typeof qq==="object"&&!Array.isArray(qq)&&typeof (qq as Record<string,unknown>).online==="boolean"?(qq as Record<string,unknown>).online as boolean:null;
-        const transition=evaluateQqLoginAlertTransition({incidentOpen,observedAt:row.observed_at?new Date(row.observed_at):null,qqOnline:online,now:new Date(),graceSeconds:grace});
-        await c.query("INSERT INTO qq_login_notification_state(endpoint_id,workspace_id,state,incident_open) VALUES($1,$2,$3,$4) ON CONFLICT(endpoint_id) DO UPDATE SET state=excluded.state,incident_open=excluded.incident_open,updated_at=now()",[row.id,row.workspace_id,transition.state,transition.incidentOpen]);
+        const transition=evaluateQqLoginAlertTransition({incidentOpen,observedAt:row.observed_at?new Date(row.observed_at):null,qqOnline:online,offlineSince:lockedState?.offline_since?new Date(String(lockedState.offline_since)):null,now:new Date(),graceSeconds:grace});
+        await c.query("INSERT INTO qq_login_notification_state(endpoint_id,workspace_id,state,incident_open,offline_since) VALUES($1,$2,$3,$4,$5) ON CONFLICT(endpoint_id) DO UPDATE SET state=excluded.state,incident_open=excluded.incident_open,offline_since=excluded.offline_since,updated_at=now()",[row.id,row.workspace_id,transition.state,transition.incidentOpen,transition.offlineSince]);
         if(!transition.event)continue;
         const event=transition.event;
         const offline=event==="endpoint.offline",targets=(await c.query("SELECT target.email FROM endpoint_notification_subscriptions subscription JOIN notification_targets target ON target.workspace_id=subscription.workspace_id AND target.id=subscription.target_id WHERE subscription.workspace_id=$1 AND subscription.endpoint_id=$2 AND subscription.event_type=$3",[row.workspace_id,row.id,event])).rows;

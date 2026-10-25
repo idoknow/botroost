@@ -4,10 +4,14 @@ import {evaluateQqLoginAlertTransition,migrationSql,PostgresDatabase} from "../s
 
 describe("QQ login alert policy",()=>{
   const now=new Date("2026-08-22T12:00:00.000Z");
-  it("opens an incident when a fresh NapCat observation says QQ is offline",()=>expect(evaluateQqLoginAlertTransition({incidentOpen:false,observedAt:new Date("2026-08-22T11:59:30.000Z"),qqOnline:false,now,graceSeconds:60})).toEqual({state:"offline",incidentOpen:true,event:"endpoint.offline"}));
-  it("keeps QQ online even when a separate protocol probe is disconnected",()=>expect(evaluateQqLoginAlertTransition({incidentOpen:false,observedAt:new Date("2026-08-22T11:59:30.000Z"),qqOnline:true,now,graceSeconds:60})).toEqual({state:"online",incidentOpen:false,event:null}));
-  it("emits one recovery only after a fresh QQ-online observation",()=>expect(evaluateQqLoginAlertTransition({incidentOpen:true,observedAt:new Date("2026-08-22T11:59:30.000Z"),qqOnline:true,now,graceSeconds:60})).toEqual({state:"online",incidentOpen:false,event:"endpoint.recovery"}));
-  it("preserves an open incident when QQ login state is stale or unknown",()=>expect(evaluateQqLoginAlertTransition({incidentOpen:true,observedAt:new Date("2026-08-22T11:50:00.000Z"),qqOnline:false,now,graceSeconds:60})).toEqual({state:"unknown",incidentOpen:true,event:null}));
+  it("holds the first offline sample as pending instead of paging on it",()=>expect(evaluateQqLoginAlertTransition({incidentOpen:false,observedAt:new Date("2026-08-22T11:59:30.000Z"),qqOnline:false,offlineSince:null,now,graceSeconds:60})).toEqual({state:"offline-pending",incidentOpen:false,offlineSince:now,event:null}));
+  it("keeps holding an offline sample that has not survived the grace window yet",()=>expect(evaluateQqLoginAlertTransition({incidentOpen:false,observedAt:new Date("2026-08-22T11:59:45.000Z"),qqOnline:false,offlineSince:new Date("2026-08-22T11:59:20.000Z"),now,graceSeconds:60})).toEqual({state:"offline-pending",incidentOpen:false,offlineSince:new Date("2026-08-22T11:59:20.000Z"),event:null}));
+  it("opens an incident once the offline sample survives the grace window",()=>expect(evaluateQqLoginAlertTransition({incidentOpen:false,observedAt:new Date("2026-08-22T11:59:30.000Z"),qqOnline:false,offlineSince:new Date("2026-08-22T11:58:00.000Z"),now,graceSeconds:60})).toEqual({state:"offline",incidentOpen:true,offlineSince:new Date("2026-08-22T11:58:00.000Z"),event:"endpoint.offline"}));
+  it("keeps QQ online even when a separate protocol probe is disconnected",()=>expect(evaluateQqLoginAlertTransition({incidentOpen:false,observedAt:new Date("2026-08-22T11:59:30.000Z"),qqOnline:true,offlineSince:null,now,graceSeconds:60})).toEqual({state:"online",incidentOpen:false,offlineSince:null,event:null}));
+  it("clears a pending offline sample when QQ answers online again",()=>expect(evaluateQqLoginAlertTransition({incidentOpen:false,observedAt:new Date("2026-08-22T11:59:30.000Z"),qqOnline:true,offlineSince:new Date("2026-08-22T11:59:00.000Z"),now,graceSeconds:60})).toEqual({state:"online",incidentOpen:false,offlineSince:null,event:null}));
+  it("emits one recovery only after a fresh QQ-online observation",()=>expect(evaluateQqLoginAlertTransition({incidentOpen:true,observedAt:new Date("2026-08-22T11:59:30.000Z"),qqOnline:true,offlineSince:new Date("2026-08-22T11:55:00.000Z"),now,graceSeconds:60})).toEqual({state:"online",incidentOpen:false,offlineSince:null,event:"endpoint.recovery"}));
+  it("preserves an open incident when QQ login state is stale or unknown",()=>expect(evaluateQqLoginAlertTransition({incidentOpen:true,observedAt:new Date("2026-08-22T11:50:00.000Z"),qqOnline:false,offlineSince:new Date("2026-08-22T11:55:00.000Z"),now,graceSeconds:60})).toEqual({state:"unknown",incidentOpen:true,offlineSince:null,event:null}));
+  it("disarms a pending offline sample when the observation goes stale",()=>expect(evaluateQqLoginAlertTransition({incidentOpen:false,observedAt:new Date("2026-08-22T11:00:00.000Z"),qqOnline:false,offlineSince:new Date("2026-08-22T11:55:00.000Z"),now,graceSeconds:60})).toEqual({state:"unknown",incidentOpen:false,offlineSince:null,event:null}));
 });
 describe("notification durability schema",()=>{
   it("adds state and retryable notification outbox in a new migration",async()=>{
@@ -27,6 +31,13 @@ describe("notification durability schema",()=>{
     const source=PostgresDatabase.prototype.reconcileEndpointNotifications.toString();
     expect(source).toContain("qq_login_notification_state");
     expect(source).toContain("provider_id IN ('napcat','snowluma','llbot')");
+  });
+  it("persists the offline grace window on the QQ login state row",()=>{
+    expect(migrationSql).toContain("0032_qq_login_offline_grace");
+    expect(migrationSql).toContain("ADD COLUMN offline_since timestamptz");
+    expect(migrationSql).toContain("'offline-pending'");
+    const source=PostgresDatabase.prototype.reconcileEndpointNotifications.toString();
+    expect(source).toContain("offline_since");
   });
   it("ships migrations that permit OneBot websocket updates and durable endpoint deletion",()=>{
     expect(migrationSql).toContain("0008_onebot_websocket_management");
