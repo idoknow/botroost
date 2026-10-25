@@ -48,6 +48,17 @@ const SNOWLUMA_RELEASES = new Map<string, string>(
   ]),
 );
 const ONEBOT_HTTP_PORT = 3000;
+// A single failed probe is not proof that QQ logged out: the OneBot HTTP server only listens
+// after QQ logs in, and the same probe also times out under load or when the access token cannot
+// be read (401). Report "unknown" for this window and only conclude "offline" once the provider
+// has been unreachable for the whole grace period, so a genuine outage still raises an alert
+// instead of going silent. Override for tests and for nodes with a slower probe budget.
+const PROVIDER_UNREACHABLE_GRACE_MS = 60_000;
+const providerUnreachableGraceMs = () => {
+  const configured = process.env.SNOWLUMA_PROVIDER_UNREACHABLE_GRACE_MS;
+  const parsed = configured === undefined ? Number.NaN : Number(configured);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : PROVIDER_UNREACHABLE_GRACE_MS;
+};
 /** SnowLuma 1.14+ writes its live configuration here; the mounted volume at
  *  /app/snowluma-data only carries the legacy layout. */
 const SNOWLUMA_LIVE_DATA_DIRECTORY = "/app/data";
@@ -127,6 +138,9 @@ export class SnowLumaRuntime {
   private readonly trafficAccumulators = new Map<string, NapCatTrafficAccumulator>();
   private readonly trafficCache = new Map<string, { at: number; summary: JsonObject }>();
   private readonly trafficLastSuccessAt = new Map<string, number>();
+  /** First moment the provider probe stopped answering, per endpoint, so a transient failure can
+   *  be reported as "unknown" while a sustained one is still reported as offline. */
+  private readonly probeUnreachableSince = new Map<string, { generation: number; since: number }>();
   private commandsLoaded = false;
   private executionQueue: Promise<unknown> = Promise.resolve();
   constructor(private readonly options: {
@@ -663,6 +677,7 @@ export class SnowLumaRuntime {
   private async snapshotWithContainer(command: RuntimeCommand, inspected: DockerInspectResult | null): Promise<SnowlumaSnapshot> {
     this.assertAllowed(command);
     if (!inspected || inspected.state !== "running" || !inspected.ipAddress) {
+      this.probeUnreachableSince.delete(command.endpointId);
       return { endpointId: command.endpointId, generation: command.generation, runtime: "stopped", provider: "unknown", protocol: "disconnected", convergence: "reconciling", metadata: {} };
     }
     const base = new URL(`http://${inspected.ipAddress}:${ONEBOT_HTTP_PORT}`);
@@ -694,18 +709,28 @@ export class SnowLumaRuntime {
       // "waiting for the QQ scan login" rather than a runtime failure. NapCat keeps
       // the driver probe available in the same situation, so report available with a
       // disconnected protocol; the console then renders the login-required state.
+      // The same probe also fails when it merely times out or the token cannot be read,
+      // so QQ state stays unknown until the provider has been unreachable for the whole
+      // grace window: reporting `online: false` on the first failure raised "QQ offline"
+      // alerts for endpoints that were serving traffic seconds later.
       const reason = statusSettled.reason as Error & { probe?: { ok: boolean; durationMs: number; error: string | null } };
+      const now = Date.now();
+      const tracked = this.probeUnreachableSince.get(command.endpointId);
+      const since = tracked && tracked.generation === command.generation ? tracked.since : now;
+      this.probeUnreachableSince.set(command.endpointId, { generation: command.generation, since });
+      const unreachable = now - since >= providerUnreachableGraceMs();
       return {
         endpointId: command.endpointId, generation: command.generation, runtime: "ready", provider: "available",
         protocol: "disconnected", convergence: "reconciling",
         metadata: {
-          qq: { online: false }, login: {},
+          qq: { online: unreachable ? false : null }, login: {},
           onebot: { status: {}, loginInfo: {}, version: null, probes: { get_status: reason?.probe ?? { ok: false, durationMs: 0, error: safeError(reason) } } },
           loginGuide,
           error: safeError(reason),
         },
       };
     }
+    this.probeUnreachableSince.delete(command.endpointId);
     const statusResult = statusSettled.value;
     const loginResult = loginSettled.status === "fulfilled" ? loginSettled.value : null;
     const versionResult = versionSettled.status === "fulfilled" ? versionSettled.value : null;
@@ -717,7 +742,11 @@ export class SnowLumaRuntime {
     const asObject = (value: JsonValue): JsonObject => value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
     const status = asObject(statusResult.data);
     const loginInfo = loginResult ? asObject(loginResult.data) : {};
-    const online = typeof status.online === "boolean" ? status.online && Object.keys(loginInfo).length > 0 : Object.keys(loginInfo).length > 0 ? true : null;
+    const online = typeof status.online === "boolean"
+      ? status.online
+      // get_status answered without a boolean, so fall back to the login probe; a rejected
+      // get_login_info leaves the state unknown instead of guessing "logged out".
+      : Object.keys(loginInfo).length > 0 ? true : null;
     if (online !== true) {
       return {
         endpointId: command.endpointId, generation: command.generation, runtime: "ready", provider: "available",
