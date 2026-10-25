@@ -55,10 +55,16 @@ const ONEBOT_HTTP_PORT = 3000;
 // instead of going silent. Override for tests and for nodes with a slower probe budget.
 const PROVIDER_UNREACHABLE_GRACE_MS = 60_000;
 const providerUnreachableGraceMs = () => {
-  const configured = process.env.SNOWLUMA_PROVIDER_UNREACHABLE_GRACE_MS;
-  const parsed = configured === undefined ? Number.NaN : Number(configured);
+  // A blank value means "not set": Number("") is 0, which would silently disable the grace period.
+  const configured = process.env.SNOWLUMA_PROVIDER_UNREACHABLE_GRACE_MS?.trim();
+  if (!configured) return PROVIDER_UNREACHABLE_GRACE_MS;
+  const parsed = Number(configured);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : PROVIDER_UNREACHABLE_GRACE_MS;
 };
+/** True when the provider answered but refused the request, i.e. the token is wrong or not readable
+ *  yet. The server is up, so this says nothing about whether QQ is logged out. */
+const providerRejected = (error: unknown) =>
+  /failed: (401|403)$/.test(error instanceof Error ? error.message : String(error));
 /** SnowLuma 1.14+ writes its live configuration here; the mounted volume at
  *  /app/snowluma-data only carries the legacy layout. */
 const SNOWLUMA_LIVE_DATA_DIRECTORY = "/app/data";
@@ -259,6 +265,9 @@ export class SnowLumaRuntime {
       this.commands.delete(command.endpointId);
       await this.persistCommands();
       this.snapshotCache.delete(command.endpointId);
+      // A recreated endpoint starts with a fresh provider, so an outage timer from the deleted
+      // runtime must not make the new one report offline before its grace window has elapsed.
+      this.probeUnreachableSince.delete(command.endpointId);
       await onProgress({ phase: "removing-runtime", percent: 95, message: "Runtime deletion complete" });
       return { state: "stopped", observations: { node: "online", runtime: "stopped", provider: "unavailable", protocol: "disconnected", convergence: "converged" }, metadata: { deleted: true } };
     }
@@ -714,17 +723,30 @@ export class SnowLumaRuntime {
       // grace window: reporting `online: false` on the first failure raised "QQ offline"
       // alerts for endpoints that were serving traffic seconds later.
       const reason = statusSettled.reason as Error & { probe?: { ok: boolean; durationMs: number; error: string | null } };
+      // get_status failed, so the remaining evidence decides: account data from a successful
+      // get_login_info proves QQ is logged in, and a rejected request (401/403 after a token
+      // rotation) proves the server is up. Neither is an outage, so neither may advance the
+      // unreachable timer that turns a dead provider into an offline alert.
+      const pendingLogin = loginSettled.status === "fulfilled" ? loginSettled.value.data : null;
+      const account = pendingLogin !== null && typeof pendingLogin === "object" && !Array.isArray(pendingLogin) ? pendingLogin as JsonObject : {};
+      const reachable = loginSettled.status === "fulfilled" || providerRejected(reason);
       const now = Date.now();
       const tracked = this.probeUnreachableSince.get(command.endpointId);
       const since = tracked && tracked.generation === command.generation ? tracked.since : now;
-      this.probeUnreachableSince.set(command.endpointId, { generation: command.generation, since });
-      const unreachable = now - since >= providerUnreachableGraceMs();
+      let online: boolean | null;
+      if (reachable) {
+        this.probeUnreachableSince.delete(command.endpointId);
+        online = Object.keys(account).length > 0 ? true : null;
+      } else {
+        this.probeUnreachableSince.set(command.endpointId, { generation: command.generation, since });
+        online = now - since >= providerUnreachableGraceMs() ? false : null;
+      }
       return {
         endpointId: command.endpointId, generation: command.generation, runtime: "ready", provider: "available",
-        protocol: "disconnected", convergence: "reconciling",
+        protocol: online === true ? "connected" : "disconnected", convergence: "reconciling",
         metadata: {
-          qq: { online: unreachable ? false : null }, login: {},
-          onebot: { status: {}, loginInfo: {}, version: null, probes: { get_status: reason?.probe ?? { ok: false, durationMs: 0, error: safeError(reason) } } },
+          qq: { online, ...account }, login: {},
+          onebot: { status: {}, loginInfo: account, version: null, probes: { get_status: reason?.probe ?? { ok: false, durationMs: 0, error: safeError(reason) } } },
           loginGuide,
           error: safeError(reason),
         },

@@ -19,7 +19,10 @@ export type AlertEventType="endpoint.offline"|"endpoint.recovery";
 export type QqLoginAlertState="unknown"|"online"|"offline"|"offline-pending";
 export function evaluateQqLoginAlertTransition(input:{incidentOpen:boolean;observedAt:Date|null;qqOnline:boolean|null;offlineSince:Date|null;now:Date;graceSeconds:number}):{state:QqLoginAlertState;incidentOpen:boolean;offlineSince:Date|null;event:AlertEventType|null}{
   const fresh=input.observedAt!==null&&input.now.getTime()-input.observedAt.getTime()<=input.graceSeconds*1000&&input.observedAt.getTime()<=input.now.getTime();
-  if(!fresh||input.qqOnline===null)return{state:"unknown",incidentOpen:input.incidentOpen,offlineSince:input.offlineSince,event:null};
+  // A stale or unknown sample proves nothing about the current QQ state, so it also disarms any
+  // pending offline timer: the offline run has to be continuous, otherwise a timer armed hours ago
+  // would page immediately on the next single offline sample after an observation gap.
+  if(!fresh||input.qqOnline===null)return{state:"unknown",incidentOpen:input.incidentOpen,offlineSince:null,event:null};
   if(input.qqOnline)return{state:"online",incidentOpen:false,offlineSince:null,event:input.incidentOpen?"endpoint.recovery":null};
   // One "QQ offline" sample is not enough to page: the observation has to stay offline for the
   // whole grace window first. Agents report a provider that merely stopped answering as unknown,

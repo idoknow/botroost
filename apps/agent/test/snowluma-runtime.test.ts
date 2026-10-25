@@ -239,6 +239,50 @@ describe("SnowLuma runtime", () => {
     expect(metadata.onebot.probes.get_login_info?.ok).toBe(false);
   });
 
+  it("keeps QQ online when get_login_info answers but get_status is rejected", async () => {
+    const docker = new RecordingDocker();
+    docker.inspect = async () => ownedContainer();
+    const healthy = oneBotFetcher(true);
+    const runtime = new SnowLumaRuntime({
+      docker,
+      stateDirectory: await mkdtemp(join(tmpdir(), "snowluma-status-401-")),
+      // get_status 401ing while get_login_info still returns the account means the credential is
+      // only half broken; the account itself proves QQ is logged in.
+      fetcher: async (url, init) => new URL(String(url)).pathname === "/get_status"
+        ? new Response("unauthorized", { status: 401 })
+        : healthy(url, init),
+    });
+    const result = await runtime.apply("effect-1", baseCommand);
+    expect(result.observations?.protocol).toBe("connected");
+    const metadata = result.metadata as { qq: { online: boolean | null; nickname?: string }; onebot: { probes: Record<string, { ok: boolean }> } };
+    expect(metadata.qq.online).toBe(true);
+    expect(metadata.qq.nickname).toBe("tester");
+    expect(metadata.onebot.probes.get_status?.ok).toBe(false);
+  });
+
+  it("treats a rejected OneBot request as a reachable server instead of a logout", async () => {
+    const docker = new RecordingDocker();
+    docker.inspect = async () => ownedContainer();
+    const previous = process.env.SNOWLUMA_PROVIDER_UNREACHABLE_GRACE_MS;
+    // Even with the whole grace window elapsed a 401 must not become "QQ offline": the provider
+    // answered, so the only thing broken is the access token.
+    process.env.SNOWLUMA_PROVIDER_UNREACHABLE_GRACE_MS = "0";
+    try {
+      const runtime = new SnowLumaRuntime({
+        docker,
+        stateDirectory: await mkdtemp(join(tmpdir(), "snowluma-token-401-")),
+        fetcher: async () => new Response("unauthorized", { status: 401 }),
+      });
+      const result = await runtime.apply("effect-1", baseCommand);
+      const metadata = result.metadata as { qq: { online: boolean | null }; error: string };
+      expect(metadata.qq.online).toBeNull();
+      expect(metadata.error).toContain("401");
+    } finally {
+      if (previous === undefined) delete process.env.SNOWLUMA_PROVIDER_UNREACHABLE_GRACE_MS;
+      else process.env.SNOWLUMA_PROVIDER_UNREACHABLE_GRACE_MS = previous;
+    }
+  });
+
   it("publishes the container's generated VNC password so noVNC can authenticate", async () => {
     const docker = new RecordingDocker();
     docker.inspect = async () => ownedContainer();
