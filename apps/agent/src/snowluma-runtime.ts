@@ -68,6 +68,18 @@ const providerRejected = (error: unknown) =>
 /** SnowLuma 1.14+ writes its live configuration here; the mounted volume at
  *  /app/snowluma-data only carries the legacy layout. */
 const SNOWLUMA_LIVE_DATA_DIRECTORY = "/app/data";
+/** Every writable path that carries state, and where the container has to see it. Each entry is a
+ *  volume of its own endpoint: /app/data holds the live config (onebot_<qq>.json), the
+ *  machine-id the QQ login is bound to and the WebUI password, /app/.pki the device certificates
+ *  the client pins, so none of it may live in the container's writable layer. */
+export const SNOWLUMA_VOLUMES = {
+  qq: "/app/.config",
+  data: SNOWLUMA_LIVE_DATA_DIRECTORY,
+  pki: "/app/.pki",
+  local: "/app/.local",
+  config: "/app/snowluma-data",
+} as const;
+type SnowlumaVolume = keyof typeof SNOWLUMA_VOLUMES;
 const NOVNC_CONTAINER_PORT = "6081";
 const WEBUI_CONTAINER_PORT = "5099";
 const endpointIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -266,7 +278,7 @@ export class SnowLumaRuntime {
     if (!path.startsWith(`${root}${sep}`)) throw new Error("endpoint storage path is invalid");
     return path;
   }
-  private hostEndpointDirectory(endpointId: string, child: "qq" | "config") {
+  private hostEndpointDirectory(endpointId: string, child: SnowlumaVolume) {
     if (!endpointIdPattern.test(endpointId)) throw new Error("endpoint identifier is invalid");
     const root = resolve(this.options.hostStateDirectory ?? this.options.stateDirectory);
     const path = resolve(root, endpointId, child);
@@ -424,8 +436,10 @@ export class SnowLumaRuntime {
       await onProgress({ phase: "preparing-runtime", percent: 40, message: "Preparing runtime image and storage" });
       // On Docker these are host directories handed to the container as bind mounts; on
       // Kubernetes they are the in-container mount targets of the endpoint's PVC.
-      const hostQq = this.containerMounts.qq ?? this.hostEndpointDirectory(command.endpointId, "qq");
-      const hostConfig = this.containerMounts.config ?? this.hostEndpointDirectory(command.endpointId, "config");
+      const hostDirectory = (child: SnowlumaVolume) =>
+        (this.containerMounts as Record<string, string>)[child] ?? this.hostEndpointDirectory(command.endpointId, child);
+      const hostQq = hostDirectory("qq");
+      const hostConfig = hostDirectory("config");
       const storage = this.storage.for(name);
       const runtimeConfigPath = join(hostConfig, "config", "runtime.json");
       const seedRuntimeConfig = async () => {
@@ -439,15 +453,18 @@ export class SnowLumaRuntime {
       // the claim's subPath directories come from the workload's init container and the pod
       // does not exist yet, so preparing them through exec would abort the create.
       if (this.storage.kind === "local") {
-        await storage.ensureDirectory(hostQq);
+        for (const child of Object.keys(SNOWLUMA_VOLUMES) as SnowlumaVolume[]) {
+          await storage.ensureDirectory(hostDirectory(child));
+        }
         await onProgress({ phase: "preparing-runtime", percent: 45, message: "Preparing SnowLuma configuration storage" });
         await storage.ensureDirectory(join(hostConfig, "config"));
         // The SnowLuma image runs its main process as an unprivileged user (uid SNOWLUMA_UID,
         // default 1000) with cwd /app/snowluma-data, while its entrypoint writes config/runtime.json
         // as root. Bind-mount host directories world-writable and pre-seed runtime.json with mode
         // 0o666 so the entrypoint's root-owned overwrite keeps it writable by the main process.
-        await chmod(hostQq, 0o777).catch(() => {});
-        await chmod(hostConfig, 0o777).catch(() => {});
+        for (const child of Object.keys(SNOWLUMA_VOLUMES) as SnowlumaVolume[]) {
+          await chmod(hostDirectory(child), 0o777).catch(() => {});
+        }
         await chmod(join(hostConfig, "config"), 0o777).catch(() => {});
         await seedRuntimeConfig();
       }
@@ -463,10 +480,13 @@ export class SnowLumaRuntime {
           "botroost.generation": String(command.generation),
         },
         environment: { ...(proxyEnvironment ?? {}) },
-        mounts: [
-          { type: "bind", source: hostQq, target: "/app/.config" },
-          { type: "bind", source: hostConfig, target: "/app/snowluma-data" },
-        ],
+        // One bind per state directory, all of them per endpoint: no two endpoints ever share a
+        // source, and nothing that carries state is left in the container's writable layer.
+        mounts: (Object.keys(SNOWLUMA_VOLUMES) as SnowlumaVolume[]).map(child => ({
+          type: "bind" as const,
+          source: hostDirectory(child),
+          target: SNOWLUMA_VOLUMES[child],
+        })),
         hostConfig: { networkMode: this.networkMode, portBindings: {} },
         resources: desiredResources,
         capAdd: ["SYS_PTRACE"],

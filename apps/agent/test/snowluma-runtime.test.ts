@@ -138,10 +138,14 @@ describe("SnowLuma runtime", () => {
     expect(created.securityOpt).toEqual(["seccomp=unconfined"]);
     expect(created.shmBytes).toBe(1024 * 1024 * 1024);
     expect(created.labels["botroost.provider"]).toBe("snowluma");
-    expect(created.mounts).toEqual([
-      { type: "bind", source: expect.stringContaining(join("33333333-3333-4333-8333-333333333333", "qq")), target: "/app/.config" },
-      { type: "bind", source: expect.stringContaining(join("33333333-3333-4333-8333-333333333333", "config")), target: "/app/snowluma-data" },
+    // Every state directory is a bind of its own, and each lives under this endpoint's
+    // directory: nothing that carries state stays in the container's writable layer.
+    const sources = created.mounts.map(mount => mount.source);
+    expect(created.mounts.map(mount => mount.target)).toEqual([
+      "/app/.config", "/app/data", "/app/.pki", "/app/.local", "/app/snowluma-data",
     ]);
+    for (const source of sources) expect(source).toContain(baseCommand.endpointId);
+    expect(new Set(sources).size).toBe(sources.length);
     const ports = snowlumaLoginPorts(baseCommand.endpointId);
     expect(created.publishedPorts).toEqual([
       { hostPort: String(ports.novncPort), containerPort: "6081" },
