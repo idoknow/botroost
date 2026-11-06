@@ -128,6 +128,22 @@ const preservedToken = (value: JsonObject, previous: JsonObject | undefined): st
   if (typeof value.token === "string" && value.token) return value.token;
   return typeof previous?.accessToken === "string" ? previous.accessToken : "";
 };
+/** Re-apply cadence after a container start: SnowLuma only writes onebot_<qq>.json once QQ is
+ *  logged in, so the first attempts routinely land too early and must not be treated as failures. */
+const ONEBOT_RECONCILE_DELAYS_MS = [0, 5_000, 15_000, 45_000, 120_000];
+/** Periodic observation heals a container that restarted without a command (node reboot, OOM). */
+const ONEBOT_RECONCILE_COOLDOWN_MS = 60_000;
+
+/** Order-independent JSON so two SnowLuma config fragments can be compared byte for byte. */
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (isJsonObject(value as JsonValue)) {
+    const entries = Object.entries(value as JsonObject).sort(([a], [b]) => a.localeCompare(b));
+    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
 const redactLogs = (text: string) => text
   .replace(/([?&](?:token|password|secret|key)=)[^&\s]+/gi, "$1[REDACTED]")
   .replace(/((?:authorization|cookie)\s*:\s*)(?:bearer\s+)?[^\r\n]+/gi, "$1[REDACTED]")
@@ -147,6 +163,15 @@ export class SnowLumaRuntime {
   /** First moment the provider probe stopped answering, per endpoint, so a transient failure can
    *  be reported as "unknown" while a sustained one is still reported as offline. */
   private readonly probeUnreachableSince = new Map<string, { generation: number; since: number }>();
+  /** Last OneBot websocket configuration the console asked for, persisted per endpoint. SnowLuma
+   *  1.14+ keeps its live config under /app/data, which is not a durable volume on either backend,
+   *  so a container restart drops the ws clients/servers. Re-applying from here restores them
+   *  without touching /app/.config, i.e. the QQ login survives. */
+  private readonly oneBotDesired = new Map<string, { wsClients: JsonObject[]; wsServers: JsonObject[]; updatedAt: string }>();
+  private oneBotDesiredLoaded = false;
+  private oneBotDesiredLoading: Promise<void> | null = null;
+  private readonly oneBotReconcileScheduled = new Set<string>();
+  private readonly oneBotReconcileAt = new Map<string, number>();
   private commandsLoaded = false;
   private executionQueue: Promise<unknown> = Promise.resolve();
   constructor(private readonly options: {
@@ -194,6 +219,46 @@ export class SnowLumaRuntime {
     await writeFile(temporary, `${JSON.stringify([...this.commands.values()])}\n`, { mode: 0o600 });
     await rename(temporary, this.commandStatePath());
   }
+  private oneBotDesiredPath() { return join(this.options.stateDirectory, "snowluma-onebot-desired.json"); }
+  private loadOneBotDesired(): Promise<void> {
+    // Concurrent callers (a start command and the heartbeat) must await the same read: marking the
+    // state loaded before the file is parsed would let the second caller see an empty map and skip
+    // the restore for the rest of the process lifetime.
+    if (!this.oneBotDesiredLoading) {
+      this.oneBotDesiredLoading = (async () => {
+        try {
+          const stored = JSON.parse(await readFile(this.oneBotDesiredPath(), "utf8")) as unknown[];
+          for (const value of stored) {
+            const record = asJsonObject(value as JsonValue);
+            const endpointId = typeof record.endpointId === "string" ? record.endpointId : "";
+            if (!endpointIdPattern.test(endpointId)) continue;
+            this.oneBotDesired.set(endpointId, {
+              wsClients: asJsonList(record.wsClients as JsonValue),
+              wsServers: asJsonList(record.wsServers as JsonValue),
+              updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : "",
+            });
+          }
+          this.oneBotDesiredLoaded = true;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+            this.oneBotDesiredLoaded = true;
+            return;
+          }
+          // Leave the state unloaded so a later reconcile retries instead of silently never restoring.
+          this.oneBotDesiredLoading = null;
+          throw error;
+        }
+      })();
+    }
+    return this.oneBotDesiredLoading;
+  }
+  private async persistOneBotDesired() {
+    await mkdir(this.options.stateDirectory, { recursive: true, mode: 0o700 });
+    const temporary = `${this.oneBotDesiredPath()}.${process.pid}.tmp`;
+    const payload = [...this.oneBotDesired.entries()].map(([endpointId, value]) => ({ endpointId, ...value }));
+    await writeFile(temporary, `${JSON.stringify(payload)}\n`, { mode: 0o600 });
+    await rename(temporary, this.oneBotDesiredPath());
+  }
   private endpointRoot(endpointId: string) {
     if (!endpointIdPattern.test(endpointId)) throw new Error("endpoint identifier is invalid");
     const root = resolve(this.options.stateDirectory);
@@ -240,6 +305,11 @@ export class SnowLumaRuntime {
       return this.applySerial(effectId, command, async progress => { deadline.throwIfAborted(); await onProgress(progress); deadline.throwIfAborted(); });
     });
     this.executionQueue = pending.catch(() => undefined);
+    if (command.action !== "stop" && command.action !== "delete") {
+      // Reconcile only after this command settled, so it queues behind it instead of racing the
+      // start that reset the container.
+      void this.executionQueue.then(() => this.scheduleOneBotReconcile(command.endpointId));
+    }
     return pending;
   }
   private async applySerial(_effectId: string, command: RuntimeCommand, onProgress: (progress: SnowlumaProgress) => Promise<void>): Promise<SnowlumaApplyResult> {
@@ -264,6 +334,7 @@ export class SnowLumaRuntime {
       await onProgress({ phase: "removing-runtime", percent: 78, message: "Finalizing agent runtime deletion" });
       this.commands.delete(command.endpointId);
       await this.persistCommands();
+      if (this.oneBotDesired.delete(command.endpointId)) await this.persistOneBotDesired();
       this.snapshotCache.delete(command.endpointId);
       // A recreated endpoint starts with a fresh provider, so an outage timer from the deleted
       // runtime must not make the new one report offline before its grace window has elapsed.
@@ -291,6 +362,18 @@ export class SnowLumaRuntime {
       if (!found) throw new Error("SnowLuma OneBot configuration appears after QQ login; scan the login QR first");
       this.commands.set(command.endpointId, command);
       await this.persistCommands();
+      // Resolve the console payload against the live config first so the remembered state keeps
+      // SnowLuma's own values (access tokens, paths, roles) that the editor never echoes back.
+      const merged = this.mapOneBotWebsockets(found.config, clients, servers);
+      const mergedNetworks = asJsonObject(merged.networks);
+      // Write-ahead: if the agent dies after SnowLuma accepted the change, the remembered state
+      // must already be the new one, otherwise the next restart restores the previous setup.
+      this.oneBotDesired.set(command.endpointId, {
+        wsClients: asJsonList(mergedNetworks.wsClients),
+        wsServers: asJsonList(mergedNetworks.wsServers),
+        updatedAt: new Date().toISOString(),
+      });
+      await this.persistOneBotDesired();
       // Preferred path: SnowLuma's own WebUI API applies the change live (no restart, the
       // QQ login survives). Fall back to writing the config file and reloading the service
       // when the WebUI is unreachable or its password was rotated.
@@ -299,13 +382,13 @@ export class SnowLumaRuntime {
       if (credentials.webuiPassword && existing.ipAddress) {
         try {
           await onProgress({ phase: "applying-configuration", percent: 70, message: "Applying the configuration through the SnowLuma WebUI API" });
-          await this.applyOneBotWebsocketsViaWebui(command.endpointId, existing.ipAddress, found.qq, credentials.webuiPassword, clients, servers);
+          await this.applyOneBotConfigViaWebui(command.endpointId, existing.ipAddress, found.qq, credentials.webuiPassword, () => merged);
           appliedVia = "webui";
         } catch (error) { console.error(`snowluma webui apply failed, falling back to file reload: ${safeError(error)}`); }
       }
       if (appliedVia === "file") {
         await onProgress({ phase: "applying-configuration", percent: 70, message: "Writing OneBot WebSocket configuration" });
-        await this.writeOneBotWebsockets(command.endpointId, found.path, found.config, clients, servers);
+        await this.writeOneBotConfig(command.endpointId, found, merged);
         await onProgress({ phase: "applying-configuration", percent: 80, message: "Reloading the SnowLuma OneBot service" });
         // Restart only the OneBot service process; QQ keeps running so the login session survives.
         await docker.exec(name, ["supervisorctl", "restart", "snowluma"]);
@@ -429,7 +512,9 @@ export class SnowLumaRuntime {
   }
   async snapshot(command: RuntimeCommand) {
     this.assertAllowed(command);
-    return this.snapshotWithContainer(command, await this.options.docker.inspect(this.containerName(command.endpointId)));
+    const snapshot = await this.snapshotWithContainer(command, await this.options.docker.inspect(this.containerName(command.endpointId)));
+    this.maybeReconcileOneBot(command.endpointId);
+    return snapshot;
   }
   private async oneBotGet(base: URL, action: string, token: string | undefined, timeoutMs = 10_000): Promise<{ data: JsonValue; probe: { ok: boolean; durationMs: number; error: string | null } }> {
     const started = Date.now();
@@ -520,19 +605,72 @@ export class SnowLumaRuntime {
     } catch { /* token file not present yet (e.g. before QQ login) */ }
     return undefined;
   }
-  private async findOneBotConfig(endpointId: string): Promise<{ path: string; qq: string; config: JsonObject } | null> {
+  private async findOneBotConfig(endpointId: string): Promise<{ path: string; qq: string; config: JsonObject; container: boolean } | null> {
     // SnowLuma keeps its OneBot files in the configuration directory: /app/data/config on 1.14+,
     // the bind-mounted /app/snowluma-data (with a "config" subdirectory) on older releases. The
     // live copy wins — the mount still holds the pre-upgrade tokens, and reading those made every
     // OneBot probe fail with 401 after a 1.14 endpoint logged in.
     const storage = this.storage.for(this.containerName(endpointId));
-    for (const directory of this.configDirectories(endpointId)) {
+    // Live configuration first. When it exists but cannot be parsed (SnowLuma is rewriting it),
+    // report "not ready" instead of falling back to the legacy mount, whose copy is stale: writing
+    // it back would report success while the runtime keeps the old file.
+    if (this.kubernetes) {
+      const live = join(SNOWLUMA_LIVE_DATA_DIRECTORY, "config");
+      let liveFiles = 0;
+      for (const entry of await storage.readdir(live)) {
+        const match = /^onebot_(.+)\.json$/.exec(entry);
+        if (!match?.[1]) continue;
+        liveFiles += 1;
+        try {
+          const config = asJsonObject(JSON.parse(await storage.readFile(join(live, entry))) as JsonValue);
+          return { path: join(live, entry), qq: match[1], config, container: false };
+        } catch { /* mid-write */ }
+      }
+      if (liveFiles > 0) return null;
+    } else {
+      // Docker keeps the live file inside the container, out of reach of the host bind mounts.
+      const fromContainer = await this.readOneBotConfigFromContainer(endpointId).catch(() => "unreadable" as const);
+      if (fromContainer === "unreadable") return null;
+      if (fromContainer) return fromContainer;
+    }
+    for (const directory of this.legacyConfigDirectories(endpointId)) {
       for (const entry of await storage.readdir(directory)) {
         const match = /^onebot_(.+)\.json$/.exec(entry);
         if (!match?.[1]) continue;
         const path = join(directory, entry);
-        const config = asJsonObject(JSON.parse(await storage.readFile(path)) as JsonValue);
-        return { path, qq: match[1], config };
+        try {
+          const config = asJsonObject(JSON.parse(await storage.readFile(path)) as JsonValue);
+          return { path, qq: match[1], config, container: false };
+        } catch {
+          continue;
+        }
+      }
+    }
+    return null;
+  }
+  /** Legacy layout only: the mount that older SnowLuma releases wrote to. */
+  private legacyConfigDirectories(endpointId: string): string[] {
+    const mountDirectory = this.containerMounts.config ?? this.hostEndpointDirectory(endpointId, "config");
+    return [join(mountDirectory, "config"), mountDirectory];
+  }
+  /** Docker backend: read SnowLuma 1.14+'s live OneBot file through the container itself. */
+  private async readOneBotConfigFromContainer(
+    endpointId: string,
+  ): Promise<{ path: string; qq: string; config: JsonObject; container: true } | "unreadable" | null> {
+    const exec = this.options.docker.exec.bind(this.options.docker);
+    const name = this.containerName(endpointId);
+    const listing = await exec(name, ["sh", "-c", `ls -1 ${SNOWLUMA_LIVE_DATA_DIRECTORY}/config 2>/dev/null || true`]);
+    for (const entry of listing.stdout.split("\n").map(line => line.trim())) {
+      const match = /^onebot_(.+)\.json$/.exec(entry);
+      if (!match?.[1]) continue;
+      const path = `${SNOWLUMA_LIVE_DATA_DIRECTORY}/config/${entry}`;
+      try {
+        const body = await exec(name, ["cat", path]);
+        return { path, qq: match[1], config: asJsonObject(JSON.parse(body.stdout) as JsonValue), container: true };
+      } catch {
+        // The live file exists but cannot be read right now (mid-write). Falling back to the
+        // legacy mount would restore a stale copy and report success.
+        return "unreadable";
       }
     }
     return null;
@@ -576,13 +714,43 @@ export class SnowLumaRuntime {
     });
     return { ...config, networks: { ...networks, wsServers: mappedServers, wsClients: mappedClients } };
   }
-  private async writeOneBotWebsockets(endpointId: string, path: string, config: JsonObject, clients: unknown[], servers: unknown[]) {
-    const merged = this.mapOneBotWebsockets(config, clients, servers);
-    await this.storage.for(this.containerName(endpointId)).writeFile(path, `${JSON.stringify(merged, null, 2)}\n`);
+  private async writeOneBotConfig(
+    endpointId: string,
+    found: { path: string; qq: string; container?: boolean },
+    merged: JsonObject,
+  ) {
+    const payload = `${JSON.stringify(merged, null, 2)}\n`;
+    const storage = this.storage.for(this.containerName(endpointId));
+    if (!found.container) {
+      await storage.writeFile(found.path, payload);
+      return;
+    }
+    // Docker + SnowLuma 1.14+: the live file lives inside the container. Stage it on the mounted
+    // volume, copy it into place through exec, then drop the staging file.
+    const mount = this.containerMounts.config ?? this.hostEndpointDirectory(endpointId, "config");
+    const stagingName = `.onebot-reconcile-${found.qq}.json`;
+    await storage.writeFile(join(mount, stagingName), payload);
+    const exec = this.options.docker.exec.bind(this.options.docker);
+    try {
+      await exec(this.containerName(endpointId), [
+        "sh",
+        "-c",
+        `mkdir -p ${SNOWLUMA_LIVE_DATA_DIRECTORY}/config && cp /app/snowluma-data/${stagingName} ${found.path} && rm -f /app/snowluma-data/${stagingName}`,
+      ]);
+    } catch (error) {
+      await storage.remove(join(mount, stagingName)).catch(() => undefined);
+      throw error;
+    }
   }
   /** Apply the OneBot websocket configuration through SnowLuma's own WebUI API so the running
    *  service picks the change up live — no supervisor restart and the QQ login stays untouched. */
-  private async applyOneBotWebsocketsViaWebui(endpointId: string, ipAddress: string, qq: string, password: string, clients: unknown[], servers: unknown[]) {
+  private async applyOneBotConfigViaWebui(
+    endpointId: string,
+    ipAddress: string,
+    qq: string,
+    password: string,
+    build: (current: JsonObject) => JsonObject,
+  ) {
     const base = `http://${ipAddress}:${WEBUI_CONTAINER_PORT}`;
     const login = await this.webuiLogin(endpointId, base, password);
     let token = typeof login.body.token === "string" ? login.body.token : null;
@@ -614,12 +782,116 @@ export class SnowLumaRuntime {
     const current = await this.webuiFetch(configUrl, { headers });
     // The endpoint answers with the stored config either raw or wrapped as {config: …}.
     const existingConfig = asJsonObject(current !== null && typeof current === "object" && !Array.isArray(current) && "config" in current ? (current as JsonObject).config : current);
-    const merged = this.mapOneBotWebsockets(existingConfig, clients, servers);
-    await this.webuiFetch(configUrl, { method: "POST", headers, body: JSON.stringify(merged) });
+    await this.webuiFetch(configUrl, { method: "POST", headers, body: JSON.stringify(build(existingConfig)) });
   }
   /** Log into the SnowLuma WebUI. The managed password is tried first, then the most recent
    *  "initial credentials" banners — SnowLuma rotates that banner password on every restart,
    *  so the newest log entries win while the password is still in its initial state. */
+  /**
+   * Re-apply the remembered OneBot websocket configuration when the live file no longer carries it.
+   *
+   * Only the OneBot configuration is touched: the preferred path uses SnowLuma's own WebUI API
+   * (live, no restart), and the fallback restarts just the snowluma supervisor program. Neither
+   * recreates the container nor writes to /app/.config, so the QQ login is preserved.
+   */
+  async reconcileOneBotConfiguration(
+    endpointId: string,
+  ): Promise<"applied" | "unchanged" | "pending" | "absent" | "stopped"> {
+    if (!endpointIdPattern.test(endpointId)) throw new Error("endpoint identifier is invalid");
+    await this.loadOneBotDesired();
+    // Remember which desired version this pass is based on: a console apply that lands while the
+    // restore is queued must win, not be overwritten by the older copy captured here.
+    const version = this.oneBotDesired.get(endpointId)?.updatedAt ?? null;
+    // Serialize with runtime commands: restores must never interleave with an apply in flight.
+    const task = this.executionQueue.then(() => this.reconcileOneBotInner(endpointId, version));
+    this.executionQueue = task.catch(() => undefined);
+    return task;
+  }
+  private async reconcileOneBotInner(
+    endpointId: string,
+    version: string | null,
+  ): Promise<"applied" | "unchanged" | "pending" | "absent" | "stopped"> {
+    const desired = this.oneBotDesired.get(endpointId);
+    if (!desired) return "absent";
+    if (version !== null && desired.updatedAt !== version) return "pending";
+    const name = this.containerName(endpointId);
+    const inspected = await this.options.docker.inspect(name);
+    if (!inspected || inspected.state !== "running") return "stopped";
+    // SnowLuma writes onebot_<qq>.json after the QQ login lands, and rewrites it on config
+    // changes, so an unreadable file means "try again later" rather than a hard failure. Storage
+    // or exec failures are surfaced instead of being reported as "still logging in".
+    const found = await this.findOneBotConfig(endpointId).catch(error => {
+      console.error(`snowluma onebot reconcile could not read the live configuration: ${safeError(error)}`);
+      return null;
+    });
+    if (!found) return "pending";
+    const current = asJsonObject(found.config.networks);
+    if (stableJson(desired.wsClients) === stableJson(asJsonList(current.wsClients))
+      && stableJson(desired.wsServers) === stableJson(asJsonList(current.wsServers))) {
+      return "unchanged";
+    }
+    const merged: JsonObject = { ...found.config, networks: { ...current, wsClients: desired.wsClients, wsServers: desired.wsServers } };
+    let applied = false;
+    const credentials = await this.webuiCredentials(endpointId);
+    if (credentials.webuiPassword && inspected.ipAddress) {
+      try {
+        await this.applyOneBotConfigViaWebui(endpointId, inspected.ipAddress, found.qq, credentials.webuiPassword, () => merged);
+        applied = true;
+        console.error(`snowluma onebot configuration restored through the WebUI API for ${endpointId}`);
+      } catch (error) {
+        console.error(`snowluma onebot reconcile through the webui failed, falling back to file reload: ${safeError(error)}`);
+      }
+    }
+    if (!applied) {
+      // Re-read right before writing: SnowLuma may have rewritten the file since it was inspected,
+      // and the fallback must not clobber settings that arrived in the meantime.
+      const latest = await this.findOneBotConfig(endpointId).catch(() => null);
+      const base = latest ?? found;
+      await this.writeOneBotConfig(endpointId, base, {
+        ...base.config,
+        networks: { ...asJsonObject(base.config.networks), wsClients: desired.wsClients, wsServers: desired.wsServers },
+      });
+      await this.options.docker.exec(name, ["supervisorctl", "restart", "snowluma"]);
+      console.error(`snowluma onebot configuration rewritten after a container restart for ${endpointId}`);
+    }
+    this.snapshotCache.delete(endpointId);
+    return "applied";
+  }
+  /** Retry until the OneBot file exists, then stop: "pending" means QQ has not finished logging in. */
+  private scheduleOneBotReconcile(endpointId: string) {
+    if (this.oneBotReconcileScheduled.has(endpointId)) return;
+    this.oneBotReconcileScheduled.add(endpointId);
+    void (async () => {
+      try {
+        for (const [index, delay] of ONEBOT_RECONCILE_DELAYS_MS.entries()) {
+          if (delay > 0) await new Promise<void>(resolve => { const timer = setTimeout(resolve, delay); timer.unref?.(); });
+          try {
+            const outcome = await this.reconcileOneBotConfiguration(endpointId);
+            if (outcome !== "pending") return;
+          } catch (error) {
+            console.error(`snowluma onebot reconcile failed: ${safeError(error)}`);
+          }
+          if (index === ONEBOT_RECONCILE_DELAYS_MS.length - 1) return;
+        }
+      } finally {
+        this.oneBotReconcileScheduled.delete(endpointId);
+      }
+    })();
+  }
+  /** Observation is periodic, so it is also the cheapest place to heal a container that restarted
+   *  without a command (node reboot, OOM kill). Cooled down to avoid hammering the runtime. */
+  private maybeReconcileOneBot(endpointId: string) {
+    if (this.oneBotReconcileScheduled.has(endpointId)) return;
+    const last = this.oneBotReconcileAt.get(endpointId) ?? 0;
+    if (Date.now() - last < ONEBOT_RECONCILE_COOLDOWN_MS) return;
+    void this.loadOneBotDesired()
+      .then(() => {
+        if (!this.oneBotDesired.has(endpointId)) return;
+        this.oneBotReconcileAt.set(endpointId, Date.now());
+        this.scheduleOneBotReconcile(endpointId);
+      })
+      .catch(() => undefined);
+  }
   private async webuiLogin(endpointId: string, base: string, password: string, attempts = 1): Promise<{ password: string; body: JsonObject }> {
     const candidates = [password, ...(await this.bannerWebuiPasswords(endpointId))].filter((value, index, all) => value && all.indexOf(value) === index);
     let lastError: unknown = new Error("SnowLuma WebUI has no usable credentials");
@@ -855,6 +1127,9 @@ export class SnowLumaRuntime {
         if (cached && Date.now() - cached.at < 15_000 && inspected?.state === "running" && inspected.ipAddress) return cached.value;
         const value = await this.snapshotWithContainer(command, inspected);
         this.snapshotCache.set(command.endpointId, { at: Date.now(), value });
+        // Pointless while the container is down; otherwise this is the only path that notices a
+        // restart the agent never received a command for (node reboot, OOM kill).
+        if (inspected?.state === "running") this.maybeReconcileOneBot(command.endpointId);
         return value;
       } catch (error) {
         this.snapshotCache.delete(command.endpointId);

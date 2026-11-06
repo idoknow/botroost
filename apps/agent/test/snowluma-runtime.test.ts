@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -510,7 +510,7 @@ describe("SnowLuma runtime", () => {
         websocketServers: [{ name: "ws-default", enable: true, host: "127.0.0.1", port: 4000, messagePostFormat: "string", reportSelfMessage: false, debug: false, heartInterval: 30000, enableForcePushEvent: true }],
       },
     });
-    expect(docker.execCalls).toEqual([expect.arrayContaining(["supervisorctl", "restart", "snowluma"])]);
+    expect(docker.execCalls.some(args => args.join(" ") === "supervisorctl restart snowluma")).toBe(true);
     const written = JSON.parse(await readFile(configPath, "utf8")) as { networks: { wsServers: { name: string; host: string; port: number; messageFormat: string; accessToken: string; path: string; role: string }[]; wsClients: { name: string; url: string; messageFormat: string; reconnectIntervalMs: number }[] } };
     expect(written.networks.wsServers[0]).toMatchObject({ name: "ws-default", host: "127.0.0.1", port: 4000, messageFormat: "string", accessToken: "RWDWbvtKpMqsbJNTVtDbbc70O9yDt2feket3Gr54_SY", path: "/", role: "Universal" });
     expect(written.networks.wsClients[0]).toMatchObject({ name: "outbound", url: "ws://example.com/ws", messageFormat: "string", reconnectIntervalMs: 8000 });
@@ -566,8 +566,9 @@ describe("SnowLuma runtime", () => {
         websocketServers: [{ name: "ws-default", enable: true, host: "127.0.0.1", port: 4000, messagePostFormat: "string", reportSelfMessage: false, debug: false, heartInterval: 30000, enableForcePushEvent: true }],
       },
     });
-    // No supervisor restart: the WebUI applies the change live.
-    expect(docker.execCalls).toEqual([]);
+    // No supervisor restart: the WebUI applies the change live. Exec is still used read-only to
+    // inspect SnowLuma 1.14's live config inside the container.
+    expect(docker.execCalls.filter(args => args.includes("restart"))).toEqual([]);
     expect(webuiCalls.map(call => new URL(call.url).pathname)).toEqual(["/api/login", "/api/agreements/record-consent", "/api/config/212499575", "/api/config/212499575"]);
     expect(webuiCalls[0]?.body).toEqual({ password: "webui-pass" });
     expect(webuiCalls[1]?.body).toEqual({ version: "agr-1" });
@@ -606,7 +607,7 @@ describe("SnowLuma runtime", () => {
       action: "update-onebot-websockets",
       metadata: { ...baseCommand.metadata, websocketClients: [], websocketServers: [] },
     });
-    expect(docker.execCalls).toEqual([]);
+    expect(docker.execCalls.filter(args => args.includes("restart"))).toEqual([]);
     expect(webuiCalls).toHaveLength(1);
     expect(webuiCalls[0]).toContain("banner-pass");
     expect(webuiCalls[0]).toContain("Bearer t");
@@ -615,6 +616,93 @@ describe("SnowLuma runtime", () => {
     expect(managed).toMatch(/^Bt![A-Za-z0-9_-]{16}$/);
     // The console now shows the managed password instead of the regenerating banner one.
     expect(webuiCalls[0]).toContain(managed!);
+  });
+});
+
+describe("snowluma OneBot configuration reconcile", () => {
+  const seed = { networks: { httpServers: [], httpClients: [], wsServers: [], wsClients: [] } };
+
+  const setup = async () => {
+    const docker = new RecordingDocker();
+    docker.inspect = async () => ownedContainer();
+    docker.logs = async () => "initial credentials: user=admin password=webui-pass\n";
+    const stateDirectory = await mkdtemp(join(tmpdir(), "snowluma-ws-reconcile-"));
+    const configDirectory = join(stateDirectory, baseCommand.endpointId, "config", "config");
+    await mkdir(configDirectory, { recursive: true });
+    const configPath = join(configDirectory, "onebot_212499575.json");
+    await writeFile(configPath, JSON.stringify(seed, null, 2), "utf8");
+    const posts: { networks?: { wsServers?: { name: string }[]; wsClients?: { name: string }[] } }[] = [];
+    let live: unknown = seed;
+    const fetcher: FetchLike = async (url, init) => {
+      const target = new URL(String(url));
+      if (target.port === "5099") {
+        if (target.pathname === "/api/login") return new Response(JSON.stringify({ token: "t" }), { status: 200 });
+        if (target.pathname === "/api/agreements") return new Response(JSON.stringify({ version: "agr-1", consentRequired: false }), { status: 200 });
+        if (target.pathname === "/api/config/212499575") {
+          if ((init?.method ?? "GET") === "POST") {
+            live = JSON.parse(String(init?.body));
+            posts.push(live as never);
+            await writeFile(configPath, JSON.stringify(live, null, 2), "utf8");
+            return new Response(JSON.stringify({ config: live }), { status: 200 });
+          }
+          return new Response(JSON.stringify({ config: live }), { status: 200 });
+        }
+      }
+      return oneBotFetcher(true)(url, init);
+    };
+    return { docker, stateDirectory, configPath, posts, fetcher };
+  };
+
+  const applyWebsockets = (runtime: SnowLumaRuntime) => runtime.apply("effect-1", {
+    ...baseCommand,
+    action: "update-onebot-websockets",
+    metadata: {
+      ...baseCommand.metadata,
+      websocketClients: [],
+      websocketServers: [{ name: "ws-default", enable: true, host: "127.0.0.1", port: 4000, messagePostFormat: "array", reportSelfMessage: false, debug: false, heartInterval: 30000, enableForcePushEvent: true }],
+    },
+  });
+
+  it("re-applies the remembered websocket configuration after a container restart drops it", async () => {
+    const { docker, stateDirectory, configPath, posts, fetcher } = await setup();
+    const runtime = new SnowLumaRuntime({ docker, stateDirectory, fetcher });
+    await applyWebsockets(runtime);
+    expect(posts).toHaveLength(1);
+    expect(docker.execCalls.filter(args => args.includes("restart"))).toEqual([]);
+    // The apply path also fires a post-start reconcile; let it settle before simulating the loss.
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const baseline = posts.length;
+
+    // A recreated container starts from SnowLuma's defaults: the live file no longer has the entry.
+    await writeFile(configPath, JSON.stringify(seed, null, 2), "utf8");
+
+    // A fresh runtime instance proves the desired configuration is persisted, not just in memory.
+    const restarted = new SnowLumaRuntime({ docker, stateDirectory, fetcher });
+    expect(await restarted.reconcileOneBotConfiguration(baseCommand.endpointId)).toBe("applied");
+    expect(posts).toHaveLength(baseline + 1);
+    expect(posts.at(-1)?.networks?.wsServers?.[0]?.name).toBe("ws-default");
+    // The WebUI API path never restarts the supervisor program, let alone the container.
+    expect(docker.execCalls.filter(args => args.includes("restart"))).toEqual([]);
+    expect(docker.started).toEqual([]);
+    expect(await restarted.reconcileOneBotConfiguration(baseCommand.endpointId)).toBe("unchanged");
+  });
+
+  it("waits for the QQ login to produce the OneBot file before reconciling", async () => {
+    const { docker, stateDirectory, configPath, fetcher } = await setup();
+    const runtime = new SnowLumaRuntime({ docker, stateDirectory, fetcher });
+    await applyWebsockets(runtime);
+    await rm(configPath);
+    const restarted = new SnowLumaRuntime({ docker, stateDirectory, fetcher });
+    expect(await restarted.reconcileOneBotConfiguration(baseCommand.endpointId)).toBe("pending");
+  });
+
+  it("does nothing when the console never configured websockets", async () => {
+    const { docker, stateDirectory, fetcher, posts } = await setup();
+    const runtime = new SnowLumaRuntime({ docker, stateDirectory, fetcher });
+    expect(await runtime.reconcileOneBotConfiguration(baseCommand.endpointId)).toBe("absent");
+    expect(docker.execCalls.filter(args => args.includes("restart"))).toEqual([]);
+    // A regression that POSTs an empty/default configuration would still return "absent".
+    expect(posts).toHaveLength(0);
   });
 });
 
