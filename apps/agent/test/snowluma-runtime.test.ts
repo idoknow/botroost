@@ -72,9 +72,11 @@ class RecordingDocker implements DockerClient {
   async stop(name: string) { this.stopped.push(name); }
   async restart(name: string) { this.restarted.push(name); }
   execCalls: string[][] = [];
+  /** Answers exec calls when a test needs the container's own view of the filesystem. */
+  execResponder?: (args: string[]) => string;
   async exec(_container: string, args: string[]) {
     this.execCalls.push(args);
-    return { stdout: "", stderr: "" };
+    return { stdout: this.execResponder?.(args) ?? "", stderr: "" };
   }
   async logs(container: string, options: { tail: number; sinceSeconds: number }) {
     this.logsRequests.push({ container, ...options });
@@ -138,10 +140,14 @@ describe("SnowLuma runtime", () => {
     expect(created.securityOpt).toEqual(["seccomp=unconfined"]);
     expect(created.shmBytes).toBe(1024 * 1024 * 1024);
     expect(created.labels["botroost.provider"]).toBe("snowluma");
-    expect(created.mounts).toEqual([
-      { type: "bind", source: expect.stringContaining(join("33333333-3333-4333-8333-333333333333", "qq")), target: "/app/.config" },
-      { type: "bind", source: expect.stringContaining(join("33333333-3333-4333-8333-333333333333", "config")), target: "/app/snowluma-data" },
+    // Every state directory is a bind of its own, and each lives under this endpoint's
+    // directory: nothing that carries state stays in the container's writable layer.
+    const sources = created.mounts.map(mount => mount.source);
+    expect(created.mounts.map(mount => mount.target)).toEqual([
+      "/app/.config", "/app/data", "/app/.pki", "/app/.local", "/app/snowluma-data",
     ]);
+    for (const source of sources) expect(source).toContain(baseCommand.endpointId);
+    expect(new Set(sources).size).toBe(sources.length);
     const ports = snowlumaLoginPorts(baseCommand.endpointId);
     expect(created.publishedPorts).toEqual([
       { hostPort: String(ports.novncPort), containerPort: "6081" },
@@ -696,13 +702,33 @@ describe("snowluma OneBot configuration reconcile", () => {
     expect(await restarted.reconcileOneBotConfiguration(baseCommand.endpointId)).toBe("pending");
   });
 
-  it("does nothing when the console never configured websockets", async () => {
+  it("records the live configuration as the baseline without touching the runtime", async () => {
     const { docker, stateDirectory, fetcher, posts } = await setup();
     const runtime = new SnowLumaRuntime({ docker, stateDirectory, fetcher });
-    expect(await runtime.reconcileOneBotConfiguration(baseCommand.endpointId)).toBe("absent");
-    expect(docker.execCalls.filter(args => args.includes("restart"))).toEqual([]);
-    // A regression that POSTs an empty/default configuration would still return "absent".
+    // Nothing was ever saved from the console: adopt what is running so the next restart has a
+    // baseline, but never POST or restart anything to do it.
+    expect(await runtime.reconcileOneBotConfiguration(baseCommand.endpointId)).toBe("unchanged");
     expect(posts).toHaveLength(0);
+    expect(docker.execCalls.filter(args => args.includes("restart"))).toEqual([]);
+    const stored = JSON.parse(await readFile(join(stateDirectory, "snowluma-onebot-desired.json"), "utf8")) as { endpointId: string }[];
+    expect(stored.map(entry => entry.endpointId)).toContain(baseCommand.endpointId);
+  });
+
+  it("reads the live file through the container when Docker keeps it out of the bind mounts", async () => {
+    const { docker, stateDirectory, configPath, fetcher, posts } = await setup();
+    const runtime = new SnowLumaRuntime({ docker, stateDirectory, fetcher });
+    await applyWebsockets(runtime);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    // The host has no copy of /app/data: only the container can see the live file.
+    await rm(configPath);
+    const live = { networks: { httpServers: [], httpClients: [], wsServers: [], wsClients: [] } };
+    docker.execResponder = args => args[0] === "sh" ? "onebot_212499575.json\n" : args[0] === "cat" ? JSON.stringify(live) : "";
+    const baseline = posts.length;
+    const restarted = new SnowLumaRuntime({ docker, stateDirectory, fetcher });
+    expect(await restarted.reconcileOneBotConfiguration(baseCommand.endpointId)).toBe("applied");
+    expect(posts).toHaveLength(baseline + 1);
+    expect(posts.at(-1)?.networks?.wsServers?.[0]?.name).toBe("ws-default");
+    expect(docker.execCalls.some(args => args[0] === "cat")).toBe(true);
   });
 });
 

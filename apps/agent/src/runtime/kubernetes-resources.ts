@@ -53,7 +53,10 @@ export function kubernetesResources(input: RuntimeSpec, profile: KubernetesProfi
   const resources = { requests: { cpu: `${input.resources.cpuMillis}m`, memory: `${input.resources.memoryMiB}Mi` }, limits: { cpu: `${input.resources.cpuMillis}m`, memory: `${input.resources.memoryMiB}Mi` } };
   // Storage prep must create every subPath the workload mounts; an unset subPath makes
   // the mount fail with no base directory, so derive the list instead of hardcoding.
-  const directories = [...new Set(input.volumes.map(volume => volume.name))].map(name => `mkdir -p /data/${name}`).join('\n        ');
+  // The init container usually runs as root; the protocol process does not. Create each subPath
+  // world-writable so the provider can write its state (login token, machine-id) into it.
+  const directories = [...new Set(input.volumes.map(volume => volume.name))]
+    .map(name => `mkdir -p /data/${name} && chmod 0777 /data/${name}`).join('\n        ');
   const containerSecurity: Record<string, unknown> = { allowPrivilegeEscalation: false };
   // Docker's --cap-add. Kubernetes grants the same capability through the container
   // security context; anything not requested stays out of the pod.

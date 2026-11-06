@@ -16,7 +16,7 @@ import {
 } from "@botroost/agent-protocol";
 import { applyProxyEnvironment } from "@botroost/agent-protocol";
 import { NapCatTrafficAccumulator } from "./traffic.js";
-import { SnowLumaRuntime, SNOWLUMA_IMAGE, SNOWLUMA_ARTIFACT } from "./snowluma-runtime.js";
+import { SnowLumaRuntime, SNOWLUMA_IMAGE, SNOWLUMA_ARTIFACT, SNOWLUMA_VOLUMES } from "./snowluma-runtime.js";
 import { LLBotRuntime } from "./llbot-runtime.js";
 import type { RuntimeDriver, RuntimeOwner, RuntimeSpec } from './runtime/types.js';
 import { resolveRuntimeBackend } from './runtime/config.js';
@@ -31,7 +31,7 @@ type JsonObject = { [key: string]: JsonValue };
 // Paths the protocol container sees its durable volumes at. Docker hands the provider host
 // directories to bind-mount; Kubernetes mounts subPaths of the endpoint's claim here, so the
 // provider must address these paths instead of host directories.
-const snowlumaContainerMounts = () => ({ qq: "/app/.config", config: "/app/snowluma-data" });
+const snowlumaContainerMounts = () => SNOWLUMA_VOLUMES;
 const llbotContainerMounts = () => ({ data: "/app/llbot/data" });
 /** Detects transient control-plane transport failures that should be retried via the command lease, not recorded as a failed outcome. */
 export function isTransientTransportError(error: unknown): boolean {
@@ -118,6 +118,9 @@ export interface DockerInspectResult {
    *  reach the runtime's UI ports without publishing them. */
   serviceHost?: string | null;
   labels: Record<string, string>;
+  /** Container paths the workload mounts from durable storage, when the driver can report them.
+   *  A runtime missing one of the expected paths has to be replaced, not just restarted. */
+  mountTargets?: string[];
   resources?: { cpuMillis: number; memoryMiB: number; memorySwapMiB: number };
   resourceLimits?: ResourceLimits;
   proxyEnvironment?: Record<string, string>;
@@ -207,6 +210,7 @@ export class DockerCliClient implements DockerClient {
         state: state?.Running ? "running" : "exited",
         ipAddress,
         labels: ((item.Config as Record<string, unknown> | undefined)?.Labels as Record<string, string> | undefined) ?? {},
+        mountTargets: ((item.Mounts as { Destination?: string }[] | undefined) ?? []).map(mount => String(mount.Destination ?? "")).filter(Boolean),
         proxyEnvironment: proxyEnvironmentFrom(((item.Config as Record<string, unknown> | undefined)?.Env as string[] | undefined) ?? []),
         resourceLimits: inspectedResourceLimits(hostConfig),
         resources: {
