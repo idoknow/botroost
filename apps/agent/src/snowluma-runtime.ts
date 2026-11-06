@@ -438,7 +438,6 @@ export class SnowLumaRuntime {
       // Kubernetes they are the in-container mount targets of the endpoint's PVC.
       const hostDirectory = (child: SnowlumaVolume) =>
         (this.containerMounts as Record<string, string>)[child] ?? this.hostEndpointDirectory(command.endpointId, child);
-      const hostQq = hostDirectory("qq");
       const hostConfig = hostDirectory("config");
       const storage = this.storage.for(name);
       const runtimeConfigPath = join(hostConfig, "config", "runtime.json");
