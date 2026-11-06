@@ -244,10 +244,15 @@ export class SnowLumaRuntime {
             const record = asJsonObject(value as JsonValue);
             const endpointId = typeof record.endpointId === "string" ? record.endpointId : "";
             if (!endpointIdPattern.test(endpointId)) continue;
+            const updatedAt = typeof record.updatedAt === "string" ? record.updatedAt : "";
+            const inMemory = this.oneBotDesired.get(endpointId);
+            // An apply can persist a newer state while this read is in flight; the file must not
+            // then replace it in memory.
+            if (inMemory && inMemory.updatedAt >= updatedAt) continue;
             this.oneBotDesired.set(endpointId, {
               wsClients: asJsonList(record.wsClients as JsonValue),
               wsServers: asJsonList(record.wsServers as JsonValue),
-              updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : "",
+              updatedAt,
             });
           }
           this.oneBotDesiredLoaded = true;
@@ -328,6 +333,9 @@ export class SnowLumaRuntime {
     this.assertAllowed(command);
     await onProgress({ phase: "inspecting-runtime", percent: 20, message: "Authorizing runtime command" });
     await this.loadCommands();
+    // The desired-state map has to be complete before an update or delete mutates it: persisting
+    // a partially loaded map silently drops every other endpoint's entry.
+    await this.loadOneBotDesired();
     const previousCommand = this.commands.get(command.endpointId);
     if (previousCommand && previousCommand.generation > command.generation) throw new Error("runtime generation fence rejected");
     const name = this.containerName(command.endpointId);
@@ -336,6 +344,9 @@ export class SnowLumaRuntime {
     const existing = await docker.inspect(name);
     if (existing && !this.ownsContainer(existing, command)) throw new Error("SnowLuma container is not owned by this endpoint");
     if (command.action === "delete") {
+      // Persist the deletion first: a crash after the runtime data is gone must not leave an
+      // entry that a later endpoint reusing the same id would restore from.
+      if (this.oneBotDesired.delete(command.endpointId)) await this.persistOneBotDesired();
       await onProgress({ phase: "removing-runtime", percent: 55, message: "Removing container and persisted runtime data" });
       // Explicit endpoint deletion is the only path allowed to discard durable state.
       if (existing) await docker.remove(name, { discardData: true, owner: { endpointId: command.endpointId, workspaceId: command.workspaceId, provider: "snowluma" } });
@@ -346,7 +357,6 @@ export class SnowLumaRuntime {
       await onProgress({ phase: "removing-runtime", percent: 78, message: "Finalizing agent runtime deletion" });
       this.commands.delete(command.endpointId);
       await this.persistCommands();
-      if (this.oneBotDesired.delete(command.endpointId)) await this.persistOneBotDesired();
       this.snapshotCache.delete(command.endpointId);
       // A recreated endpoint starts with a fresh provider, so an outage timer from the deleted
       // runtime must not make the new one report offline before its grace window has elapsed.
@@ -394,7 +404,9 @@ export class SnowLumaRuntime {
       if (credentials.webuiPassword && existing.ipAddress) {
         try {
           await onProgress({ phase: "applying-configuration", percent: 70, message: "Applying the configuration through the SnowLuma WebUI API" });
-          await this.applyOneBotConfigViaWebui(command.endpointId, existing.ipAddress, found.qq, credentials.webuiPassword, () => merged);
+          // Build from the config the API just read, not from the snapshot taken seconds ago:
+          // a concurrent SnowLuma change must not be reverted by this POST.
+          await this.applyOneBotConfigViaWebui(command.endpointId, existing.ipAddress, found.qq, credentials.webuiPassword, current => this.mapOneBotWebsockets(current, clients, servers));
           appliedVia = "webui";
         } catch (error) { console.error(`snowluma webui apply failed, falling back to file reload: ${safeError(error)}`); }
       }
@@ -404,6 +416,18 @@ export class SnowLumaRuntime {
         await onProgress({ phase: "applying-configuration", percent: 80, message: "Reloading the SnowLuma OneBot service" });
         // Restart only the OneBot service process; QQ keeps running so the login session survives.
         await docker.exec(name, ["supervisorctl", "restart", "snowluma"]);
+      }
+      // The applied config is the truth (SnowLuma may have filled in its own fields); remember
+      // exactly that, so a restart restores what is running now.
+      const applied = await this.findOneBotConfig(command.endpointId).catch(() => null);
+      if (applied) {
+        const appliedNetworks = asJsonObject(applied.config.networks);
+        this.oneBotDesired.set(command.endpointId, {
+          wsClients: asJsonList(appliedNetworks.wsClients),
+          wsServers: asJsonList(appliedNetworks.wsServers),
+          updatedAt: new Date().toISOString(),
+        });
+        await this.persistOneBotDesired();
       }
       this.snapshotCache.delete(command.endpointId);
       await onProgress({ phase: "probing-provider", percent: 90, message: "Verifying OneBot configuration" });
@@ -424,7 +448,11 @@ export class SnowLumaRuntime {
     const proxyEnvironment = applyProxyEnvironment(storedConfiguration.proxy ?? null);
     const resourceDrift = existing?.resources && (existing.resources.cpuMillis !== desiredResources.cpuMillis || existing.resources.memoryMiB !== desiredResources.memoryMiB || existing.resources.memorySwapMiB !== desiredResources.memorySwapMiB);
     const proxyDrift = existing !== null && ((proxyEnvironment?.HTTP_PROXY ?? null) !== (existing.proxyEnvironment?.HTTP_PROXY ?? null));
-    if (command.action !== "stop" && (!existing || existing.image !== SNOWLUMA_IMAGE || resourceDrift || proxyDrift)) {
+    // A runtime created before a volume was added keeps its state in the writable layer: it has
+    // to be replaced once, otherwise the new mount never appears and the state stays disposable.
+    const volumeDrift = existing !== null && (existing.mountTargets ?? []).length > 0
+      && Object.values(SNOWLUMA_VOLUMES).some(target => !(existing.mountTargets ?? []).includes(target));
+    if (command.action !== "stop" && (!existing || existing.image !== SNOWLUMA_IMAGE || resourceDrift || proxyDrift || volumeDrift)) {
       // The replacement image must be present (or proven pullable) before the old runtime is
       // given up: removing first would turn a registry outage into an unavailable endpoint
       // instead of a deferred replacement that retries on the next reconcile.
@@ -826,11 +854,33 @@ export class SnowLumaRuntime {
     this.executionQueue = task.catch(() => undefined);
     return task;
   }
+  /** Remember the configuration that is live right now, without touching the runtime. */
+  private async adoptOneBotConfiguration(endpointId: string): Promise<"unchanged" | "pending"> {
+    const found = await this.findOneBotConfig(endpointId).catch(error => {
+      console.error(`snowluma onebot baseline could not read the live configuration: ${safeError(error)}`);
+      return null;
+    });
+    if (!found) return "pending";
+    const networks = asJsonObject(found.config.networks);
+    this.oneBotDesired.set(endpointId, {
+      wsClients: asJsonList(networks.wsClients),
+      wsServers: asJsonList(networks.wsServers),
+      updatedAt: new Date().toISOString(),
+    });
+    await this.persistOneBotDesired();
+    return "unchanged";
+  }
   private async reconcileOneBotInner(
     endpointId: string,
     version: string | null,
   ): Promise<"applied" | "unchanged" | "pending" | "absent" | "stopped"> {
     const desired = this.oneBotDesired.get(endpointId);
+    if (!desired) {
+      // No remembered state yet (fresh agent, or an endpoint configured before this feature).
+      // Adopt what is running now as the baseline, so the next restart has something to restore
+      // instead of losing a configuration that only exists in the container's writable layer.
+      return this.adoptOneBotConfiguration(endpointId);
+    }
     if (!desired) return "absent";
     if (version !== null && desired.updatedAt !== version) return "pending";
     const name = this.containerName(endpointId);
@@ -849,12 +899,14 @@ export class SnowLumaRuntime {
       && stableJson(desired.wsServers) === stableJson(asJsonList(current.wsServers))) {
       return "unchanged";
     }
-    const merged: JsonObject = { ...found.config, networks: { ...current, wsClients: desired.wsClients, wsServers: desired.wsServers } };
     let applied = false;
     const credentials = await this.webuiCredentials(endpointId);
     if (credentials.webuiPassword && inspected.ipAddress) {
       try {
-        await this.applyOneBotConfigViaWebui(endpointId, inspected.ipAddress, found.qq, credentials.webuiPassword, () => merged);
+        await this.applyOneBotConfigViaWebui(endpointId, inspected.ipAddress, found.qq, credentials.webuiPassword, latest => ({
+          ...latest,
+          networks: { ...asJsonObject(latest.networks), wsClients: desired.wsClients, wsServers: desired.wsServers },
+        }));
         applied = true;
         console.error(`snowluma onebot configuration restored through the WebUI API for ${endpointId}`);
       } catch (error) {

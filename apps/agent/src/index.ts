@@ -118,6 +118,9 @@ export interface DockerInspectResult {
    *  reach the runtime's UI ports without publishing them. */
   serviceHost?: string | null;
   labels: Record<string, string>;
+  /** Container paths the workload mounts from durable storage, when the driver can report them.
+   *  A runtime missing one of the expected paths has to be replaced, not just restarted. */
+  mountTargets?: string[];
   resources?: { cpuMillis: number; memoryMiB: number; memorySwapMiB: number };
   resourceLimits?: ResourceLimits;
   proxyEnvironment?: Record<string, string>;
@@ -207,6 +210,7 @@ export class DockerCliClient implements DockerClient {
         state: state?.Running ? "running" : "exited",
         ipAddress,
         labels: ((item.Config as Record<string, unknown> | undefined)?.Labels as Record<string, string> | undefined) ?? {},
+        mountTargets: ((item.Mounts as { Destination?: string }[] | undefined) ?? []).map(mount => String(mount.Destination ?? "")).filter(Boolean),
         proxyEnvironment: proxyEnvironmentFrom(((item.Config as Record<string, unknown> | undefined)?.Env as string[] | undefined) ?? []),
         resourceLimits: inspectedResourceLimits(hostConfig),
         resources: {

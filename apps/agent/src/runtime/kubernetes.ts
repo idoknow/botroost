@@ -106,11 +106,12 @@ export class KubernetesRuntimeDriver implements RuntimeDriver {
     }
     const service = await this.read('Service', name) as (ObjectState & { spec?: { clusterIP?: string } }) | null;
     const clusterIP = service?.spec?.clusterIP && service.spec.clusterIP !== 'None' ? service.spec.clusterIP : undefined;
-    const template = (workload as { spec: { template: { spec: { containers: { image: string; resources?: { limits?: Record<string, string>; requests?: Record<string, string> }; envFrom?: { secretRef?: { name?: string } }[] }[] } } } }).spec.template.spec;
+    const template = (workload as { spec: { template: { spec: { containers: { image: string; resources?: { limits?: Record<string, string>; requests?: Record<string, string> }; envFrom?: { secretRef?: { name?: string } }[]; volumeMounts?: { mountPath: string }[] }[] } } } }).spec.template.spec;
     const container = template.containers[0]!;
     const running = workload.spec.replicas === 1 && !pod?.metadata?.deletionTimestamp && !!pod?.status?.containerStatuses?.some(c => c.name === 'protocol' && c.state?.running);
     const envSecret = container.envFrom?.find(source => source.secretRef?.name)?.secretRef?.name;
     return { id: pod?.metadata?.uid ?? workload.metadata!.uid!, name, image: container.image,
+      mountTargets: (container.volumeMounts ?? []).map(mount => mount.mountPath).filter(Boolean),
       state: running ? 'running' : workload.spec.replicas === 0 ? 'exited' : 'created',
       // The pod IP is what providers dial from the agent: it needs no cluster DNS, which a
       // cluster without CoreDNS cannot resolve.
